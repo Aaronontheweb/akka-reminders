@@ -28,7 +28,7 @@ internal sealed class ReminderClient : IReminderClient
         object message,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleSingleReminder(Entity, key, when, message);
+        var command = new ReminderProtocol.ScheduleSingleReminder(Entity, key, when, message, RepeatInterval: null);
 
         try
         {
@@ -58,6 +58,45 @@ internal sealed class ReminderClient : IReminderClient
                 when,
                 ReminderScheduleResponseCode.Error,
                 $"Error scheduling reminder: {ex.Message}");
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync(
+        ReminderKey key,
+        DateTimeOffset firstOccurrence,
+        TimeSpan interval,
+        object message,
+        CancellationToken ct = default)
+    {
+        var command = new ReminderProtocol.ScheduleSingleReminder(Entity, key, firstOccurrence, message, RepeatInterval: interval);
+
+        try
+        {
+            var response = await _schedulerProxy.Ask<ReminderProtocol.ReminderScheduled>(
+                command,
+                _defaultTimeout,
+                ct);
+
+            return response;
+        }
+        catch (AskTimeoutException)
+        {
+            return new ReminderProtocol.ReminderScheduled(
+                Entity,
+                key,
+                firstOccurrence,
+                ReminderScheduleResponseCode.Error,
+                "Request timed out while communicating with reminder scheduler");
+        }
+        catch (Exception ex)
+        {
+            return new ReminderProtocol.ReminderScheduled(
+                Entity,
+                key,
+                firstOccurrence,
+                ReminderScheduleResponseCode.Error,
+                $"Error scheduling recurring reminder: {ex.Message}");
         }
     }
 
