@@ -63,7 +63,14 @@ public enum ReminderScheduleResponseCode
 
 public static class ReminderProtocol
 {
-    public sealed record ScheduleSingleReminder(ReminderEntity Entity, ReminderKey Key, DateTimeOffset When, object Message) : IReminderCommand;
+    public sealed record ScheduleSingleReminder(
+        ReminderEntity Entity,
+        ReminderKey Key,
+        DateTimeOffset When,
+        object Message) : IReminderCommand
+    {
+        public ScheduledReminder ToScheduledReminder() => new(Entity, Key, When, Message);
+    }
     public sealed record CancelReminder(ReminderEntity Entity, ReminderKey Key) : IReminderCommand;
     public sealed record CancelAllReminders(ReminderEntity Entity) : IReminderCommand;
     
