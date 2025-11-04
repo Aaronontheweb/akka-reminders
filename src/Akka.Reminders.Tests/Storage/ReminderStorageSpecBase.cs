@@ -367,7 +367,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     public async Task GetRemindersOverview_ShouldReturnZero_WhenNoRemindersExist()
     {
         // Act
-        var overview = await Storage!.GetRemindersOverviewAsync();
+        var overview = await Storage!.GetRemindersOverviewAsync(DateTimeOffset.UtcNow);
 
         // Assert
         Assert.Equal(0, overview.TotalPendingReminders);
@@ -387,7 +387,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         }
 
         // Act
-        var overview = await Storage!.GetRemindersOverviewAsync();
+        var overview = await Storage!.GetRemindersOverviewAsync(DateTimeOffset.UtcNow);
 
         // Assert
         Assert.Equal(5, overview.TotalPendingReminders);
@@ -405,7 +405,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("type2", "id2"), when: nearFuture));
 
         // Act
-        var overview = await Storage.GetRemindersOverviewAsync();
+        var overview = await Storage.GetRemindersOverviewAsync(DateTimeOffset.UtcNow);
 
         // Assert
         Assert.True(overview.TimeUntilNext <= TimeSpan.FromMinutes(6));
@@ -424,7 +424,8 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage!.ScheduleReminderAsync(CreateTestReminder(when: futureTime));
 
         // Act
-        var result = await Storage.GetNextRemindersAsync(DateTimeOffset.UtcNow);
+        var now = DateTimeOffset.UtcNow;
+        var result = await Storage.GetNextRemindersAsync(now, now);
 
         // Assert
         Assert.Empty(result.Reminders);
@@ -445,7 +446,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("t3", "i3"), when: farFuture));
 
         // Act - get reminders due up until nearFuture
-        var result = await Storage.GetNextRemindersAsync(nearFuture);
+        var result = await Storage.GetNextRemindersAsync(nearFuture, nearFuture);
 
         // Assert
         Assert.Equal(2, result.Reminders.Count); // past and nearFuture
@@ -461,7 +462,8 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("t2", "i2"), when: now.AddMinutes(10)));
 
         // Act
-        var result = await Storage.GetNextRemindersAsync(now.AddMinutes(5));
+        var deadline = now.AddMinutes(5);
+        var result = await Storage.GetNextRemindersAsync(deadline, deadline);
 
         // Assert
         Assert.Single(result.Reminders);
@@ -500,7 +502,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
 
         // Act
-        var overview = await Storage.GetRemindersOverviewAsync();
+        var overview = await Storage.GetRemindersOverviewAsync(DateTimeOffset.UtcNow);
 
         // Assert
         Assert.Equal(0, overview.TotalPendingReminders);
@@ -525,7 +527,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
 
         // Assert
         Assert.True(result);
-        var overview = await Storage.GetRemindersOverviewAsync();
+        var overview = await Storage.GetRemindersOverviewAsync(DateTimeOffset.UtcNow);
         Assert.Equal(0, overview.TotalPendingReminders);
     }
 

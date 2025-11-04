@@ -50,11 +50,12 @@ public sealed record ReminderSettings
 internal sealed class ReminderScheduler : UntypedActor, IWithTimers
 {
     public ReminderScheduler(ReminderSettings settings, IShardRegionResolver shardRegionResolver,
-        IReminderStorage storage)
+        IReminderStorage storage, ITimeProvider timeProvider)
     {
         Settings = settings;
         ShardRegionResolver = shardRegionResolver;
         Storage = storage;
+        TimeProvider = timeProvider;
     }
 
     public ReminderSettings Settings { get; }
@@ -62,6 +63,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
     public IShardRegionResolver ShardRegionResolver { get; }
 
     public IReminderStorage Storage { get; }
+
+    public ITimeProvider TimeProvider { get; }
 
     /// <summary>
     /// State of pending reminders - gets loaded upon startup and updated as reminders are scheduled.
@@ -142,7 +145,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
             case FetchReminders:
             {
                 // process reminders
-                RunTask(() => ProcessReminders(DateTimeOffset.UtcNow + Settings.MaxSlippage));
+                RunTask(() => ProcessReminders(TimeProvider.Now + Settings.MaxSlippage));
                 break;
             }
             case ReminderProtocol.ScheduleSingleReminder scheduleSingle:
@@ -159,7 +162,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
                         if (shardRegion is null)
                         {
                             Sender.Tell(new ReminderProtocol.ReminderScheduled(reminder.Entity, reminder.Key,
-                                DateTimeOffset.UtcNow, ReminderScheduleResponseCode.ShardRegionNotFound,
+                                TimeProvider.Now, ReminderScheduleResponseCode.ShardRegionNotFound,
                                 $"ShardRegion [{reminder.Entity.ShardRegionName}] not found"));
                             return;
                         }
@@ -186,7 +189,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
                     {
                         _log.Error(ex, "Failed to schedule reminder {0}", scheduleSingle);
                         Sender.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle.Entity, scheduleSingle.Key,
-                            DateTimeOffset.UtcNow, ReminderScheduleResponseCode.Error, ex.Message));
+                            TimeProvider.Now, ReminderScheduleResponseCode.Error, ex.Message));
                     }
                 });
                 break;
@@ -256,7 +259,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
                         // TODO: add skip / take support
                         var queryResult = Storage.GetRemindersForEntityAsync(getReminders.Entity, ct:cts.Token);
                         var reminders = await queryResult;
-                        Sender.Tell(reminders);
+                        Sender.Tell(new ReminderProtocol.RemindersForEntity(
+                            getReminders.Entity,
+                            FetchRemindersResponseCode.Success,
+                            reminders));
                     }
                     catch (Exception ex)
                     {
@@ -283,14 +289,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
     private Task LoadReminderOverview()
     {
         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-        var reminders = Storage.GetRemindersOverviewAsync(cts.Token);
+        var reminders = Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
         return reminders.PipeTo(Self, success: overview => overview, failure: ex => new Status.Failure(ex));
     }
 
     private async Task ProcessReminders(DateTimeOffset untilDeadline)
     {
         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-        var reminders = await Storage.GetNextRemindersAsync(untilDeadline, cts.Token);
+        var reminders = await Storage.GetNextRemindersAsync(untilDeadline, TimeProvider.Now, cts.Token);
         _log.Info("Fetched {0} due reminders", reminders.Reminders.Count);
 
         var completedReminders = new List<CompletedReminder>();
@@ -313,7 +319,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
                     var backoffSeconds = Settings.RetryBackoffBase.TotalSeconds * Math.Pow(2, reminder.AttemptCount);
                     var retryReminder = reminder with
                     {
-                        When = DateTimeOffset.UtcNow.Add(TimeSpan.FromSeconds(backoffSeconds)),
+                        When = TimeProvider.Now.Add(TimeSpan.FromSeconds(backoffSeconds)),
                         AttemptCount = reminder.AttemptCount + 1,
                         LastFailureReason = $"ShardRegion [{reminder.Entity.ShardRegionName}] not found"
                     };
@@ -325,21 +331,21 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
                     // Max retries exceeded - mark as permanently failed
                     _log.Error("Reminder {0} exceeded max delivery attempts ({1}). Marking as permanently failed.",
                         reminder.Key, Settings.MaxDeliveryAttempts);
-                    permanentlyFailedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, DateTimeOffset.UtcNow));
+                    permanentlyFailedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now));
                 }
             }
             else
             {
                 _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
                 shardRegion.Tell(reminder.Message);
-                completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, DateTimeOffset.UtcNow));
+                completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now));
 
                 // Handle recurring reminders - schedule next occurrence
                 if (reminder.RepeatInterval.HasValue)
                 {
                     var nextOccurrence = reminder with
                     {
-                        When = DateTimeOffset.UtcNow.Add(reminder.RepeatInterval.Value),
+                        When = TimeProvider.Now.Add(reminder.RepeatInterval.Value),
                         AttemptCount = 0, // Reset attempt count for new occurrence
                         LastFailureReason = null
                     };
@@ -367,7 +373,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
         }
 
         // Reload overview to account for retries and recurring reminders
-        PendingReminders = await Storage.GetRemindersOverviewAsync(cts.Token);
+        PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
 
         _log.Info(
             "Successfully delivered [{0}] reminders; scheduled [{1}] recurring reminders; retrying [{2}] failed reminders; permanently failed [{3}] reminders. Next reminder due: {4}",
