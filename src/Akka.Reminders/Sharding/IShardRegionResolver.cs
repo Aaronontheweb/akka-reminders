@@ -19,21 +19,26 @@ public interface IShardRegionResolver
 /// </summary>
 public sealed class DefaultShardRegionResolver : IShardRegionResolver
 {
-    private readonly ClusterSharding _sharding;
+    private readonly ActorSystem _system;
+    private ClusterSharding? _sharding;
 
-    public DefaultShardRegionResolver(ClusterSharding sharding)
+    public DefaultShardRegionResolver(ActorSystem system)
     {
-        _sharding = sharding;
+        _system = system;
     }
 
     public IActorRef? TryResolve(ReminderEntity entity)
     {
+        // Lazy initialization - defer getting ClusterSharding until first use
+        // This allows sharding to be fully initialized before we try to resolve regions
+        _sharding ??= ClusterSharding.Get(_system);
+
         if (_sharding.ShardTypeNames.Contains(entity.ShardRegionName))
         {
             return _sharding.ShardRegion(entity.ShardRegionName);
         }
-        
-        return null;       
+
+        return null;
     }
 }
 

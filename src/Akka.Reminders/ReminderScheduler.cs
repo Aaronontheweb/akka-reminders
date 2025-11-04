@@ -5,11 +5,9 @@ using Akka.Reminders.Storage;
 namespace Akka.Reminders;
 
 /// <summary>
-/// INTERNAL API
-///
-/// Needed by the <see cref="ReminderScheduler"/> to schedule reminders.
+/// Settings needed by the <see cref="ReminderScheduler"/> to schedule reminders.
 /// </summary>
-internal sealed record ReminderSettings
+public sealed record ReminderSettings
 {
     /// <summary>
     /// If we're grabbing reminders that are due before or upuntil DateTime.UtcNow,
