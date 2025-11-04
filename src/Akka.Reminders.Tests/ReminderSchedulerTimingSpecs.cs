@@ -162,6 +162,11 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("test-region", "entity-1");
 
+        // Wait for scheduler to be initialized by sending a benign query
+        // and verifying we get a proper response (not dead letter)
+        var initCheck = await client.ListRemindersAsync();
+        Assert.Equal(FetchRemindersResponseCode.Success, initCheck.ResponseCode);
+
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var now = testScheduler.Now;
         var interval = TimeSpan.FromSeconds(5);
@@ -183,13 +188,11 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal("recurring message", msg1);
         Output?.WriteLine($"Received first recurring message");
 
-        // Wait for the recurring reminder to be rescheduled by polling storage
-        await AwaitAssertAsync(async () =>
-        {
-            var list = await client.ListRemindersAsync();
-            Assert.Single(list.Reminders);
-            Output?.WriteLine($"Next reminder scheduled for: {list.Reminders[0].When}");
-        }, TimeSpan.FromSeconds(3));
+        // Allow async processing to complete, then verify deterministically
+        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
+        var list1 = await client.ListRemindersAsync();
+        Assert.Single(list1.Reminders);
+        Output?.WriteLine($"Next reminder scheduled for: {list1.Reminders[0].When}");
 
         // Verify second occurrence
         Output?.WriteLine($"Before second advance - TestScheduler.Now: {testScheduler.Now}");
@@ -198,12 +201,10 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var msg2 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
         Assert.Equal("recurring message", msg2);
 
-        // Wait for the next recurring reminder to be rescheduled
-        await AwaitAssertAsync(async () =>
-        {
-            var list = await client.ListRemindersAsync();
-            Assert.Single(list.Reminders);
-        }, TimeSpan.FromSeconds(3));
+        // Allow async processing to complete
+        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
+        var list2 = await client.ListRemindersAsync();
+        Assert.Single(list2.Reminders);
 
         // Verify third occurrence
         testScheduler.Advance(interval);
