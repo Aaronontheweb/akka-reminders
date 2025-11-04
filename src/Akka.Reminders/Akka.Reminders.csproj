@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <Description>Durable, re-entrant reminders system for Akka.Cluster.Sharding.</Description>
+        <PackageTags>akka;akkadotnet;akka.cluster.sharding;akka.reminders;akka-reminders;</PackageTags>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <PackageReference Include="Akka.Cluster.Hosting" />
+    </ItemGroup>
+
+</Project>
