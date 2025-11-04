@@ -36,18 +36,9 @@ public enum ReminderScheduleResponseCode
 {
     /// <summary>
     /// Scheduled a new reminder for the entity with the given key.
+    /// If a reminder with the same key already existed, it was overwritten.
     /// </summary>
     Success = 0,
-
-    /// <summary>
-    /// Reminder already exists for the given entity, key, time, and message.
-    /// </summary>
-    NoOp = 1,
-
-    /// <summary>
-    /// Reminder already exists for the given entity and key, but the values are different.
-    /// </summary>
-    Conflict = 2,
 
     /// <summary>
     /// The entity type was not found.
@@ -55,12 +46,12 @@ public enum ReminderScheduleResponseCode
     /// <remarks>
     /// Means the ShardRegion for the entity type was not found and thus this is likely a configuration error.
     /// </remarks>
-    ShardRegionNotFound = 3,
+    ShardRegionNotFound = 1,
 
     /// <summary>
     /// An error occurred while attempting to schedule the reminder.
     /// </summary>
-    Error = 4,
+    Error = 2,
 }
 
 public enum FetchRemindersResponseCode
@@ -76,9 +67,10 @@ public static class ReminderProtocol
         ReminderEntity Entity,
         ReminderKey Key,
         DateTimeOffset When,
-        object Message) : IReminderCommand
+        object Message,
+        TimeSpan? RepeatInterval = null) : IReminderCommand
     {
-        public ScheduledReminder ToScheduledReminder() => new(Entity, Key, When, Message);
+        public ScheduledReminder ToScheduledReminder() => new(Entity, Key, When, Message, RepeatInterval);
     }
 
     public sealed record CancelReminder(ReminderEntity Entity, ReminderKey Key) : IReminderCommand;
@@ -134,4 +126,14 @@ public readonly record struct ReminderEntity(string ShardRegionName, string Enti
 /// This will be serialized using the configured binary serialization available
 /// for this type in Akka.NET and stored using the (serializerId, manifest) scheme that
 /// Akka.Persistence also uses.</param>
-public sealed record ScheduledReminder(ReminderEntity Entity, ReminderKey Key, DateTimeOffset When, object Message);
+/// <param name="RepeatInterval">If specified, this reminder will automatically reschedule itself after firing by creating a new entry with When = UtcNow + RepeatInterval. Null means one-time reminder.</param>
+/// <param name="AttemptCount">Number of delivery attempts made for this reminder. Starts at 0, increments on each retry.</param>
+/// <param name="LastFailureReason">If the previous delivery attempt failed, contains the reason. Null if no failures or first attempt.</param>
+public sealed record ScheduledReminder(
+    ReminderEntity Entity,
+    ReminderKey Key,
+    DateTimeOffset When,
+    object Message,
+    TimeSpan? RepeatInterval = null,
+    int AttemptCount = 0,
+    string? LastFailureReason = null);

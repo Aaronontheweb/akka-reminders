@@ -80,21 +80,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ScheduleReminder_ShouldReturnNoOp_WhenIdenticalReminderExists()
-    {
-        // Arrange
-        var reminder = CreateTestReminder();
-        await Storage!.ScheduleReminderAsync(reminder);
-
-        // Act - schedule the exact same reminder again
-        var result = await Storage.ScheduleReminderAsync(reminder);
-
-        // Assert
-        Assert.Equal(ReminderScheduleResponseCode.NoOp, result.ResponseCode);
-    }
-
-    [Fact]
-    public async Task ScheduleReminder_ShouldReturnConflict_WhenDifferentReminderWithSameKeyExists()
+    public async Task ScheduleReminder_ShouldOverwrite_WhenReminderWithSameKeyExists()
     {
         // Arrange
         var entity = CreateTestEntity();
@@ -104,11 +90,17 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
 
         await Storage!.ScheduleReminderAsync(reminder1);
 
-        // Act - schedule different reminder with same entity and key
+        // Act - schedule different reminder with same entity and key (should overwrite)
         var result = await Storage.ScheduleReminderAsync(reminder2);
 
         // Assert
-        Assert.Equal(ReminderScheduleResponseCode.Conflict, result.ResponseCode);
+        Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
+
+        // Verify only the new reminder exists
+        var reminders = await Storage.GetRemindersForEntityAsync(entity);
+        Assert.Single(reminders);
+        Assert.Equal(reminder2.When, reminders[0].When);
+        Assert.Equal("message2", reminders[0].Message);
     }
 
     [Fact]
@@ -126,6 +118,59 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         // Assert
         Assert.Equal(ReminderScheduleResponseCode.Success, result1.ResponseCode);
         Assert.Equal(ReminderScheduleResponseCode.Success, result2.ResponseCode);
+    }
+
+    [Fact]
+    public async Task ScheduleReminder_ShouldSupportRecurringReminders()
+    {
+        // Arrange
+        var entity = CreateTestEntity();
+        var key = CreateTestKey("recurring-reminder");
+        var recurringReminder = new ScheduledReminder(
+            entity,
+            key,
+            DateTimeOffset.UtcNow.AddMinutes(5),
+            "test message",
+            RepeatInterval: TimeSpan.FromHours(1));
+
+        // Act
+        var result = await Storage!.ScheduleReminderAsync(recurringReminder);
+
+        // Assert
+        Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
+
+        // Verify the recurring reminder was stored with repeat interval
+        var reminders = await Storage.GetRemindersForEntityAsync(entity);
+        Assert.Single(reminders);
+        Assert.Equal(TimeSpan.FromHours(1), reminders[0].RepeatInterval);
+    }
+
+    [Fact]
+    public async Task ScheduleReminder_ShouldTrackRetryAttempts()
+    {
+        // Arrange
+        var entity = CreateTestEntity();
+        var key = CreateTestKey("retry-reminder");
+        var reminderWithRetry = new ScheduledReminder(
+            entity,
+            key,
+            DateTimeOffset.UtcNow.AddMinutes(5),
+            "test message",
+            RepeatInterval: null,
+            AttemptCount: 2,
+            LastFailureReason: "ShardRegion not found");
+
+        // Act
+        var result = await Storage!.ScheduleReminderAsync(reminderWithRetry);
+
+        // Assert
+        Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
+
+        // Verify retry tracking was preserved
+        var reminders = await Storage.GetRemindersForEntityAsync(entity);
+        Assert.Single(reminders);
+        Assert.Equal(2, reminders[0].AttemptCount);
+        Assert.Equal("ShardRegion not found", reminders[0].LastFailureReason);
     }
 
     #endregion

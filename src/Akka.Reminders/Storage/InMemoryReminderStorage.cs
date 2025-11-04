@@ -21,28 +21,9 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     {
         var key = (reminder.Entity, reminder.Key);
 
-        // Check if identical reminder already exists
-        if (_pendingReminders.TryGetValue(key, out var existing))
-        {
-            if (existing.When == reminder.When && Equals(existing.Message, reminder.Message))
-            {
-                return Task.FromResult(new ReminderProtocol.ReminderScheduled(
-                    reminder.Entity,
-                    reminder.Key,
-                    reminder.When,
-                    ReminderScheduleResponseCode.NoOp));
-            }
-
-            // Different reminder with same key exists - conflict
-            return Task.FromResult(new ReminderProtocol.ReminderScheduled(
-                reminder.Entity,
-                reminder.Key,
-                reminder.When,
-                ReminderScheduleResponseCode.Conflict));
-        }
-
-        // Add new reminder
+        // Always upsert - overwrite any existing reminder with the same key
         _pendingReminders[key] = reminder;
+
         return Task.FromResult(new ReminderProtocol.ReminderScheduled(
             reminder.Entity,
             reminder.Key,

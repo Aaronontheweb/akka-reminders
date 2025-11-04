@@ -29,6 +29,17 @@ public sealed record ReminderSettings
     /// How long to keep completed / canceled / failed reminders around.
     /// </summary>
     public TimeSpan PruneOlderThan { get; init; } = TimeSpan.FromDays(12);
+
+    /// <summary>
+    /// Maximum number of delivery attempts before a reminder is marked as permanently failed.
+    /// </summary>
+    public int MaxDeliveryAttempts { get; init; } = 3;
+
+    /// <summary>
+    /// Base delay for exponential backoff when retrying failed reminders.
+    /// Actual delay = RetryBackoffBase * (2 ^ attemptCount)
+    /// </summary>
+    public TimeSpan RetryBackoffBase { get; init; } = TimeSpan.FromSeconds(30);
 }
 
 /// <summary>
@@ -283,31 +294,86 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
         _log.Info("Fetched {0} due reminders", reminders.Reminders.Count);
 
         var completedReminders = new List<CompletedReminder>();
-        var failedReminders = new List<CompletedReminder>();
+        var recurringRemindersToSchedule = new List<ScheduledReminder>();
+        var failedRemindersToRetry = new List<ScheduledReminder>();
+        var permanentlyFailedReminders = new List<CompletedReminder>();
+
         foreach (var reminder in reminders.Reminders)
         {
             var shardRegion = ShardRegionResolver.TryResolve(reminder.Entity);
             if (shardRegion is null)
             {
-                _log.Warning("Reminder {0} could not be resolved to a ShardRegion", reminder);
-                // TODO: maybe we should indicate that this job failed? or re-schedule it?
-                failedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, DateTimeOffset.UtcNow));
+                _log.Warning("Reminder {0} could not be resolved to a ShardRegion. Attempt {1} of {2}",
+                    reminder, reminder.AttemptCount + 1, Settings.MaxDeliveryAttempts);
+
+                // Check if we should retry
+                if (reminder.AttemptCount + 1 < Settings.MaxDeliveryAttempts)
+                {
+                    // Schedule retry with exponential backoff
+                    var backoffSeconds = Settings.RetryBackoffBase.TotalSeconds * Math.Pow(2, reminder.AttemptCount);
+                    var retryReminder = reminder with
+                    {
+                        When = DateTimeOffset.UtcNow.Add(TimeSpan.FromSeconds(backoffSeconds)),
+                        AttemptCount = reminder.AttemptCount + 1,
+                        LastFailureReason = $"ShardRegion [{reminder.Entity.ShardRegionName}] not found"
+                    };
+                    failedRemindersToRetry.Add(retryReminder);
+                    _log.Info("Scheduling retry for reminder {0} at {1}", reminder.Key, retryReminder.When);
+                }
+                else
+                {
+                    // Max retries exceeded - mark as permanently failed
+                    _log.Error("Reminder {0} exceeded max delivery attempts ({1}). Marking as permanently failed.",
+                        reminder.Key, Settings.MaxDeliveryAttempts);
+                    permanentlyFailedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, DateTimeOffset.UtcNow));
+                }
             }
             else
             {
                 _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
-                shardRegion.Tell(reminder);
+                shardRegion.Tell(reminder.Message);
                 completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, DateTimeOffset.UtcNow));
+
+                // Handle recurring reminders - schedule next occurrence
+                if (reminder.RepeatInterval.HasValue)
+                {
+                    var nextOccurrence = reminder with
+                    {
+                        When = DateTimeOffset.UtcNow.Add(reminder.RepeatInterval.Value),
+                        AttemptCount = 0, // Reset attempt count for new occurrence
+                        LastFailureReason = null
+                    };
+                    recurringRemindersToSchedule.Add(nextOccurrence);
+                    _log.Info("Scheduling next occurrence of recurring reminder {0} at {1}",
+                        reminder.Key, nextOccurrence.When);
+                }
             }
         }
 
-        await Storage.MarkRemindersAsCompletedAsync(completedReminders, cts.Token);
-        // TODO: need some mechanism for retrying failed reminders up to N times until we discard.
-        // TODO: will also need to compute pending reminder schedule again if we retry
+        // Mark completed and permanently failed reminders
+        var allCompleted = completedReminders.Concat(permanentlyFailedReminders);
+        await Storage.MarkRemindersAsCompletedAsync(allCompleted, cts.Token);
 
-        PendingReminders = reminders.NextOverview;
-        _log.Info("Successfully delivered [{0}] reminders; failed to deliver [{1}] reminders. Next reminder due: {2}",
-            completedReminders.Count, failedReminders.Count, PendingReminders.TimeUntilNext);
+        // Schedule retries for failed reminders
+        foreach (var retryReminder in failedRemindersToRetry)
+        {
+            await Storage.ScheduleReminderAsync(retryReminder, cts.Token);
+        }
+
+        // Schedule next occurrences for recurring reminders
+        foreach (var recurringReminder in recurringRemindersToSchedule)
+        {
+            await Storage.ScheduleReminderAsync(recurringReminder, cts.Token);
+        }
+
+        // Reload overview to account for retries and recurring reminders
+        PendingReminders = await Storage.GetRemindersOverviewAsync(cts.Token);
+
+        _log.Info(
+            "Successfully delivered [{0}] reminders; scheduled [{1}] recurring reminders; retrying [{2}] failed reminders; permanently failed [{3}] reminders. Next reminder due: {4}",
+            completedReminders.Count, recurringRemindersToSchedule.Count, failedRemindersToRetry.Count,
+            permanentlyFailedReminders.Count, PendingReminders.TimeUntilNext);
+
         TryScheduleFetchReminders();
     }
 
