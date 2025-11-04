@@ -9,6 +9,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Akka.Cluster" />
+    <PackageReference Include="Akka.Cluster.Hosting" />
     <PackageReference Include="Akka.Hosting.TestKit" />
     <PackageReference Include="coverlet.collector" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />

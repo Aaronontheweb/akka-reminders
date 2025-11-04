@@ -79,6 +79,9 @@ public static class AkkaHostingExtensions
 
             // Register the proxy in the actor registry for easy access
             registry.Register<ReminderSchedulerProxy>(proxy);
+
+            // Initialize the reminder client extension so it's ready to use
+            system.WithExtension<ReminderClientExtension, ReminderClientProvider>();
         });
 
         return builder;
