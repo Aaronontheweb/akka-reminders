@@ -104,7 +104,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     }
 
     /// <inheritdoc />
-    public Task<ReminderOverview> GetRemindersOverviewAsync(CancellationToken ct = default)
+    public Task<ReminderOverview> GetRemindersOverviewAsync(DateTimeOffset now, CancellationToken ct = default)
     {
         var count = _pendingReminders.Count;
 
@@ -117,7 +117,6 @@ public sealed class InMemoryReminderStorage : IReminderStorage
             });
         }
 
-        var now = DateTimeOffset.UtcNow;
         var nextReminder = _pendingReminders.Values
             .OrderBy(r => r.When)
             .FirstOrDefault();
@@ -136,6 +135,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     /// <inheritdoc />
     public Task<PendingRemindersWithSummary> GetNextRemindersAsync(
         DateTimeOffset untilDeadline,
+        DateTimeOffset now,
         CancellationToken ct = default)
     {
         var dueReminders = _pendingReminders
@@ -157,7 +157,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
 
             if (nextReminder != null)
             {
-                timeUntilNext = nextReminder.When - DateTimeOffset.UtcNow;
+                timeUntilNext = nextReminder.When - now;
             }
         }
 

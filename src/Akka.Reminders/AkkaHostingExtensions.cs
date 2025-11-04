@@ -57,7 +57,7 @@ public static class AkkaHostingExtensions
 
             // Create and start the singleton manager as a /system actor
             var singletonProps = ClusterSingletonManager.Props(
-                singletonProps: Props.Create(() => new ReminderScheduler(setup.Settings, resolver, storage)),
+                singletonProps: Props.Create(() => new ReminderScheduler(setup.Settings, resolver, storage, system.Scheduler)),
                 terminationMessage: PoisonPill.Instance,
                 settings: singletonSettings);
 

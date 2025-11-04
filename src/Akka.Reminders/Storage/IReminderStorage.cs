@@ -12,11 +12,11 @@ public sealed record ReminderOverview
     /// </summary>
     public long TotalPendingReminders { get; init; } = 0;
 
-    public (ReminderOverview newOverview, bool hasNewerDate) Apply(ScheduledReminder newReminder)
+    public (ReminderOverview newOverview, bool hasNewerDate) Apply(ScheduledReminder newReminder, DateTimeOffset now)
     {
-        var newTimespan = newReminder.When - DateTimeOffset.UtcNow;
+        var newTimespan = newReminder.When - now;
         var hasNewerDate = newTimespan <= TimeUntilNext;
-        
+
         return (new ReminderOverview
         {
             TimeUntilNext = hasNewerDate ? newTimespan : TimeUntilNext,
@@ -53,9 +53,17 @@ public interface IReminderStorage
     /// <summary>
     /// Fetches a summary of pending reminders.
     /// </summary>
-    Task<ReminderOverview> GetRemindersOverviewAsync(CancellationToken ct = default);
+    /// <param name="now">Current time from scheduler</param>
+    /// <param name="ct">Cancellation token</param>
+    Task<ReminderOverview> GetRemindersOverviewAsync(DateTimeOffset now, CancellationToken ct = default);
 
-    Task<PendingRemindersWithSummary> GetNextRemindersAsync(DateTimeOffset untilDeadline,
+    /// <summary>
+    /// Gets the next reminders that are due before the specified deadline.
+    /// </summary>
+    /// <param name="untilDeadline">Deadline for fetching reminders</param>
+    /// <param name="now">Current time from scheduler</param>
+    /// <param name="ct">Cancellation token</param>
+    Task<PendingRemindersWithSummary> GetNextRemindersAsync(DateTimeOffset untilDeadline, DateTimeOffset now,
         CancellationToken ct = default);
     
     /// <summary>
