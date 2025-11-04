@@ -237,6 +237,31 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
                 });
                 break;
             }
+            case ReminderProtocol.GetReminders getReminders:
+            {
+                RunTask(async () =>
+                {
+                    try
+                    {
+                        using var cts = new CancellationTokenSource(Settings.StorageTimeout);
+                        // TODO: add skip / take support
+                        var queryResult = Storage.GetRemindersForEntityAsync(getReminders.Entity, ct:cts.Token);
+                        var reminders = await queryResult;
+                        Sender.Tell(reminders);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex, "Failed to get reminders for {0}", getReminders);
+                        Sender.Tell(new ReminderProtocol.RemindersForEntity(getReminders.Entity,
+                            FetchRemindersResponseCode.Error,
+                            [], ex.Message));
+                    }
+                });
+                break;
+            }
+            default:
+                Unhandled(message);
+                break;
         }
     }
 

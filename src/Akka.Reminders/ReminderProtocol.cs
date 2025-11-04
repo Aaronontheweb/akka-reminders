@@ -9,7 +9,9 @@ public interface IReminderProtocol
 }
 
 public interface IReminderCommand : IReminderProtocol;
+
 public interface IReminderQuery : IReminderProtocol;
+
 public interface IReminderResponse : IReminderProtocol;
 
 public enum ReminderCancelResponseCode
@@ -18,12 +20,12 @@ public enum ReminderCancelResponseCode
     /// Found and canceled the reminder(s)
     /// </summary>
     Success = 0,
-    
+
     /// <summary>
     /// No reminders were found to cancel
     /// </summary>
     NotFound = 1,
-    
+
     /// <summary>
     /// An error occurred while attempting to cancel the reminder(s)
     /// </summary>
@@ -36,17 +38,17 @@ public enum ReminderScheduleResponseCode
     /// Scheduled a new reminder for the entity with the given key.
     /// </summary>
     Success = 0,
-    
+
     /// <summary>
     /// Reminder already exists for the given entity, key, time, and message.
     /// </summary>
     NoOp = 1,
-    
+
     /// <summary>
     /// Reminder already exists for the given entity and key, but the values are different.
     /// </summary>
     Conflict = 2,
-    
+
     /// <summary>
     /// The entity type was not found.
     /// </summary>
@@ -54,11 +56,18 @@ public enum ReminderScheduleResponseCode
     /// Means the ShardRegion for the entity type was not found and thus this is likely a configuration error.
     /// </remarks>
     ShardRegionNotFound = 3,
-    
+
     /// <summary>
     /// An error occurred while attempting to schedule the reminder.
     /// </summary>
     Error = 4,
+}
+
+public enum FetchRemindersResponseCode
+{
+    Success = 0,
+    Error = 1,
+    NotFound = 2,
 }
 
 public static class ReminderProtocol
@@ -71,14 +80,31 @@ public static class ReminderProtocol
     {
         public ScheduledReminder ToScheduledReminder() => new(Entity, Key, When, Message);
     }
+
     public sealed record CancelReminder(ReminderEntity Entity, ReminderKey Key) : IReminderCommand;
+
     public sealed record CancelAllReminders(ReminderEntity Entity) : IReminderCommand;
-    
-    public sealed record RemindersCancelled(ReminderEntity Entity, ReminderCancelResponseCode ResponseCode, IReadOnlyList<ReminderKey> Keys, string? Message = null) : IReminderResponse;
-    public sealed record ReminderScheduled(ReminderEntity Entity, ReminderKey Key, DateTimeOffset When, ReminderScheduleResponseCode ResponseCode, string? Message = null) : IReminderResponse;
-    
+
+    public sealed record RemindersCancelled(
+        ReminderEntity Entity,
+        ReminderCancelResponseCode ResponseCode,
+        IReadOnlyList<ReminderKey> Keys,
+        string? Message = null) : IReminderResponse;
+
+    public sealed record ReminderScheduled(
+        ReminderEntity Entity,
+        ReminderKey Key,
+        DateTimeOffset When,
+        ReminderScheduleResponseCode ResponseCode,
+        string? Message = null) : IReminderResponse;
+
     public sealed record GetReminders(ReminderEntity Entity) : IReminderQuery;
-    public sealed record RemindersForEntity(ReminderEntity Entity, IReadOnlyList<ScheduledReminder> Reminders) : IReminderResponse;
+
+    public sealed record RemindersForEntity(
+        ReminderEntity Entity,
+        FetchRemindersResponseCode ResponseCode,
+        IReadOnlyList<ScheduledReminder> Reminders,
+        string? Message = null) : IReminderResponse;
 }
 
 /// <summary>
