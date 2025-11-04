@@ -107,7 +107,9 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var client = extension.CreateClient("test-region", "entity-1");
 
         var testScheduler = (TestScheduler)Sys.Scheduler;
-        var now = DateTimeOffset.UtcNow;
+        var now = testScheduler.Now;
+
+        Output?.WriteLine($"Initial TestScheduler.Now: {now}");
 
         // Schedule 3 reminders at different times
         await client.ScheduleSingleReminderAsync(
@@ -125,14 +127,25 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
             now.AddSeconds(20),
             "second");
 
+        Output?.WriteLine($"TestScheduler.Now after scheduling: {testScheduler.Now}");
+
         // Act & Assert - Advance time and verify order
+        Output?.WriteLine($"Advancing by 11 seconds...");
         testScheduler.Advance(TimeSpan.FromSeconds(11));
+        Output?.WriteLine($"TestScheduler.Now after first advance: {testScheduler.Now}");
         var msg1 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
         Assert.Equal("first", msg1);
+        Output?.WriteLine($"Received first message");
+
+        // Wait for processing to complete and next timer to be scheduled
+        await AwaitConditionAsync(() => Task.FromResult(true), TimeSpan.FromMilliseconds(100));
 
         testScheduler.Advance(TimeSpan.FromSeconds(10));
         var msg2 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
         Assert.Equal("second", msg2);
+
+        // Wait for processing to complete and next timer to be scheduled
+        await AwaitConditionAsync(() => Task.FromResult(true), TimeSpan.FromMilliseconds(100));
 
         testScheduler.Advance(TimeSpan.FromSeconds(10));
         var msg3 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
@@ -150,7 +163,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var client = extension.CreateClient("test-region", "entity-1");
 
         var testScheduler = (TestScheduler)Sys.Scheduler;
-        var now = DateTimeOffset.UtcNow;
+        var now = testScheduler.Now;
         var interval = TimeSpan.FromSeconds(5);
 
         // Act - Schedule a recurring reminder
@@ -163,14 +176,34 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         // Assert - Verify first occurrence
+        Output?.WriteLine($"Before first advance - TestScheduler.Now: {testScheduler.Now}");
         testScheduler.Advance(TimeSpan.FromSeconds(6));
+        Output?.WriteLine($"After first advance - TestScheduler.Now: {testScheduler.Now}");
         var msg1 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
         Assert.Equal("recurring message", msg1);
+        Output?.WriteLine($"Received first recurring message");
+
+        // Wait for the recurring reminder to be rescheduled by polling storage
+        await AwaitAssertAsync(async () =>
+        {
+            var list = await client.ListRemindersAsync();
+            Assert.Single(list.Reminders);
+            Output?.WriteLine($"Next reminder scheduled for: {list.Reminders[0].When}");
+        }, TimeSpan.FromSeconds(3));
 
         // Verify second occurrence
+        Output?.WriteLine($"Before second advance - TestScheduler.Now: {testScheduler.Now}");
         testScheduler.Advance(interval);
+        Output?.WriteLine($"After second advance - TestScheduler.Now: {testScheduler.Now}");
         var msg2 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
         Assert.Equal("recurring message", msg2);
+
+        // Wait for the next recurring reminder to be rescheduled
+        await AwaitAssertAsync(async () =>
+        {
+            var list = await client.ListRemindersAsync();
+            Assert.Single(list.Reminders);
+        }, TimeSpan.FromSeconds(3));
 
         // Verify third occurrence
         testScheduler.Advance(interval);

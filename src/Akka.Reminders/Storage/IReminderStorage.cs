@@ -12,11 +12,11 @@ public sealed record ReminderOverview
     /// </summary>
     public long TotalPendingReminders { get; init; } = 0;
 
-    public (ReminderOverview newOverview, bool hasNewerDate) Apply(ScheduledReminder newReminder)
+    public (ReminderOverview newOverview, bool hasNewerDate) Apply(ScheduledReminder newReminder, DateTimeOffset now)
     {
-        var newTimespan = newReminder.When - DateTimeOffset.UtcNow;
+        var newTimespan = newReminder.When - now;
         var hasNewerDate = newTimespan <= TimeUntilNext;
-        
+
         return (new ReminderOverview
         {
             TimeUntilNext = hasNewerDate ? newTimespan : TimeUntilNext,

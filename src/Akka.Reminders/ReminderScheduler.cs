@@ -176,7 +176,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
                             return;
 
                         // update scheduling state if we were successful
-                        var (newOverview, hasNewerDate) = PendingReminders!.Apply(reminder);
+                        var (newOverview, hasNewerDate) = PendingReminders!.Apply(reminder, TimeProvider.Now);
                         PendingReminders = newOverview;
 
                         if (hasNewerDate)
