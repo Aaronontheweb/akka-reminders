@@ -96,5 +96,9 @@ public readonly record struct ReminderEntity(string ShardRegionName, string Enti
 /// <param name="Entity">The entity identifier.</param>
 /// <param name="Key">The identifier for this specific reminder for this entity.</param>
 /// <param name="When">When we expect this message to fire.</param>
-/// <param name="Message">The payload to be delivered to <see cref="Entity"/>.</param>
+/// <param name="Message">The payload to be delivered to <see cref="Entity"/>.
+///
+/// This will be serialized using the configured binary serialization available
+/// for this type in Akka.NET and stored using the (serializerId, manifest) scheme that
+/// Akka.Persistence also uses.</param>
 public sealed record ScheduledReminder(ReminderEntity Entity, ReminderKey Key, DateTimeOffset When, object Message);
