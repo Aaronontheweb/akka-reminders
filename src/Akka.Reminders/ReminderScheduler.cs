@@ -47,7 +47,7 @@ public sealed record ReminderSettings
 ///
 /// Performs the scheduling functionality for reminders. Meant to be run as a singleton actor.
 /// </summary>
-internal sealed class ReminderScheduler : UntypedActor, IWithTimers
+internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 {
     public ReminderScheduler(ReminderSettings settings, IShardRegionResolver shardRegionResolver,
         IReminderStorage storage, ITimeProvider timeProvider)
@@ -72,6 +72,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
     public ReminderOverview PendingReminders { get; set; } = ReminderOverview.Empty;
 
     private readonly ILoggingAdapter _log = Context.GetLogger();
+
+    public IStash Stash { get; set; } = null!;
 
     private sealed class RestartBackoffTimer
     {
@@ -118,6 +120,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
                 _log.Info("Loaded reminder overview from storage: {0}", overview);
                 PendingReminders = overview;
                 Become(Scheduling);
+                Stash.UnstashAll(); // Process any messages that arrived during initialization
                 TryScheduleFetchReminders();
                 Timers.Cancel(RestartBackoffTimer.Instance); // if needed
                 break;
@@ -132,8 +135,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers
                 _ = LoadReminderOverview();
                 break;
             default:
-                // Don't bother stashing - we don't want the memory build-up of messages
-                Unhandled(message);
+                // Stash messages that arrive during initialization so they can be processed once ready
+                Stash.Stash();
                 break;
         }
     }
