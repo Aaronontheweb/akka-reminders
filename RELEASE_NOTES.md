@@ -1,3 +1,25 @@
+#### 0.2.0 November 5th 2025 ####
+
+**New Features**
+
+- **Convenience Methods for Bulk Scheduling** - Added extension methods on `ReminderClientExtension` to schedule reminders without creating client instances, optimized for bulk operations ([#22](https://github.com/Aaronontheweb/akka-reminders/pull/22))
+  - `ScheduleSingleReminderAsync(entity, key, when, message)` - Schedule single reminders directly
+  - `ScheduleRecurringReminderAsync(entity, key, firstOccurrence, interval, message)` - Schedule recurring reminders directly
+  - Both methods include overloads accepting separate `shardRegionName` and `entityId` parameters
+  - Implementation uses efficient direct scheduler proxy communication without client allocation
+
+- **Local Reminders for Fast Testing** - Added `WithLocalReminders()` configuration method for unit/integration testing without cluster bootstrap delays ([#21](https://github.com/Aaronontheweb/akka-reminders/pull/21))
+  - Instant startup (no 30+ second ClusterSingleton bootstrap delay)
+  - Uses `TestShardRegionResolver` for manual shard region registration with test probes
+  - Full reminder functionality in local mode with in-memory storage
+  - Added `WithInMemoryStorage()` convenience method to `ReminderConfigurationBuilder`
+  - Comprehensive testing documentation and examples in README
+
+**Improvements**
+
+- Enhanced testing infrastructure with better isolation and faster test execution
+- Improved API ergonomics for bulk scheduling scenarios
+
 #### 0.1.0 November 4th 2025 ####
 
 **Initial Release**
