@@ -1,4 +1,5 @@
 ﻿using Akka.Actor;
+using Akka.Cluster.Sharding;
 using Akka.Reminders.Sharding;
 using Akka.Reminders.Storage;
 
@@ -386,7 +387,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             else
             {
                 _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
-                shardRegion.Tell(reminder.Message);
+                
+                // wrap the message inside a ShardingEnvelope since that's automatically routed correctly
+                shardRegion.Tell(new ShardingEnvelope(reminder.Entity.EntityId, reminder.Message));
                 completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now, ReminderCompletionStatus.Delivered));
 
                 // Handle recurring reminders - schedule next occurrence
