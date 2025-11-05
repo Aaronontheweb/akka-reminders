@@ -35,9 +35,39 @@ public sealed record ReminderOverview
 public sealed record PendingRemindersWithSummary(IReadOnlyList<ScheduledReminder> Reminders, ReminderOverview NextOverview);
 
 /// <summary>
+/// The completion status of a reminder.
+/// </summary>
+public enum ReminderCompletionStatus
+{
+    /// <summary>
+    /// Reminder is still pending delivery.
+    /// </summary>
+    Pending = 0,
+
+    /// <summary>
+    /// Reminder was successfully delivered to the target entity.
+    /// </summary>
+    Delivered = 1,
+
+    /// <summary>
+    /// Reminder failed to deliver after exhausting all retry attempts.
+    /// </summary>
+    Failed = 2,
+
+    /// <summary>
+    /// Reminder was explicitly cancelled by the user.
+    /// </summary>
+    Cancelled = 3
+}
+
+/// <summary>
 /// Used to mark a reminder as completed.
 /// </summary>
-public sealed record CompletedReminder(ReminderEntity Entity, ReminderKey Key, DateTimeOffset When);
+public sealed record CompletedReminder(
+    ReminderEntity Entity,
+    ReminderKey Key,
+    DateTimeOffset When,
+    ReminderCompletionStatus Status = ReminderCompletionStatus.Delivered);
 
 /// <summary>
 /// Storage implementation for reminders.
