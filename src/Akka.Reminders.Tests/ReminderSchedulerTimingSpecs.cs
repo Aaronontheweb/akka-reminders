@@ -1,4 +1,5 @@
 using Akka.Actor;
+using Akka.Cluster.Sharding;
 using Akka.Configuration;
 using Akka.Hosting;
 using Akka.Hosting.TestKit;
@@ -92,8 +93,8 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"TestScheduler.Now after second advance: {testScheduler.Now}");
 
         // Assert - Verify the reminder message was received
-        var msg = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("test message", msg);
+        var envelope = testProbe.ExpectMsg<ShardingEnvelope>(TimeSpan.FromSeconds(5));
+        Assert.Equal("test message", envelope.Message);
     }
 
     [Fact]
@@ -133,23 +134,23 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"Advancing by 11 seconds...");
         testScheduler.Advance(TimeSpan.FromSeconds(11));
         Output?.WriteLine($"TestScheduler.Now after first advance: {testScheduler.Now}");
-        var msg1 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("first", msg1);
+        var envelope1 = testProbe.ExpectMsg<ShardingEnvelope>(TimeSpan.FromSeconds(5));
+        Assert.Equal("first", envelope1.Message);
         Output?.WriteLine($"Received first message");
 
         // Wait for processing to complete and next timer to be scheduled
         await AwaitConditionAsync(() => Task.FromResult(true), TimeSpan.FromMilliseconds(100));
 
         testScheduler.Advance(TimeSpan.FromSeconds(10));
-        var msg2 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("second", msg2);
+        var envelope2 = testProbe.ExpectMsg<ShardingEnvelope>(TimeSpan.FromSeconds(5));
+        Assert.Equal("second", envelope2.Message);
 
         // Wait for processing to complete and next timer to be scheduled
         await AwaitConditionAsync(() => Task.FromResult(true), TimeSpan.FromMilliseconds(100));
 
         testScheduler.Advance(TimeSpan.FromSeconds(10));
-        var msg3 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("third", msg3);
+        var envelope3 = testProbe.ExpectMsg<ShardingEnvelope>(TimeSpan.FromSeconds(5));
+        Assert.Equal("third", envelope3.Message);
     }
 
     [Fact]
@@ -184,8 +185,8 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"Before first advance - TestScheduler.Now: {testScheduler.Now}");
         testScheduler.Advance(TimeSpan.FromSeconds(6));
         Output?.WriteLine($"After first advance - TestScheduler.Now: {testScheduler.Now}");
-        var msg1 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("recurring message", msg1);
+        var envelope1 = testProbe.ExpectMsg<ShardingEnvelope>(TimeSpan.FromSeconds(5));
+        Assert.Equal("recurring message", envelope1.Message);
         Output?.WriteLine($"Received first recurring message");
 
         // Allow async processing to complete, then verify deterministically
@@ -198,8 +199,8 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"Before second advance - TestScheduler.Now: {testScheduler.Now}");
         testScheduler.Advance(interval);
         Output?.WriteLine($"After second advance - TestScheduler.Now: {testScheduler.Now}");
-        var msg2 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("recurring message", msg2);
+        var envelope2 = testProbe.ExpectMsg<ShardingEnvelope>(TimeSpan.FromSeconds(5));
+        Assert.Equal("recurring message", envelope2.Message);
 
         // Allow async processing to complete
         testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
@@ -208,8 +209,8 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
 
         // Verify third occurrence
         testScheduler.Advance(interval);
-        var msg3 = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("recurring message", msg3);
+        var envelope3 = testProbe.ExpectMsg<ShardingEnvelope>(TimeSpan.FromSeconds(5));
+        Assert.Equal("recurring message", envelope3.Message);
     }
 
     [Fact]
@@ -269,7 +270,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
 
         // Assert
-        var msg = testProbe.ExpectMsg<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("immediate message", msg);
+        var envelope = testProbe.ExpectMsg<ShardingEnvelope>(TimeSpan.FromSeconds(5));
+        Assert.Equal("immediate message", envelope.Message);
     }
 }
