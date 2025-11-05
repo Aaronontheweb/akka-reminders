@@ -4,6 +4,7 @@
         <TargetFramework>net9.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <PackageId>Aaron.Akka.Reminders</PackageId>
         <Description>Durable, re-entrant reminders system for Akka.Cluster.Sharding.</Description>
         <PackageTags>akka;akkadotnet;akka.cluster.sharding;akka.reminders;akka-reminders;</PackageTags>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
