@@ -41,17 +41,17 @@ Akka.Reminders provides a reliable way to schedule reminders (time-delayed messa
 
 **Core Package:**
 ```bash
-dotnet add package Akka.Reminders
+dotnet add package Aaron.Akka.Reminders
 ```
 
 **SQL Server Storage:**
 ```bash
-dotnet add package Akka.Reminders.Sql
+dotnet add package Aaron.Akka.Reminders.Sql
 ```
 
 **PostgreSQL Storage:**
 ```bash
-dotnet add package Akka.Reminders.Sql
+dotnet add package Aaron.Akka.Reminders.Sql
 ```
 
 ## Supported Storage Backends
