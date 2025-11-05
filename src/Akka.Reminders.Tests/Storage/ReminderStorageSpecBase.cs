@@ -76,7 +76,9 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
         Assert.Equal(reminder.Entity, result.Entity);
         Assert.Equal(reminder.Key, result.Key);
-        Assert.Equal(reminder.When, result.When);
+        // Allow for microsecond precision differences (PostgreSQL has 6 decimals, .NET has 7)
+        var timeDiff = Math.Abs((reminder.When - result.When).TotalMilliseconds);
+        Assert.True(timeDiff < 0.001, $"Time difference {timeDiff}ms exceeds 1 microsecond tolerance");
     }
 
     [Fact]
