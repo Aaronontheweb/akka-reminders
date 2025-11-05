@@ -6,6 +6,9 @@
     <File Path="NuGet.Config" />
     <File Path="README.md" />
   </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Akka.Reminders.Sql/Akka.Reminders.Sql.csproj" />
+  </Folder>
   <Project Path="src/Akka.Reminders.Tests/Akka.Reminders.Tests.csproj" />
-  <Project Path="src\Akka.Reminders\Akka.Reminders.csproj" Type="C#" />
+  <Project Path="src\Akka.Reminders\Akka.Reminders.csproj" />
 </Solution>

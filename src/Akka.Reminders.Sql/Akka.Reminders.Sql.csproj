@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Description>SQL Server and PostgreSQL storage implementation for Akka.Reminders.</Description>
+    <PackageTags>akka;akkadotnet;akka.reminders;sql;sqlserver;postgresql;</PackageTags>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Akka.Reminders\Akka.Reminders.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" />
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Scripts\SqlServer-Create.sql" />
+    <EmbeddedResource Include="Scripts\PostgreSql-Create.sql" />
+  </ItemGroup>
+
+</Project>

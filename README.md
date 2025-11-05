@@ -13,27 +13,64 @@ Akka.Reminders provides a reliable way to schedule reminders (time-delayed messa
 
 ## Features
 
-- **Single and recurring reminders**: Schedule one-time or repeating messages
-- **Cluster singleton**: Reminder scheduler runs as a singleton with automatic failover
-- **Pluggable storage**: Built-in in-memory storage with extensibility for databases
-- **ClusterSharding integration**: Direct delivery to sharded entities
-- **Testable**: Uses `ITimeProvider` abstraction for deterministic testing
-- **Akka.Hosting support**: First-class integration with Akka.Hosting configuration
+- ✅ **Single and recurring reminders** - Schedule one-time or repeating time-based messages
+- ✅ **SQL storage backends** - Production-ready SQL Server and PostgreSQL support
+- ✅ **Automatic retries** - Failed deliveries retry with exponential backoff
+- ✅ **Cluster singleton** - Reminder scheduler with automatic failover
+- ✅ **Akka.Hosting integration** - First-class configuration API
+- ✅ **Testable** - Uses `ITimeProvider` abstraction for deterministic testing
+- ✅ **Automatic cleanup** - Periodic pruning of completed/cancelled reminders
+- ✅ **Delivery tracking** - Monitor attempts, failures, and completion status
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Supported Storage Backends](#supported-storage-backends)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+  - [SQL Server Storage](#sql-server-storage)
+  - [PostgreSQL Storage](#postgresql-storage)
+  - [In-Memory Storage](#in-memory-storage)
+  - [Reminder Settings](#reminder-settings)
+- [Usage Examples](#usage-examples)
+- [API Reference](#api-reference)
+- [Testing](#testing)
+- [Architecture](#architecture)
 
 ## Installation
 
+**Core Package:**
 ```bash
 dotnet add package Akka.Reminders
 ```
 
+**SQL Server Storage:**
+```bash
+dotnet add package Akka.Reminders.Sql
+```
+
+**PostgreSQL Storage:**
+```bash
+dotnet add package Akka.Reminders.Sql
+```
+
+## Supported Storage Backends
+
+| Storage Backend | Package | Auto-Initialize | Documentation |
+|----------------|---------|-----------------|---------------|
+| In-Memory | `Akka.Reminders` | N/A | Built-in (development/testing only) |
+| SQL Server | `Akka.Reminders.Sql` | Yes | [SQL Server Schema](src/Akka.Reminders.Sql/Scripts/SqlServer-Create.sql) |
+| PostgreSQL | `Akka.Reminders.Sql` | Yes | [PostgreSQL Schema](src/Akka.Reminders.Sql/Scripts/PostgreSql-Create.sql) |
+
+> **Note:** For production deployments, you can manually create database schemas using the provided SQL scripts instead of using auto-initialization.
+
 ## Quick Start
 
-### 1. Configure with Akka.Hosting
+### Basic Setup with In-Memory Storage
 
 ```csharp
 using Akka.Hosting;
 using Akka.Reminders;
-using Akka.Reminders.Storage;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -47,17 +84,39 @@ builder.Services.AddAkka("MySystem", (configBuilder, provider) =>
                 Props.Create(() => new MyEntityActor(entityId)),
             new MyMessageExtractor(),
             new ShardOptions())
-        .WithReminders("", reminders => reminders
-            .WithStorage(_ => new InMemoryReminderStorage())
-            .WithSettings(new ReminderSettings
-            {
-                MaxSlippage = TimeSpan.FromSeconds(5),
-                StorageTimeout = TimeSpan.FromSeconds(10)
-            }));
+        .WithReminders("reminder-host", reminders => reminders
+            .WithStorage(_ => new InMemoryReminderStorage()));
 });
 ```
 
-### 2. Schedule Reminders from Actors
+### Production Setup with SQL Server
+
+```csharp
+using Akka.Hosting;
+using Akka.Reminders;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddAkka("MySystem", (configBuilder, provider) =>
+{
+    configBuilder
+        .WithClustering()
+        .WithShardRegion<MyEntity>(
+            "my-entities",
+            (system, registry, resolver) => entityId =>
+                Props.Create(() => new MyEntityActor(entityId)),
+            new MyMessageExtractor(),
+            new ShardOptions())
+        .WithReminders("reminder-host", reminders => reminders
+            .WithSqlServerStorage(
+                connectionString: builder.Configuration.GetConnectionString("Reminders"),
+                schemaName: "dbo",
+                tableName: "akka_reminders",
+                autoInitialize: true));
+});
+```
+
+### Using Reminders in Actors
 
 ```csharp
 public class MyEntityActor : ReceiveActor
@@ -69,7 +128,7 @@ public class MyEntityActor : ReceiveActor
         var extension = Context.System.ReminderClient();
         _reminders = extension.CreateClient("my-entities", entityId);
 
-        Receive<ScheduleReminder>(msg =>
+        ReceiveAsync<ScheduleReminder>(async msg =>
         {
             // Schedule a one-time reminder
             var result = await _reminders.ScheduleSingleReminderAsync(
@@ -83,6 +142,16 @@ public class MyEntityActor : ReceiveActor
             }
         });
 
+        ReceiveAsync<ScheduleRecurring>(async msg =>
+        {
+            // Schedule a recurring reminder that fires every hour
+            await _reminders.ScheduleRecurringReminderAsync(
+                new ReminderKey("hourly-check"),
+                DateTimeOffset.UtcNow.AddHours(1),
+                TimeSpan.FromHours(1),
+                new PerformHealthCheck());
+        });
+
         Receive<DoSomething>(msg =>
         {
             // Handle the reminder when it fires
@@ -92,56 +161,220 @@ public class MyEntityActor : ReceiveActor
 }
 ```
 
-### 3. Schedule Recurring Reminders
+## Configuration
+
+### SQL Server Storage
+
+The `WithSqlServerStorage` extension method configures SQL Server as the reminder storage backend:
 
 ```csharp
-// Schedule a reminder that fires every hour
-var result = await _reminders.ScheduleRecurringReminderAsync(
-    new ReminderKey("hourly-check"),
-    DateTimeOffset.UtcNow.AddHours(1),
-    TimeSpan.FromHours(1),
-    new PerformHealthCheck());
+.WithReminders("reminder-host", reminders => reminders
+    .WithSqlServerStorage(
+        connectionString: "Server=localhost;Database=Reminders;User Id=sa;Password=YourPassword;",
+        schemaName: "dbo",
+        tableName: "akka_reminders",
+        autoInitialize: true))
 ```
 
-## Core Concepts
+**Parameters:**
+- `connectionString`: SQL Server connection string
+- `schemaName`: Database schema name (default: "dbo")
+- `tableName`: Table name for reminders (default: "reminders")
+- `autoInitialize`: Auto-create schema/table if missing (default: true)
 
-### Reminder Keys
-
-Each reminder is identified by a `ReminderKey` which is unique per entity:
+**Advanced Configuration:**
 
 ```csharp
-var key = new ReminderKey("reminder-name");
+.WithReminders("reminder-host", reminders => reminders
+    .WithSqlServerStorage(settings =>
+    {
+        settings.ConnectionString = "Server=localhost;...";
+        settings.SchemaName = "custom_schema";
+        settings.TableName = "my_reminders";
+        settings.CommandTimeout = TimeSpan.FromSeconds(60);
+        settings.AutoInitialize = false; // Manual schema management
+    }))
 ```
 
-### Reminder Entity
+**Manual Schema Setup:**
 
-Reminders are associated with a specific entity in a shard region:
+For production environments, you may prefer to manually create the database schema. Use the provided SQL script:
 
-```csharp
-var entity = new ReminderEntity(
-    shardRegionName: "my-entities",
-    entityId: "entity-123");
+📄 [SQL Server Schema Script](src/Akka.Reminders.Sql/Scripts/SqlServer-Create.sql)
+
+```sql
+-- Run this script against your database
+-- Creates schema, table, and indexes
 ```
 
-### Reminder Client
+### PostgreSQL Storage
 
-The `IReminderClient` provides the API for scheduling and managing reminders:
+The `WithPostgreSqlStorage` extension method configures PostgreSQL as the reminder storage backend:
 
 ```csharp
-// Get extension and create client
-var extension = ReminderClientExtension.Get(system);
-var client = extension.CreateClient("my-entities", "entity-123");
+.WithReminders("reminder-host", reminders => reminders
+    .WithPostgreSqlStorage(
+        connectionString: "Host=localhost;Database=reminders;Username=postgres;Password=postgres",
+        schemaName: "public",
+        tableName: "akka_reminders",
+        autoInitialize: true))
+```
 
-// Or use extension method
-var extension = system.ReminderClient();
-var client = extension.CreateClient("my-entities", "entity-123");
+**Parameters:**
+- `connectionString`: PostgreSQL connection string
+- `schemaName`: Database schema name (default: "public")
+- `tableName`: Table name for reminders (default: "reminders")
+- `autoInitialize`: Auto-create schema/table if missing (default: true)
+
+**Advanced Configuration:**
+
+```csharp
+.WithReminders("reminder-host", reminders => reminders
+    .WithPostgreSqlStorage(settings =>
+    {
+        settings.ConnectionString = "Host=localhost;...";
+        settings.SchemaName = "custom_schema";
+        settings.TableName = "my_reminders";
+        settings.CommandTimeout = TimeSpan.FromSeconds(60);
+        settings.AutoInitialize = false; // Manual schema management
+    }))
+```
+
+**Manual Schema Setup:**
+
+For production environments, you may prefer to manually create the database schema. Use the provided SQL script:
+
+📄 [PostgreSQL Schema Script](src/Akka.Reminders.Sql/Scripts/PostgreSql-Create.sql)
+
+```sql
+-- Run this script against your database
+-- Creates schema, table, and indexes
+```
+
+### In-Memory Storage
+
+For development and testing, use the built-in in-memory storage:
+
+```csharp
+.WithReminders("reminder-host", reminders => reminders
+    .WithStorage(_ => new InMemoryReminderStorage()))
+```
+
+> ⚠️ **Warning:** In-memory storage is not durable and should only be used for development/testing.
+
+### Reminder Settings
+
+Configure reminder behavior and performance characteristics:
+
+```csharp
+.WithReminders("reminder-host", reminders => reminders
+    .WithSqlServerStorage(connectionString: "...")
+    .WithSettings(new ReminderSettings
+    {
+        // Maximum time drift allowed before immediate delivery
+        MaxSlippage = TimeSpan.FromSeconds(5),
+
+        // Timeout for storage operations
+        StorageTimeout = TimeSpan.FromSeconds(5),
+
+        // How frequently to prune completed/cancelled reminders
+        PruneInterval = TimeSpan.FromHours(12),
+
+        // Age threshold for pruning reminders
+        PruneOlderThan = TimeSpan.FromDays(30),
+
+        // Maximum delivery attempts before marking as permanently failed
+        MaxDeliveryAttempts = 3,
+
+        // Base delay for exponential backoff on retries
+        // Actual delay = RetryBackoffBase * (2 ^ attemptCount)
+        RetryBackoffBase = TimeSpan.FromSeconds(30)
+    }))
+```
+
+## Usage Examples
+
+### Health Check Pattern
+
+```csharp
+public class HealthCheckActor : ReceiveActor
+{
+    private readonly IReminderClient _reminders;
+
+    public HealthCheckActor(string entityId)
+    {
+        _reminders = Context.System.ReminderClient()
+            .CreateClient("health-checks", entityId);
+
+        ReceiveAsync<Initialize>(async _ =>
+        {
+            // Schedule health check every 5 minutes
+            await _reminders.ScheduleRecurringReminderAsync(
+                new ReminderKey("health-check"),
+                DateTimeOffset.UtcNow.AddMinutes(5),
+                TimeSpan.FromMinutes(5),
+                new PerformHealthCheck());
+        });
+
+        ReceiveAsync<PerformHealthCheck>(async _ =>
+        {
+            var isHealthy = await CheckHealth();
+            if (!isHealthy)
+            {
+                Self.Tell(new Restart());
+            }
+        });
+    }
+}
+```
+
+### Delayed Order Processing
+
+```csharp
+public class OrderActor : ReceiveActor
+{
+    private readonly IReminderClient _reminders;
+
+    public OrderActor(string orderId)
+    {
+        _reminders = Context.System.ReminderClient()
+            .CreateClient("orders", orderId);
+
+        ReceiveAsync<PlaceOrder>(async order =>
+        {
+            await ProcessOrder(order);
+
+            // Schedule payment check in 24 hours
+            await _reminders.ScheduleSingleReminderAsync(
+                new ReminderKey("payment-check"),
+                DateTimeOffset.UtcNow.AddHours(24),
+                new CheckPayment());
+        });
+
+        ReceiveAsync<CheckPayment>(async _ =>
+        {
+            if (!await PaymentReceived())
+            {
+                Self.Tell(new CancelOrder());
+            }
+        });
+    }
+}
 ```
 
 ## API Reference
 
-### Scheduling Reminders
+### IReminderClient
 
-#### Single Reminder
+The `IReminderClient` interface provides the primary API for scheduling and managing reminders:
+
+```csharp
+// Get client instance for an entity
+var extension = Context.System.ReminderClient();
+var client = extension.CreateClient("shard-region-name", "entity-id");
+```
+
+#### Schedule Single Reminder
 ```csharp
 Task<ReminderScheduled> ScheduleSingleReminderAsync(
     ReminderKey key,
@@ -152,7 +385,7 @@ Task<ReminderScheduled> ScheduleSingleReminderAsync(
 
 Schedules a one-time reminder that fires at the specified time.
 
-#### Recurring Reminder
+#### Schedule Recurring Reminder
 ```csharp
 Task<ReminderScheduled> ScheduleRecurringReminderAsync(
     ReminderKey key,
@@ -164,8 +397,6 @@ Task<ReminderScheduled> ScheduleRecurringReminderAsync(
 
 Schedules a recurring reminder that fires repeatedly at the specified interval.
 
-### Managing Reminders
-
 #### Cancel Reminder
 ```csharp
 Task<ReminderCancelled> CancelReminderAsync(
@@ -173,7 +404,7 @@ Task<ReminderCancelled> CancelReminderAsync(
     CancellationToken cancellationToken = default)
 ```
 
-Cancels a scheduled reminder.
+Cancels a specific reminder by key.
 
 #### Cancel All Reminders
 ```csharp
@@ -181,7 +412,7 @@ Task<RemindersCancelled> CancelAllRemindersAsync(
     CancellationToken cancellationToken = default)
 ```
 
-Cancels all reminders for the entity.
+Cancels all reminders for the current entity.
 
 #### List Reminders
 ```csharp
@@ -189,86 +420,27 @@ Task<FetchedReminders> ListRemindersAsync(
     CancellationToken cancellationToken = default)
 ```
 
-Lists all active reminders for the entity.
+Lists all active reminders for the current entity.
 
-## Configuration
+### Response Codes
 
-### Reminder Settings
+**ReminderScheduleResponseCode:**
+- `Success`: Reminder scheduled successfully
+- `ShardRegionNotFound`: Target shard region doesn't exist
+- `Error`: Unexpected error occurred
 
-```csharp
-public sealed record ReminderSettings
-{
-    // Maximum time drift allowed before immediate delivery
-    public TimeSpan MaxSlippage { get; init; } = TimeSpan.FromSeconds(5);
+**ReminderCancelResponseCode:**
+- `Success`: Reminder(s) cancelled successfully
+- `NotFound`: Reminder not found
+- `Error`: Unexpected error occurred
 
-    // Timeout for storage operations
-    public TimeSpan StorageTimeout { get; init; } = TimeSpan.FromSeconds(5);
+### Reminder States
 
-    // How frequently to prune old reminders
-    public TimeSpan PruneInterval { get; init; } = TimeSpan.FromHours(12);
-
-    // How long to keep completed/cancelled reminders
-    public TimeSpan PruneOlderThan { get; init; } = TimeSpan.FromDays(12);
-
-    // Maximum delivery attempts before permanent failure
-    public int MaxDeliveryAttempts { get; init; } = 3;
-
-    // Base delay for exponential backoff on retries
-    public TimeSpan RetryBackoffBase { get; init; } = TimeSpan.FromSeconds(30);
-}
-```
-
-### Storage
-
-Akka.Reminders includes an in-memory storage implementation for development and testing:
-
-```csharp
-.WithStorage(_ => new InMemoryReminderStorage())
-```
-
-For production, implement `IReminderStorage` with your persistence backend:
-
-```csharp
-public interface IReminderStorage
-{
-    Task<ReminderScheduled> ScheduleReminderAsync(
-        ScheduledReminder reminder,
-        CancellationToken cancellationToken = default);
-
-    Task<ReminderOverview> LoadReminderOverviewAsync(
-        CancellationToken cancellationToken = default);
-
-    Task<ScheduledReminder[]> LoadRemindersAsync(
-        DateTimeOffset dueBy,
-        CancellationToken cancellationToken = default);
-
-    Task<ReminderCancelled> CancelReminderAsync(
-        ReminderEntity entity,
-        ReminderKey key,
-        CancellationToken cancellationToken = default);
-
-    Task<RemindersCancelled> CancelAllRemindersAsync(
-        ReminderEntity entity,
-        CancellationToken cancellationToken = default);
-
-    Task<FetchedReminders> FetchRemindersAsync(
-        ReminderEntity entity,
-        CancellationToken cancellationToken = default);
-}
-```
-
-### Shard Region Resolution
-
-The reminder system needs to resolve shard region names to `IActorRef` instances. Implement `IShardRegionResolver`:
-
-```csharp
-public interface IShardRegionResolver
-{
-    IActorRef? TryResolve(ReminderEntity entity);
-}
-```
-
-Or use the default implementation that integrates with Akka.Hosting's actor registry.
+Reminders progress through the following states:
+- **Pending**: Scheduled but not yet delivered
+- **Delivered**: Successfully delivered to target entity
+- **Failed**: Permanently failed after max retry attempts
+- **Cancelled**: Manually cancelled by user
 
 ## Testing
 
@@ -304,100 +476,27 @@ public async Task Reminder_should_fire_at_scheduled_time()
 - **ReminderScheduler**: Cluster singleton actor that manages reminder scheduling and delivery
 - **ReminderClient**: Client API for scheduling and managing reminders
 - **ReminderClientExtension**: ActorSystem extension for accessing the reminder system
-- **IReminderStorage**: Pluggable storage abstraction
-- **IShardRegionResolver**: Resolves entity locations for message delivery
+- **IReminderStorage**: Pluggable storage abstraction for persistence backends
+- **IShardRegionResolver**: Resolves shard region names to actor references
 
 ### Message Flow
 
 1. Entity actor requests reminder via `IReminderClient`
-2. Request sent to ReminderScheduler singleton
-3. Reminder persisted to storage
-4. Scheduler tracks next due reminder
-5. When due, message delivered to shard region
-6. For recurring reminders, next occurrence is scheduled
+2. Request routed to ReminderScheduler singleton (via cluster singleton proxy)
+3. Reminder persisted to storage backend
+4. Scheduler tracks next due reminder time
+5. When due, message delivered to target shard region
+6. For recurring reminders, next occurrence automatically scheduled
+7. Failed deliveries retry with exponential backoff (up to MaxDeliveryAttempts)
+8. Completed/cancelled reminders pruned periodically based on PruneInterval setting
 
-### Persistence
+### Reliability Features
 
-Reminders are persisted with the following states:
-- **Pending**: Scheduled but not yet delivered
-- **Delivered**: Successfully delivered to target entity
-- **Failed**: Delivery failed (will retry with backoff)
-- **Cancelled**: Manually cancelled by user
-
-## Examples
-
-### Health Check Reminder
-
-```csharp
-public class HealthCheckActor : ReceiveActor
-{
-    private readonly IReminderClient _reminders;
-
-    public HealthCheckActor(string entityId)
-    {
-        _reminders = Context.System.ReminderClient()
-            .CreateClient("health-checks", entityId);
-
-        ReceiveAsync<Initialize>(async _ =>
-        {
-            // Schedule health check every 5 minutes
-            await _reminders.ScheduleRecurringReminderAsync(
-                new ReminderKey("health-check"),
-                DateTimeOffset.UtcNow.AddMinutes(5),
-                TimeSpan.FromMinutes(5),
-                new PerformHealthCheck());
-        });
-
-        ReceiveAsync<PerformHealthCheck>(async _ =>
-        {
-            // Perform health check
-            var isHealthy = await CheckHealth();
-
-            if (!isHealthy)
-            {
-                // Take corrective action
-                Self.Tell(new Restart());
-            }
-        });
-    }
-}
-```
-
-### Delayed Message Processing
-
-```csharp
-public class OrderActor : ReceiveActor
-{
-    private readonly IReminderClient _reminders;
-
-    public OrderActor(string orderId)
-    {
-        _reminders = Context.System.ReminderClient()
-            .CreateClient("orders", orderId);
-
-        ReceiveAsync<PlaceOrder>(async order =>
-        {
-            // Process order
-            await ProcessOrder(order);
-
-            // Schedule reminder to check for payment in 24 hours
-            await _reminders.ScheduleSingleReminderAsync(
-                new ReminderKey("payment-check"),
-                DateTimeOffset.UtcNow.AddHours(24),
-                new CheckPayment());
-        });
-
-        ReceiveAsync<CheckPayment>(async _ =>
-        {
-            if (!await PaymentReceived())
-            {
-                // Cancel order if payment not received
-                Self.Tell(new CancelOrder());
-            }
-        });
-    }
-}
-```
+- **Durable persistence**: Reminders survive actor restarts and cluster failures
+- **Automatic retries**: Failed deliveries retry with exponential backoff
+- **Cluster singleton**: Single scheduler instance with automatic failover
+- **Delivery tracking**: Reminders track delivery attempts and failure reasons
+- **Periodic pruning**: Automatic cleanup of old completed/cancelled reminders
 
 ## Building from Source
 

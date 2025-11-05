@@ -96,6 +96,18 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
+    /// <summary>
+    /// Time to prune completed reminders
+    /// </summary>
+    private sealed class PruneCompletedReminders
+    {
+        public static readonly PruneCompletedReminders Instance = new();
+
+        private PruneCompletedReminders()
+        {
+        }
+    }
+
     private void TryScheduleFetchReminders()
     {
         // If we have pending reminders, and we're within the slippage window
@@ -277,6 +289,32 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 });
                 break;
             }
+            case PruneCompletedReminders:
+            {
+                _log.Debug("Pruning completed reminders older than {0}", Settings.PruneOlderThan);
+                RunTask(async () =>
+                {
+                    try
+                    {
+                        using var cts = new CancellationTokenSource(Settings.StorageTimeout);
+                        var cutoffDate = TimeProvider.Now.Subtract(Settings.PruneOlderThan);
+                        var result = await Storage.CleanUpCompletedRemindersAsync(cutoffDate, cts.Token);
+                        if (result)
+                        {
+                            _log.Info("Successfully pruned completed reminders older than {0}", cutoffDate);
+                        }
+                        else
+                        {
+                            _log.Warning("Failed to prune completed reminders");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex, "Error pruning completed reminders");
+                    }
+                });
+                break;
+            }
             default:
                 Unhandled(message);
                 break;
@@ -287,6 +325,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     {
         _log.Info("Loading reminder overview from storage...");
         _ = LoadReminderOverview();
+
+        // Schedule periodic pruning of completed reminders
+        Timers.StartPeriodicTimer(
+            PruneCompletedReminders.Instance,
+            PruneCompletedReminders.Instance,
+            Settings.PruneInterval,
+            Settings.PruneInterval);
+        _log.Info("Scheduled periodic pruning every {0}", Settings.PruneInterval);
     }
 
     private Task LoadReminderOverview()
@@ -334,14 +380,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     // Max retries exceeded - mark as permanently failed
                     _log.Error("Reminder {0} exceeded max delivery attempts ({1}). Marking as permanently failed.",
                         reminder.Key, Settings.MaxDeliveryAttempts);
-                    permanentlyFailedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now));
+                    permanentlyFailedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now, ReminderCompletionStatus.Failed));
                 }
             }
             else
             {
                 _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
                 shardRegion.Tell(reminder.Message);
-                completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now));
+                completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now, ReminderCompletionStatus.Delivered));
 
                 // Handle recurring reminders - schedule next occurrence
                 if (reminder.RepeatInterval.HasValue)
