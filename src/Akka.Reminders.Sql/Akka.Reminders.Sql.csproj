@@ -4,6 +4,7 @@
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <PackageId>Aaron.Akka.Reminders.Sql</PackageId>
     <Description>SQL Server and PostgreSQL storage implementation for Akka.Reminders.</Description>
     <PackageTags>akka;akkadotnet;akka.reminders;sql;sqlserver;postgresql;</PackageTags>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
