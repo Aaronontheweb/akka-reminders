@@ -46,8 +46,8 @@ builder.Services.AddAkka("MySystem", (configBuilder, provider) =>
             (system, registry, resolver) => entityId =>
                 Props.Create(() => new MyEntityActor(entityId)),
             new MyMessageExtractor(),
-            new ShardOptions { Role = "worker" })
-        .WithReminders("worker", reminders => reminders
+            new ShardOptions())
+        .WithReminders("", reminders => reminders
             .WithStorage(_ => new InMemoryReminderStorage())
             .WithSettings(new ReminderSettings
             {

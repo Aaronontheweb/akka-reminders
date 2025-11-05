@@ -64,6 +64,8 @@ public static class AkkaHostingExtensions
             var singletonManager = extendedSystem.SystemActorOf(singletonProps, "reminder-scheduler");
 
             // Create proxy settings
+            // NOTE: The proxy is created on ALL nodes, but needs to know which role hosts the singleton
+            // WithRole() here specifies where to FIND the singleton manager, not a restriction on the proxy itself
             var proxySettings = ClusterSingletonProxySettings.Create(system);
             if (!string.IsNullOrEmpty(setup.Role))
             {
