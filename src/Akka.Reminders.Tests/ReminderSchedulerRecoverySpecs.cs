@@ -1,5 +1,4 @@
 using Akka.Actor;
-using Akka.Cluster.Sharding;
 using Akka.Hosting;
 using Akka.Hosting.TestKit;
 using Akka.Reminders.Sharding;
@@ -85,14 +84,14 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
 
         // Assert - Verify reminders are loaded by checking they fire at the right times
         testScheduler.Advance(TimeSpan.FromSeconds(11));
-        var envelope1 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        Assert.Equal("message 1", envelope1.Message);
+        var message1 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        Assert.Equal("message 1", message1);
 
         testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
 
         testScheduler.Advance(TimeSpan.FromSeconds(10));
-        var envelope2 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        Assert.Equal("message 2", envelope2.Message);
+        var message2 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        Assert.Equal("message 2", message2);
     }
 
     [Fact]
@@ -141,11 +140,11 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
 
         // Assert - Both overdue reminders should be delivered immediately
-        var messages = new List<object>();
-        var envelope1 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        messages.Add(envelope1.Message);
-        var envelope2 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        messages.Add(envelope2.Message);
+        var messages = new List<string>();
+        var message1 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        messages.Add(message1);
+        var message2 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        messages.Add(message2);
 
         Assert.Contains("overdue message 1", messages);
         Assert.Contains("overdue message 2", messages);
@@ -178,24 +177,24 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
 
         // Assert - First occurrence
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope1 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        Assert.Equal("recurring message", envelope1.Message);
+        var message1 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        Assert.Equal("recurring message", message1);
 
         // Wait for next occurrence to be scheduled
         testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
 
         // Second occurrence
         testScheduler.Advance(TimeSpan.FromSeconds(5));
-        var envelope2 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        Assert.Equal("recurring message", envelope2.Message);
+        var message2 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        Assert.Equal("recurring message", message2);
 
         // Wait for next occurrence to be scheduled
         testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
 
         // Third occurrence
         testScheduler.Advance(TimeSpan.FromSeconds(5));
-        var envelope3 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        Assert.Equal("recurring message", envelope3.Message);
+        var message3 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        Assert.Equal("recurring message", message3);
     }
 
     [Fact]
@@ -246,8 +245,8 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         testScheduler.Advance(TimeSpan.FromSeconds(16)); // Total 31 seconds from start
         Output?.WriteLine($"Current time after second advance: {testScheduler.Now}");
 
-        var envelope = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        Assert.Equal("future message", envelope.Message);
+        var message = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        Assert.Equal("future message", message);
     }
 
     [Fact]
@@ -302,13 +301,13 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
 
         // Assert - All overdue reminders should be processed
-        var messages = new List<object>();
-        var env1 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        messages.Add(env1.Message);
-        var env2 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        messages.Add(env2.Message);
-        var env3 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        messages.Add(env3.Message);
+        var messages = new List<string>();
+        var message1 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        messages.Add(message1);
+        var message2 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        messages.Add(message2);
+        var message3 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        messages.Add(message3);
 
         // Verify all messages were delivered (order may vary due to async processing)
         Assert.Contains("oldest message", messages);
@@ -353,16 +352,16 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
 
         // Assert - Overdue reminder fires immediately
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
-        var envelope1 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        Assert.Equal("overdue message", envelope1.Message);
+        var message1 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        Assert.Equal("overdue message", message1);
 
         // Future reminder hasn't fired yet
         testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
 
         // Advance to future reminder time
         testScheduler.Advance(TimeSpan.FromSeconds(10));
-        var envelope2 = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        Assert.Equal("future message", envelope2.Message);
+        var message2 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        Assert.Equal("future message", message2);
     }
 
     [Fact]
@@ -389,7 +388,7 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal(ReminderScheduleResponseCode.Success, response.ResponseCode);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope = await testProbe.ExpectMsgAsync<ShardingEnvelope>(TimeSpan.FromSeconds(5));
-        Assert.Equal("test message", envelope.Message);
+        var message = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
+        Assert.Equal("test message", message);
     }
 }

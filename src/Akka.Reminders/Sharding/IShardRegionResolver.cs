@@ -11,7 +11,16 @@ namespace Akka.Reminders.Sharding;
 /// </remarks>
 public interface IShardRegionResolver
 {
-    public IActorRef? TryResolve(ReminderEntity entity);   
+    public IActorRef? TryResolve(ReminderEntity entity);
+
+    /// <summary>
+    /// Delivers a reminder message to the target entity.
+    /// Implementations handle the delivery mechanism (e.g., wrapping in ShardingEnvelope for cluster sharding).
+    /// </summary>
+    /// <param name="entity">The target entity for the reminder</param>
+    /// <param name="message">The reminder message to deliver</param>
+    /// <param name="sender">The sender of the message</param>
+    public void DeliverReminder(ReminderEntity entity, object message, IActorRef sender);
 }
 
 /// <summary>
@@ -39,6 +48,16 @@ public sealed class DefaultShardRegionResolver : IShardRegionResolver
         }
 
         return null;
+    }
+
+    public void DeliverReminder(ReminderEntity entity, object message, IActorRef sender)
+    {
+        var shardRegion = TryResolve(entity);
+        if (shardRegion != null)
+        {
+            // Wrap message in ShardingEnvelope for cluster sharding
+            shardRegion.Tell(new ShardingEnvelope(entity.EntityId, message), sender);
+        }
     }
 }
 
@@ -100,5 +119,15 @@ public sealed class TestShardRegionResolver : IShardRegionResolver
     public IActorRef? TryResolve(ReminderEntity entity)
     {
         return _shardRegions.GetValueOrDefault(entity.ShardRegionName);
+    }
+
+    public void DeliverReminder(ReminderEntity entity, object message, IActorRef sender)
+    {
+        var actor = TryResolve(entity);
+        if (actor != null)
+        {
+            // Deliver message directly without wrapping - test actors handle raw messages
+            actor.Tell(message, sender);
+        }
     }
 }
