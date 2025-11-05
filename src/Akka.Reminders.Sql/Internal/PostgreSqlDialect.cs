@@ -204,10 +204,18 @@ internal sealed class PostgreSqlDialect : ISqlDialect
         switch (value)
         {
             case DateTimeOffset dto:
-                npgsqlCommand.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = dto });
+                // PostgreSQL TimestampTz has microsecond precision (6 decimals), .NET has 100ns precision (7 decimals)
+                // Truncate to microseconds to avoid precision loss on round-trip
+                // 1 microsecond = 10 ticks, so truncate to the nearest 10 ticks
+                var ticksToRemove = dto.Ticks % 10;
+                var truncatedDto = ticksToRemove == 0 ? dto : new DateTimeOffset(dto.Ticks - ticksToRemove, dto.Offset);
+                npgsqlCommand.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = truncatedDto });
                 break;
             case DateTime dt:
-                npgsqlCommand.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = dt });
+                // Truncate to microseconds for consistency
+                var dtTicksToRemove = dt.Ticks % 10;
+                var truncatedDt = dtTicksToRemove == 0 ? dt : new DateTime(dt.Ticks - dtTicksToRemove, dt.Kind);
+                npgsqlCommand.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = truncatedDt });
                 break;
             case byte[] bytes:
                 npgsqlCommand.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Bytea) { Value = bytes });

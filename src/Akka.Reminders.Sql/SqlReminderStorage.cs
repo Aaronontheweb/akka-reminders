@@ -111,17 +111,48 @@ public sealed class SqlReminderStorage : IReminderStorage
             reminders.Add(reminder);
         }
 
-        // Calculate overview for next reminders
-        var nextReminder = reminders.OrderBy(r => r.When).FirstOrDefault();
+        // Get overview for all remaining pending reminders AFTER this fetch
+        // We need to exclude the reminders we just fetched since they will be processed/completed
+        var overview = await GetRemindersOverviewAsync(now, cancellationToken);
+
+        // Find reminders that weren't fetched (those still pending after this fetch)
+        var fetchedKeys = new HashSet<(string, string, string)>(
+            reminders.Select(r => (r.Entity.ShardRegionName, r.Entity.EntityId, r.Key.Name)));
+
+        // Get all pending reminders and filter out the ones we fetched
+        await using var conn2 = _dialect.CreateConnection(_settings.ConnectionString);
+        await conn2.OpenAsync(cancellationToken);
+        await using var cmd2 = conn2.CreateCommand();
+        cmd2.CommandText = _dialect.GetOverviewSql(_settings.SchemaName, _settings.TableName);
+        cmd2.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+        await using var reader2 = await cmd2.ExecuteReaderAsync(cancellationToken);
+
+        var remainingReminders = new List<ScheduledReminder>();
+        while (await reader2.ReadAsync(cancellationToken))
+        {
+            var isCompleted = reader2.GetBoolean(GetOrdinal(reader2, "IsCompleted", "is_completed"));
+            if (!isCompleted)
+            {
+                var reminder = ReadReminderFromReader(reader2);
+                var key = (reminder.Entity.ShardRegionName, reminder.Entity.EntityId, reminder.Key.Name);
+                if (!fetchedKeys.Contains(key))
+                {
+                    remainingReminders.Add(reminder);
+                }
+            }
+        }
+
+        // Calculate overview from remaining reminders
+        var nextReminder = remainingReminders.OrderBy(r => r.When).FirstOrDefault();
         var timeUntilNext = nextReminder != null ? nextReminder.When - now : TimeSpan.Zero;
 
-        var overview = new ReminderOverview
+        var adjustedOverview = new ReminderOverview
         {
             TimeUntilNext = timeUntilNext,
-            TotalPendingReminders = reminders.Count
+            TotalPendingReminders = remainingReminders.Count
         };
 
-        return new PendingRemindersWithSummary(reminders, overview);
+        return new PendingRemindersWithSummary(reminders, adjustedOverview);
     }
 
     public async Task<bool> MarkRemindersAsCompletedAsync(
