@@ -85,6 +85,62 @@ public static class AkkaHostingExtensions
 
         return builder;
     }
+
+    /// <summary>
+    /// Adds a local (non-clustered) reminder system to the actor system, designed for testing scenarios.
+    /// </summary>
+    /// <param name="builder">The Akka configuration builder.</param>
+    /// <param name="configure">Optional action to configure the local reminders system using a fluent builder.</param>
+    /// <returns>The builder for method chaining.</returns>
+    /// <remarks>
+    /// This method creates a reminder scheduler as a regular actor instead of a ClusterSingleton,
+    /// providing instant startup with no bootstrap delays. This is ideal for unit and integration tests.
+    /// You must register shard regions using the configuration builder for reminders to be delivered.
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// // In a test
+    /// var targetActor = testKit.CreateTestProbe("billing-actor");
+    ///
+    /// builder.WithLocalReminders(reminders => reminders
+    ///     .WithInMemoryStorage()
+    ///     .WithShardRegion("billing-shard", targetActor)
+    ///     .WithSettings(new ReminderSettings
+    ///     {
+    ///         MaxSlippage = TimeSpan.FromMilliseconds(100),
+    ///         MaxDeliveryAttempts = 3
+    ///     }));
+    /// </code>
+    /// </example>
+    public static AkkaConfigurationBuilder WithLocalReminders(
+        this AkkaConfigurationBuilder builder,
+        Action<LocalReminderConfigurationBuilder>? configure = null)
+    {
+        var localBuilder = new LocalReminderConfigurationBuilder();
+        configure?.Invoke(localBuilder);
+
+        builder.WithActors((system, registry) =>
+        {
+            var extendedSystem = (ExtendedActorSystem)system;
+
+            // Create the storage and resolver instances from the local builder
+            var storage = localBuilder.GetStorageFactory()(system);
+            var resolver = localBuilder.GetResolver();
+            var settings = localBuilder.GetSettings();
+
+            // Create the reminder scheduler as a regular /system actor (NOT a singleton)
+            var schedulerProps = Props.Create(() => new ReminderScheduler(settings, resolver, storage, system.Scheduler));
+            var scheduler = extendedSystem.SystemActorOf(schedulerProps, "reminder-scheduler");
+
+            // Register the scheduler directly as the proxy (since there's no singleton indirection)
+            registry.Register<ReminderSchedulerProxy>(scheduler);
+
+            // Register the ReminderClient extension
+            system.WithExtension<ReminderClientExtension, ReminderClientProvider>();
+        });
+
+        return builder;
+    }
 }
 
 /// <summary>

@@ -348,21 +348,3 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
     #endregion
 }
 
-/// <summary>
-/// Test implementation of IShardRegionResolver that allows us to control
-/// which shard regions are available during tests.
-/// </summary>
-internal class TestShardRegionResolver : IShardRegionResolver
-{
-    private readonly Dictionary<string, IActorRef> _shardRegions = new();
-
-    public void RegisterShardRegion(string regionName, IActorRef region)
-    {
-        _shardRegions[regionName] = region;
-    }
-
-    public IActorRef? TryResolve(ReminderEntity entity)
-    {
-        return _shardRegions.GetValueOrDefault(entity.ShardRegionName);
-    }
-}
