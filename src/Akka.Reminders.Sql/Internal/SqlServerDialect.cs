@@ -220,6 +220,7 @@ internal sealed class SqlServerDialect : ISqlDialect
         switch (value)
         {
             case DateTimeOffset dto:
+                // SQL Server DATETIME2 has 100ns precision matching .NET, but store as UTC DateTime
                 sqlCommand.Parameters.Add(name, SqlDbType.DateTime2).Value = dto.UtcDateTime;
                 break;
             case DateTime dt:

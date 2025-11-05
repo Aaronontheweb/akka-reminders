@@ -99,7 +99,9 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         // Verify only the new reminder exists
         var reminders = await Storage.GetRemindersForEntityAsync(entity);
         Assert.Single(reminders);
-        Assert.Equal(reminder2.When, reminders[0].When);
+        // Allow for microsecond precision differences (PostgreSQL has 6 decimals, .NET has 7)
+        var timeDiff = Math.Abs((reminder2.When - reminders[0].When).TotalMilliseconds);
+        Assert.True(timeDiff < 0.001, $"Time difference {timeDiff}ms exceeds 1 microsecond tolerance");
         Assert.Equal("message2", reminders[0].Message);
     }
 

@@ -35,16 +35,31 @@ public sealed class SqlReminderStorage : IReminderStorage
         };
     }
 
+    /// <summary>
+    /// Truncates a DateTimeOffset to microsecond precision (6 decimal places) for PostgreSQL compatibility.
+    /// PostgreSQL TIMESTAMPTZ has microsecond precision while .NET DateTimeOffset has 100-nanosecond precision.
+    /// </summary>
+    private static DateTimeOffset TruncateToMicroseconds(DateTimeOffset dto)
+    {
+        var ticksToRemove = dto.Ticks % 10; // 1 microsecond = 10 ticks
+        return ticksToRemove == 0 ? dto : new DateTimeOffset(dto.Ticks - ticksToRemove, dto.Offset);
+    }
+
     public async Task<ReminderProtocol.ReminderScheduled> ScheduleReminderAsync(
         ScheduledReminder reminder,
         CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
 
+        // For PostgreSQL compatibility, ensure timestamp precision is truncated to microseconds
+        // before storage to avoid precision loss on round-trip (PostgreSQL has 6 decimal places, .NET has 7)
+        var truncatedWhen = TruncateToMicroseconds(reminder.When);
+        var adjustedReminder = reminder with { When = truncatedWhen };
+
         try
         {
             // Serialize the message
-            var (serializerId, manifest, payload) = SerializeMessage(reminder.Message);
+            var (serializerId, manifest, payload) = SerializeMessage(adjustedReminder.Message);
 
             await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
             await connection.OpenAsync(cancellationToken);
@@ -54,32 +69,33 @@ public sealed class SqlReminderStorage : IReminderStorage
             command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
 
             // Add parameters
-            _dialect.AddParameter(command, "@ShardRegionName", reminder.Entity.ShardRegionName);
-            _dialect.AddParameter(command, "@EntityId", reminder.Entity.EntityId);
-            _dialect.AddParameter(command, "@ReminderKey", reminder.Key.Name);
-            _dialect.AddParameter(command, "@WhenUtc", reminder.When.UtcDateTime);
-            _dialect.AddParameter(command, "@RepeatIntervalTicks", reminder.RepeatInterval?.Ticks ?? (object)DBNull.Value);
+            _dialect.AddParameter(command, "@ShardRegionName", adjustedReminder.Entity.ShardRegionName);
+            _dialect.AddParameter(command, "@EntityId", adjustedReminder.Entity.EntityId);
+            _dialect.AddParameter(command, "@ReminderKey", adjustedReminder.Key.Name);
+            _dialect.AddParameter(command, "@WhenUtc", adjustedReminder.When); // Pass DateTimeOffset, not DateTime
+            _dialect.AddParameter(command, "@RepeatIntervalTicks", adjustedReminder.RepeatInterval?.Ticks ?? (object)DBNull.Value);
             _dialect.AddParameter(command, "@SerializerId", serializerId);
             _dialect.AddParameter(command, "@Manifest", manifest ?? (object)DBNull.Value);
             _dialect.AddParameter(command, "@Payload", payload);
-            _dialect.AddParameter(command, "@AttemptCount", reminder.AttemptCount);
-            _dialect.AddParameter(command, "@LastFailureReason", reminder.LastFailureReason ?? (object)DBNull.Value);
+            _dialect.AddParameter(command, "@AttemptCount", adjustedReminder.AttemptCount);
+            _dialect.AddParameter(command, "@LastFailureReason", adjustedReminder.LastFailureReason ?? (object)DBNull.Value);
 
             await command.ExecuteNonQueryAsync(cancellationToken);
 
+            // Return the truncated reminder so it matches what's stored in the database
             return new ReminderProtocol.ReminderScheduled(
-                reminder.Entity,
-                reminder.Key,
-                reminder.When,
+                adjustedReminder.Entity,
+                adjustedReminder.Key,
+                adjustedReminder.When,
                 ReminderScheduleResponseCode.Success,
                 null);
         }
         catch (Exception ex)
         {
             return new ReminderProtocol.ReminderScheduled(
-                reminder.Entity,
-                reminder.Key,
-                reminder.When,
+                adjustedReminder.Entity,
+                adjustedReminder.Key,
+                adjustedReminder.When,
                 ReminderScheduleResponseCode.Error,
                 ex.Message);
         }
