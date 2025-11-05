@@ -256,11 +256,18 @@ For production environments, you may prefer to manually create the database sche
 For development and testing, use the built-in in-memory storage:
 
 ```csharp
+// Explicit convenience method (recommended)
+.WithReminders("reminder-host", reminders => reminders
+    .WithInMemoryStorage())
+
+// Or manually instantiate
 .WithReminders("reminder-host", reminders => reminders
     .WithStorage(_ => new InMemoryReminderStorage()))
 ```
 
 > ⚠️ **Warning:** In-memory storage is not durable and should only be used for development/testing.
+>
+> 💡 **Tip:** For unit tests, consider using `WithLocalReminders()` instead for instant startup without cluster bootstrap delays. See the [Testing](#testing) section for details.
 
 ### Reminder Settings
 
@@ -443,6 +450,73 @@ Reminders progress through the following states:
 - **Cancelled**: Manually cancelled by user
 
 ## Testing
+
+### Local Reminders for Fast Testing
+
+For unit and integration tests, use `WithLocalReminders()` to avoid the 30+ second ClusterSingleton bootstrap delay:
+
+```csharp
+using Akka.Hosting;
+using Akka.Reminders;
+
+public class ReminderTests : Akka.Hosting.TestKit.TestKit
+{
+    private readonly TestShardRegionResolver _resolver = new();
+
+    protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
+    {
+        // Configure local reminders - starts instantly without cluster
+        builder.WithLocalReminders(reminders => reminders
+            .WithInMemoryStorage()
+            .WithResolver(_resolver)
+            .WithSettings(new ReminderSettings
+            {
+                MaxSlippage = TimeSpan.FromMilliseconds(100),
+                MaxDeliveryAttempts = 3
+            }));
+    }
+
+    [Fact]
+    public async Task Reminder_ShouldDeliver_ToRegisteredShardRegion()
+    {
+        // Arrange
+        var targetActor = CreateTestProbe("billing-actor");
+        _resolver.RegisterShardRegion("billing-shard", targetActor);
+
+        var client = Sys.ReminderClient().CreateClient("billing-shard", "customer-123");
+
+        // Act - Schedule reminder
+        await client.ScheduleSingleReminderAsync(
+            new ReminderKey("retry-payment"),
+            DateTimeOffset.UtcNow.AddMilliseconds(200),
+            new PaymentRetry());
+
+        // Assert - Reminder delivered
+        var envelope = targetActor.ExpectMsg<ShardingEnvelope>(TimeSpan.FromSeconds(2));
+        Assert.Equal("customer-123", envelope.EntityId);
+        Assert.IsType<PaymentRetry>(envelope.Message);
+    }
+}
+```
+
+**Key Differences:**
+
+| Feature | `WithReminders()` (Production) | `WithLocalReminders()` (Testing) |
+|---------|-------------------------------|----------------------------------|
+| **Startup Time** | 30+ seconds (ClusterSingleton bootstrap) | Instant (regular actor) |
+| **Clustering** | Required | Not required |
+| **Shard Resolver** | Uses real ClusterSharding | Manual registration via `TestShardRegionResolver` |
+| **Storage** | Configurable (SQL, in-memory) | Defaults to in-memory |
+| **Use Case** | Production deployments | Unit/integration tests |
+
+**Why Use Local Reminders?**
+
+- ✅ **No Cluster Bootstrap Delay**: Tests start instantly
+- ✅ **Simple Setup**: Register test probes as shard regions
+- ✅ **Full Functionality**: All reminder features work in local mode
+- ✅ **Better Test Isolation**: No shared cluster state between tests
+
+### Time-Based Testing with TestScheduler
 
 Akka.Reminders uses the `ITimeProvider` abstraction (mapped to `IScheduler`) for time operations, making it fully testable with `TestScheduler`:
 
