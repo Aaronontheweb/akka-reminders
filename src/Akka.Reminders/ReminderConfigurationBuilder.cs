@@ -49,6 +49,19 @@ public sealed class ReminderConfigurationBuilder
     }
 
     /// <summary>
+    /// Configures the storage backend to use in-memory storage (this is the default if no storage is specified).
+    /// </summary>
+    /// <returns>This builder for method chaining.</returns>
+    /// <remarks>
+    /// In-memory storage is ideal for testing and development scenarios where persistence is not required.
+    /// Note that in-memory storage is not distributed and state will be lost on restart.
+    /// </remarks>
+    public ReminderConfigurationBuilder WithInMemoryStorage()
+    {
+        return WithStorage<InMemoryReminderStorage>();
+    }
+
+    /// <summary>
     /// Configures the shard region resolver using a factory function.
     /// </summary>
     /// <param name="factory">Factory function to create the resolver instance.</param>

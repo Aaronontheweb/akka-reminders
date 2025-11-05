@@ -46,14 +46,56 @@ public sealed class DefaultShardRegionResolver : IShardRegionResolver
 /// A test-only implementation of <see cref="IShardRegionResolver"/> that allows you to specify
 /// the ShardRegion for a given reminder entity.
 /// </summary>
+/// <remarks>
+/// This resolver is designed for testing scenarios where you want to control which actors
+/// receive reminder messages without requiring a full cluster setup. You can register
+/// shard regions manually using the constructor or the <see cref="RegisterShardRegion"/> method.
+/// </remarks>
 public sealed class TestShardRegionResolver : IShardRegionResolver
 {
-    private readonly IReadOnlyDictionary<string, IActorRef> _shardRegions;
+    private readonly Dictionary<string, IActorRef> _shardRegions;
 
+    /// <summary>
+    /// Creates a new <see cref="TestShardRegionResolver"/> with no registered shard regions.
+    /// </summary>
+    public TestShardRegionResolver()
+    {
+        _shardRegions = new Dictionary<string, IActorRef>();
+    }
+
+    /// <summary>
+    /// Creates a new <see cref="TestShardRegionResolver"/> with the specified shard regions.
+    /// </summary>
+    /// <param name="shardRegions">A dictionary mapping shard region names to actor references.</param>
     public TestShardRegionResolver(IReadOnlyDictionary<string, IActorRef> shardRegions)
     {
-        _shardRegions = shardRegions;
+        _shardRegions = new Dictionary<string, IActorRef>(shardRegions);
     }
+
+    /// <summary>
+    /// Registers a shard region with the resolver.
+    /// </summary>
+    /// <param name="regionName">The name of the shard region.</param>
+    /// <param name="region">The actor reference for the shard region.</param>
+    public void RegisterShardRegion(string regionName, IActorRef region)
+    {
+        _shardRegions[regionName] = region;
+    }
+
+    /// <summary>
+    /// Removes a shard region registration from the resolver.
+    /// </summary>
+    /// <param name="regionName">The name of the shard region to remove.</param>
+    /// <returns>True if the region was removed, false if it wasn't registered.</returns>
+    public bool UnregisterShardRegion(string regionName)
+    {
+        return _shardRegions.Remove(regionName);
+    }
+
+    /// <summary>
+    /// Gets the registered shard region names.
+    /// </summary>
+    public IEnumerable<string> RegisteredRegions => _shardRegions.Keys;
 
     public IActorRef? TryResolve(ReminderEntity entity)
     {
