@@ -19,7 +19,6 @@ public interface IShardRegionResolver
     /// </summary>
     /// <param name="entity">The target entity for the reminder</param>
     /// <param name="message">The reminder message to deliver</param>
-    /// <param name="sender">The sender of the message</param>
     public void DeliverReminder(ReminderEntity entity, object message);
 }
 
