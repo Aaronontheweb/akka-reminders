@@ -19,8 +19,7 @@ public interface IShardRegionResolver
     /// </summary>
     /// <param name="entity">The target entity for the reminder</param>
     /// <param name="message">The reminder message to deliver</param>
-    /// <param name="sender">The sender of the message</param>
-    public void DeliverReminder(ReminderEntity entity, object message, IActorRef sender);
+    public void DeliverReminder(ReminderEntity entity, object message);
 }
 
 /// <summary>
@@ -50,14 +49,13 @@ public sealed class DefaultShardRegionResolver : IShardRegionResolver
         return null;
     }
 
-    public void DeliverReminder(ReminderEntity entity, object message, IActorRef sender)
+    public void DeliverReminder(ReminderEntity entity, object message)
     {
         var shardRegion = TryResolve(entity);
-        if (shardRegion != null)
-        {
-            // Wrap message in ShardingEnvelope for cluster sharding
-            shardRegion.Tell(new ShardingEnvelope(entity.EntityId, message), sender);
-        }
+        // Wrap message in ShardingEnvelope for cluster sharding
+        
+        // we don't want actors replying to the scheduler, so NoSender is used
+        shardRegion?.Tell(new ShardingEnvelope(entity.EntityId, message), ActorRefs.NoSender);
     }
 }
 
@@ -121,13 +119,10 @@ public sealed class TestShardRegionResolver : IShardRegionResolver
         return _shardRegions.GetValueOrDefault(entity.ShardRegionName);
     }
 
-    public void DeliverReminder(ReminderEntity entity, object message, IActorRef sender)
+    public void DeliverReminder(ReminderEntity entity, object message)
     {
         var actor = TryResolve(entity);
-        if (actor != null)
-        {
-            // Deliver message directly without wrapping - test actors handle raw messages
-            actor.Tell(message, sender);
-        }
+        // Deliver message directly without wrapping - test actors handle raw messages
+        actor?.Tell(message, ActorRefs.NoSender);
     }
 }

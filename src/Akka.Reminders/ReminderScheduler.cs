@@ -178,13 +178,13 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         {
                             Sender.Tell(new ReminderProtocol.ReminderScheduled(reminder.Entity, reminder.Key,
                                 TimeProvider.Now, ReminderScheduleResponseCode.ShardRegionNotFound,
-                                $"ShardRegion [{reminder.Entity.ShardRegionName}] not found"));
+                                $"ShardRegion [{reminder.Entity.ShardRegionName}] not found"), ActorRefs.NoSender);
                             return;
                         }
 
                         // persist the reminder
                         var r = await Storage.ScheduleReminderAsync(reminder, cts.Token);
-                        Sender.Tell(r);
+                        Sender.Tell(r, ActorRefs.NoSender);
 
                         // bail out early if we couldn't schedule or if it was a no-op
                         if (r.ResponseCode != ReminderScheduleResponseCode.Success)
@@ -204,7 +204,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     {
                         _log.Error(ex, "Failed to schedule reminder {0}", scheduleSingle);
                         Sender.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle.Entity, scheduleSingle.Key,
-                            TimeProvider.Now, ReminderScheduleResponseCode.Error, ex.Message));
+                            TimeProvider.Now, ReminderScheduleResponseCode.Error, ex.Message), ActorRefs.NoSender);
                     }
                 });
                 break;
@@ -219,7 +219,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
                         var cancellationResult =
                             await Storage.CancelReminderAsync(cancel.Entity, cancel.Key, cts.Token);
-                        Sender.Tell(cancellationResult);
+                        Sender.Tell(cancellationResult, ActorRefs.NoSender);
 
                         PendingReminders = PendingReminders with
                         {
@@ -231,7 +231,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         _log.Error(ex, "Failed to cancel reminder {0}", cancel);
                         Sender.Tell(new ReminderProtocol.RemindersCancelled(cancel.Entity,
                             ReminderCancelResponseCode.Error,
-                            [cancel.Key], ex.Message));
+                            [cancel.Key], ex.Message), ActorRefs.NoSender);
                     }
                 });
                 break;
@@ -246,7 +246,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
                         var cancellationResult =
                             await Storage.CancelAllRemindersForEntityAsync(cancelAll.Entity, cts.Token);
-                        Sender.Tell(cancellationResult);
+                        Sender.Tell(cancellationResult, ActorRefs.NoSender);
 
                         PendingReminders = PendingReminders with
                         {
@@ -259,7 +259,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         _log.Error(ex, "Failed to cancel all reminders for {0}", cancelAll);
                         Sender.Tell(new ReminderProtocol.RemindersCancelled(cancelAll.Entity,
                             ReminderCancelResponseCode.Error,
-                            [], ex.Message));
+                            [], ex.Message), ActorRefs.NoSender);
                     }
                 });
                 break;
@@ -277,14 +277,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         Sender.Tell(new ReminderProtocol.RemindersForEntity(
                             getReminders.Entity,
                             FetchRemindersResponseCode.Success,
-                            reminders));
+                            reminders), ActorRefs.NoSender);
                     }
                     catch (Exception ex)
                     {
                         _log.Error(ex, "Failed to get reminders for {0}", getReminders);
                         Sender.Tell(new ReminderProtocol.RemindersForEntity(getReminders.Entity,
                             FetchRemindersResponseCode.Error,
-                            [], ex.Message));
+                            [], ex.Message), ActorRefs.NoSender);
                     }
                 });
                 break;
@@ -388,7 +388,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
 
                 // Use the resolver to deliver the message - it handles wrapping (e.g., ShardingEnvelope)
-                ShardRegionResolver.DeliverReminder(reminder.Entity, reminder.Message, Self);
+                ShardRegionResolver.DeliverReminder(reminder.Entity, reminder.Message);
                 completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now, ReminderCompletionStatus.Delivered));
 
                 // Handle recurring reminders - schedule next occurrence
