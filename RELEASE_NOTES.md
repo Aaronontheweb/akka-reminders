@@ -1,3 +1,9 @@
+#### 0.2.2 November 6th 2025 ####
+
+**Bug Fixes**
+
+- **Fixed sender context in reminder replies** - ReminderScheduler no longer specifies itself as sender when replying to clients, preserving proper message context ([#26](https://github.com/Aaronontheweb/akka-reminders/pull/26))
+
 #### 0.2.0 November 5th 2025 ####
 
 **New Features**
