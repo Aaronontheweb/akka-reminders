@@ -7,21 +7,17 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <VersionPrefix>0.2.3</VersionPrefix>
-    <PackageReleaseNotes>**New Features**
+    <VersionPrefix>0.2.4</VersionPrefix>
+    <PackageReleaseNotes>**Improvements**
 
-- **Retry Support for Failed Scheduling Operations** - Restructured `ReminderScheduled` response to include the original `ScheduleReminder` command, making it easier to retry failed scheduling operations due to transient issues like network partitions or singleton unreachability ([#34](https://github.com/Aaronontheweb/akka-reminders/pull/34))
-  - `ReminderScheduled` now contains `OriginalCommand` with full scheduling context (entity, key, when, message payload, repeat interval)
-  - Added `ToScheduleReminder()` method to `ScheduledReminder` for converting storage records back to commands
-  - Enables seamless retry logic without command reconstruction
+- **Simplified Akka.Hosting API** - Removed non-functional configuration methods from `ReminderConfigurationBuilder` to streamline the API surface ([#35](https://github.com/Aaronontheweb/akka-reminders/pull/35))
+  - Removed `WithStorage&lt;TStorage&gt;()` generic method that didn't work as intended
+  - Removed `WithStorage(IReminderStorage storage)` direct instance method
+  - Removed `WithResolver(IShardRegionResolver factory)` factory method
+  - Use storage-specific methods like `WithSqlServerStorage()` or `WithPostgreSqlStorage()` instead
 
-**Breaking Changes**
-
-- **Renamed `ScheduleSingleReminder` to `ScheduleReminder`** - The message type now accurately reflects that it handles both single and recurring reminders via the optional `RepeatInterval` parameter ([#34](https://github.com/Aaronontheweb/akka-reminders/pull/34))
-
-**Improvements**
-
-- Updated Akka.Cluster dependency from 1.5.55 to 1.5.56 ([#32](https://github.com/Aaronontheweb/akka-reminders/pull/32))</PackageReleaseNotes>
+- **Dependency Updates**
+  - Updated Microsoft.Data.SqlClient from 5.1.5 to 6.1.3 ([#28](https://github.com/Aaronontheweb/akka-reminders/pull/28))</PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Visual Studio C# settings -->
