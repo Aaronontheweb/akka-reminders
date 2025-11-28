@@ -27,7 +27,7 @@ public class LocalReminderSpecs : Akka.Hosting.TestKit.TestKit
         // Configure local reminders for fast testing without cluster bootstrap delays
         builder.WithLocalReminders(reminders => reminders
             .WithInMemoryStorage()
-            .WithResolver(_resolver)
+            .WithResolver(_ => _resolver)
             .WithSettings(new ReminderSettings
             {
                 MaxSlippage = TimeSpan.FromMilliseconds(100),

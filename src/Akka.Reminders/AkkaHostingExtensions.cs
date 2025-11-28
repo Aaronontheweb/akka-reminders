@@ -125,7 +125,7 @@ public static class AkkaHostingExtensions
 
             // Create the storage and resolver instances from the local builder
             var storage = localBuilder.GetStorageFactory()(system);
-            var resolver = localBuilder.GetResolver();
+            var resolver = localBuilder.GetResolver()(system);
             var settings = localBuilder.GetSettings();
 
             // Create the reminder scheduler as a regular /system actor (NOT a singleton)
