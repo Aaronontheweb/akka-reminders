@@ -1,3 +1,16 @@
+#### 0.2.4 November 28th 2025 ####
+
+**Improvements**
+
+- **Simplified Akka.Hosting API** - Removed non-functional configuration methods from `ReminderConfigurationBuilder` to streamline the API surface ([#35](https://github.com/Aaronontheweb/akka-reminders/pull/35))
+  - Removed `WithStorage<TStorage>()` generic method that didn't work as intended
+  - Removed `WithStorage(IReminderStorage storage)` direct instance method
+  - Removed `WithResolver(IShardRegionResolver factory)` factory method
+  - Use storage-specific methods like `WithSqlServerStorage()` or `WithPostgreSqlStorage()` instead
+
+- **Dependency Updates**
+  - Updated Microsoft.Data.SqlClient from 5.1.5 to 6.1.3 ([#28](https://github.com/Aaronontheweb/akka-reminders/pull/28))
+
 #### 0.2.3 November 28th 2025 ####
 
 **New Features**
