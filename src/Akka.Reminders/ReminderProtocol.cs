@@ -63,7 +63,7 @@ public enum FetchRemindersResponseCode
 
 public static class ReminderProtocol
 {
-    public sealed record ScheduleSingleReminder(
+    public sealed record ScheduleReminder(
         ReminderEntity Entity,
         ReminderKey Key,
         DateTimeOffset When,
@@ -84,11 +84,23 @@ public static class ReminderProtocol
         string? Message = null) : IReminderResponse;
 
     public sealed record ReminderScheduled(
-        ReminderEntity Entity,
-        ReminderKey Key,
-        DateTimeOffset When,
+        ScheduleReminder OriginalCommand,
         ReminderScheduleResponseCode ResponseCode,
-        string? Message = null) : IReminderResponse;
+        string? Message = null) : IReminderResponse
+    {
+        /// <inheritdoc />
+        public ReminderEntity Entity => OriginalCommand.Entity;
+
+        /// <summary>
+        /// The key of the reminder that was scheduled.
+        /// </summary>
+        public ReminderKey Key => OriginalCommand.Key;
+
+        /// <summary>
+        /// When the reminder is scheduled to fire.
+        /// </summary>
+        public DateTimeOffset When => OriginalCommand.When;
+    }
 
     public sealed record GetReminders(ReminderEntity Entity) : IReminderQuery;
 
@@ -136,4 +148,12 @@ public sealed record ScheduledReminder(
     object Message,
     TimeSpan? RepeatInterval = null,
     int AttemptCount = 0,
-    string? LastFailureReason = null);
+    string? LastFailureReason = null)
+{
+    /// <summary>
+    /// Converts this scheduled reminder back to a <see cref="ReminderProtocol.ScheduleReminder"/> command.
+    /// Useful for retry scenarios where you need to resubmit the original command.
+    /// </summary>
+    public ReminderProtocol.ScheduleReminder ToScheduleReminder()
+        => new(Entity, Key, When, Message, RepeatInterval);
+}

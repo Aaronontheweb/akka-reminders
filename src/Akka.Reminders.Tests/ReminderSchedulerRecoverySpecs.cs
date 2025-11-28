@@ -214,7 +214,7 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
 
         // Schedule a reminder for the future - send directly to scheduler, not through client
         var reminderTime = now.AddSeconds(30);
-        firstScheduler.Tell(new ReminderProtocol.ScheduleSingleReminder(
+        firstScheduler.Tell(new ReminderProtocol.ScheduleReminder(
             new ReminderEntity("test-region", "entity-1"),
             new ReminderKey("future-reminder"),
             reminderTime,
@@ -378,7 +378,7 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         // Assert - Scheduler should initialize successfully
         // Schedule a new reminder to verify scheduler is working - send directly to scheduler
         var testScheduler = (TestScheduler)Sys.Scheduler;
-        scheduler.Tell(new ReminderProtocol.ScheduleSingleReminder(
+        scheduler.Tell(new ReminderProtocol.ScheduleReminder(
             new ReminderEntity("test-region", "entity-1"),
             new ReminderKey("test"),
             testScheduler.Now.AddSeconds(5),

@@ -25,9 +25,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         _pendingReminders[key] = reminder;
 
         return Task.FromResult(new ReminderProtocol.ReminderScheduled(
-            reminder.Entity,
-            reminder.Key,
-            reminder.When,
+            reminder.ToScheduleReminder(),
             ReminderScheduleResponseCode.Success));
     }
 

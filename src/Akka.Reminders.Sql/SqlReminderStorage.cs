@@ -84,18 +84,13 @@ public sealed class SqlReminderStorage : IReminderStorage
 
             // Return the truncated reminder so it matches what's stored in the database
             return new ReminderProtocol.ReminderScheduled(
-                adjustedReminder.Entity,
-                adjustedReminder.Key,
-                adjustedReminder.When,
-                ReminderScheduleResponseCode.Success,
-                null);
+                adjustedReminder.ToScheduleReminder(),
+                ReminderScheduleResponseCode.Success);
         }
         catch (Exception ex)
         {
             return new ReminderProtocol.ReminderScheduled(
-                adjustedReminder.Entity,
-                adjustedReminder.Key,
-                adjustedReminder.When,
+                adjustedReminder.ToScheduleReminder(),
                 ReminderScheduleResponseCode.Error,
                 ex.Message);
         }
