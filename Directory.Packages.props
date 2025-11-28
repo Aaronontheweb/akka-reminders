@@ -9,7 +9,7 @@
     <PackageVersion Include="Akka.Cluster" Version="1.5.56" />
     <PackageVersion Include="Akka.Cluster.Hosting" Version="$(AkkaHostingVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="9.0.8" />
-    <PackageVersion Include="Microsoft.Data.SqlClient" Version="5.1.5" />
+    <PackageVersion Include="Microsoft.Data.SqlClient" Version="6.1.3" />
     <PackageVersion Include="Npgsql" Version="8.0.8" />
   </ItemGroup>
   <!-- Test dependencies -->
