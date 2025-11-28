@@ -163,7 +163,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 RunTask(() => ProcessReminders(TimeProvider.Now + Settings.MaxSlippage));
                 break;
             }
-            case ReminderProtocol.ScheduleSingleReminder scheduleSingle:
+            case ReminderProtocol.ScheduleReminder scheduleSingle:
             {
                 _log.Debug("Scheduling reminder {0}", scheduleSingle);
                 RunTask(async () =>
@@ -176,8 +176,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         var shardRegion = ShardRegionResolver.TryResolve(reminder.Entity);
                         if (shardRegion is null)
                         {
-                            Sender.Tell(new ReminderProtocol.ReminderScheduled(reminder.Entity, reminder.Key,
-                                TimeProvider.Now, ReminderScheduleResponseCode.ShardRegionNotFound,
+                            Sender.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle,
+                                ReminderScheduleResponseCode.ShardRegionNotFound,
                                 $"ShardRegion [{reminder.Entity.ShardRegionName}] not found"), ActorRefs.NoSender);
                             return;
                         }
@@ -203,8 +203,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     catch (Exception ex)
                     {
                         _log.Error(ex, "Failed to schedule reminder {0}", scheduleSingle);
-                        Sender.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle.Entity, scheduleSingle.Key,
-                            TimeProvider.Now, ReminderScheduleResponseCode.Error, ex.Message), ActorRefs.NoSender);
+                        Sender.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle,
+                            ReminderScheduleResponseCode.Error, ex.Message), ActorRefs.NoSender);
                     }
                 });
                 break;

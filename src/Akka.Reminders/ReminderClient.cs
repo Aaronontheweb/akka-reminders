@@ -28,7 +28,7 @@ internal sealed class ReminderClient : IReminderClient
         object message,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleSingleReminder(Entity, key, when, message, RepeatInterval: null);
+        var command = new ReminderProtocol.ScheduleReminder(Entity, key, when, message, RepeatInterval: null);
 
         try
         {
@@ -43,9 +43,7 @@ internal sealed class ReminderClient : IReminderClient
         {
             // Return a timeout error response
             return new ReminderProtocol.ReminderScheduled(
-                Entity,
-                key,
-                when,
+                command,
                 ReminderScheduleResponseCode.Error,
                 "Request timed out while communicating with reminder scheduler");
         }
@@ -53,9 +51,7 @@ internal sealed class ReminderClient : IReminderClient
         {
             // Return a generic error response
             return new ReminderProtocol.ReminderScheduled(
-                Entity,
-                key,
-                when,
+                command,
                 ReminderScheduleResponseCode.Error,
                 $"Error scheduling reminder: {ex.Message}");
         }
@@ -69,7 +65,7 @@ internal sealed class ReminderClient : IReminderClient
         object message,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleSingleReminder(Entity, key, firstOccurrence, message, RepeatInterval: interval);
+        var command = new ReminderProtocol.ScheduleReminder(Entity, key, firstOccurrence, message, RepeatInterval: interval);
 
         try
         {
@@ -83,18 +79,14 @@ internal sealed class ReminderClient : IReminderClient
         catch (AskTimeoutException)
         {
             return new ReminderProtocol.ReminderScheduled(
-                Entity,
-                key,
-                firstOccurrence,
+                command,
                 ReminderScheduleResponseCode.Error,
                 "Request timed out while communicating with reminder scheduler");
         }
         catch (Exception ex)
         {
             return new ReminderProtocol.ReminderScheduled(
-                Entity,
-                key,
-                firstOccurrence,
+                command,
                 ReminderScheduleResponseCode.Error,
                 $"Error scheduling recurring reminder: {ex.Message}");
         }
