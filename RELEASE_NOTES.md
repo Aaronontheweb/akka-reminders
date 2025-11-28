@@ -1,3 +1,20 @@
+#### 0.2.3 November 28th 2025 ####
+
+**New Features**
+
+- **Retry Support for Failed Scheduling Operations** - Restructured `ReminderScheduled` response to include the original `ScheduleReminder` command, making it easier to retry failed scheduling operations due to transient issues like network partitions or singleton unreachability ([#34](https://github.com/Aaronontheweb/akka-reminders/pull/34))
+  - `ReminderScheduled` now contains `OriginalCommand` with full scheduling context (entity, key, when, message payload, repeat interval)
+  - Added `ToScheduleReminder()` method to `ScheduledReminder` for converting storage records back to commands
+  - Enables seamless retry logic without command reconstruction
+
+**Breaking Changes**
+
+- **Renamed `ScheduleSingleReminder` to `ScheduleReminder`** - The message type now accurately reflects that it handles both single and recurring reminders via the optional `RepeatInterval` parameter ([#34](https://github.com/Aaronontheweb/akka-reminders/pull/34))
+
+**Improvements**
+
+- Updated Akka.Cluster dependency from 1.5.55 to 1.5.56 ([#32](https://github.com/Aaronontheweb/akka-reminders/pull/32))
+
 #### 0.2.2 November 6th 2025 ####
 
 **Bug Fixes**
