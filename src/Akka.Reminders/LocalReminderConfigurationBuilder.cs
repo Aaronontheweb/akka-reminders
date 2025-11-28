@@ -16,7 +16,7 @@ public sealed class LocalReminderConfigurationBuilder
 {
     private readonly Dictionary<string, IActorRef> _shardRegions = new();
     private Func<ActorSystem, IReminderStorage>? _storageFactory;
-    private IShardRegionResolver? _resolver;
+    private Func<ActorSystem, IShardRegionResolver>? _resolver;
     private ReminderSettings _settings = new();
 
     /// <summary>
@@ -54,7 +54,7 @@ public sealed class LocalReminderConfigurationBuilder
     /// If you use this method, any shard regions registered via <see cref="WithShardRegion"/> or
     /// <see cref="WithShardRegions"/> will be ignored.
     /// </remarks>
-    public LocalReminderConfigurationBuilder WithResolver(IShardRegionResolver resolver)
+    public LocalReminderConfigurationBuilder WithResolver(Func<ActorSystem, IShardRegionResolver> resolver)
     {
         _resolver = resolver;
         return this;
@@ -129,9 +129,9 @@ public sealed class LocalReminderConfigurationBuilder
         return _storageFactory ?? (_ => new InMemoryReminderStorage());
     }
 
-    internal IShardRegionResolver GetResolver()
+    internal Func<ActorSystem,IShardRegionResolver> GetResolver()
     {
-        return _resolver ?? new TestShardRegionResolver(_shardRegions);
+        return _resolver ?? (_ => new TestShardRegionResolver(_shardRegions));
     }
 
     internal ReminderSettings GetSettings()

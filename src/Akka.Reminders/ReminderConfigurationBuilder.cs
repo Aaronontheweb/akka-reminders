@@ -26,29 +26,6 @@ public sealed class ReminderConfigurationBuilder
     }
 
     /// <summary>
-    /// Configures the storage backend using a specific type.
-    /// </summary>
-    /// <typeparam name="TStorage">The storage type with a parameterless constructor.</typeparam>
-    /// <returns>This builder for method chaining.</returns>
-    public ReminderConfigurationBuilder WithStorage<TStorage>()
-        where TStorage : IReminderStorage, new()
-    {
-        _storageFactory = _ => new TStorage();
-        return this;
-    }
-
-    /// <summary>
-    /// Configures the storage backend using a pre-created instance.
-    /// </summary>
-    /// <param name="storage">The storage instance to use.</param>
-    /// <returns>This builder for method chaining.</returns>
-    public ReminderConfigurationBuilder WithStorage(IReminderStorage storage)
-    {
-        _storageFactory = _ => storage;
-        return this;
-    }
-
-    /// <summary>
     /// Configures the storage backend to use in-memory storage (this is the default if no storage is specified).
     /// </summary>
     /// <returns>This builder for method chaining.</returns>
@@ -58,7 +35,7 @@ public sealed class ReminderConfigurationBuilder
     /// </remarks>
     public ReminderConfigurationBuilder WithInMemoryStorage()
     {
-        return WithStorage<InMemoryReminderStorage>();
+        return WithStorage(sys => new InMemoryReminderStorage());
     }
 
     /// <summary>
@@ -70,16 +47,6 @@ public sealed class ReminderConfigurationBuilder
     {
         _resolverFactory = factory;
         return this;
-    }
-
-    /// <summary>
-    /// Configures the shard region resolver using a factory function.
-    /// </summary>
-    /// <param name="factory">Factory function to create the resolver instance.</param>
-    /// <returns>This builder for method chaining.</returns>
-    public ReminderConfigurationBuilder WithResolver(IShardRegionResolver factory)
-    {
-        return WithResolver(_ => factory);
     }
 
     /// <summary>
