@@ -20,6 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Akka.Cluster" />
     <EmbeddedResource Include="Scripts\SqlServer-Create.sql" />
     <EmbeddedResource Include="Scripts\PostgreSql-Create.sql" />
   </ItemGroup>

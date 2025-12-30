@@ -6,7 +6,7 @@
   </PropertyGroup>
   <!-- App dependencies -->
   <ItemGroup>
-    <PackageVersion Include="Akka.Cluster" Version="1.5.56" />
+    <PackageVersion Include="Akka.Cluster" Version="1.5.57" />
     <PackageVersion Include="Akka.Cluster.Hosting" Version="$(AkkaHostingVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="9.0.8" />
     <PackageVersion Include="Microsoft.Data.SqlClient" Version="6.1.3" />
