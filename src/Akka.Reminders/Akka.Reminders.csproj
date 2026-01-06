@@ -15,7 +15,6 @@
     </ItemGroup>
 
     <ItemGroup>
-      <PackageReference Include="Akka.Cluster" VersionOverride="1.5.56" />
       <PackageReference Include="Akka.Cluster.Hosting" />
     </ItemGroup>
 
