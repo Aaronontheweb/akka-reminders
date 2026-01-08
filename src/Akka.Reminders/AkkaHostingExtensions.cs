@@ -1,5 +1,6 @@
 using Akka.Actor;
 using Akka.Cluster.Tools.Singleton;
+using Akka.Event;
 using Akka.Hosting;
 
 namespace Akka.Reminders;
@@ -39,29 +40,45 @@ public static class AkkaHostingExtensions
         // Add the setup to the actor system
         builder.AddSetup(setup);
 
-        // Start both the singleton manager and proxy as /system actors
+        // Start the singleton manager (if this node has the role) and proxy as /system actors
         builder.WithActors((system, registry) =>
         {
             var extendedSystem = (ExtendedActorSystem)system;
+            var log = Logging.GetLogger(system, typeof(AkkaHostingExtensions));
 
-            // Create the storage and resolver instances
-            var storage = setup.StorageFactory(system);
-            var resolver = setup.ShardRegionResolverFactory(system);
+            // Check if this node has the required role to host the singleton
+            var nodeRoles = system.Settings.Config.GetStringList("akka.cluster.roles");
+            var canHostSingleton = string.IsNullOrEmpty(setup.Role) || nodeRoles.Contains(setup.Role);
 
-            // Create singleton settings
-            var singletonSettings = ClusterSingletonManagerSettings.Create(system);
-            if (!string.IsNullOrEmpty(setup.Role))
+            if (canHostSingleton)
             {
-                singletonSettings = singletonSettings.WithRole(setup.Role);
+                // Create the storage and resolver instances
+                var storage = setup.StorageFactory(system);
+                var resolver = setup.ShardRegionResolverFactory(system);
+
+                // Create singleton settings
+                var singletonSettings = ClusterSingletonManagerSettings.Create(system);
+                if (!string.IsNullOrEmpty(setup.Role))
+                {
+                    singletonSettings = singletonSettings.WithRole(setup.Role);
+                }
+
+                // Create and start the singleton manager as a /system actor
+                var singletonProps = ClusterSingletonManager.Props(
+                    singletonProps: Props.Create(() => new ReminderScheduler(setup.Settings, resolver, storage, system.Scheduler)),
+                    terminationMessage: PoisonPill.Instance,
+                    settings: singletonSettings);
+
+                extendedSystem.SystemActorOf(singletonProps, "reminder-scheduler");
+                log.Info("Reminder scheduler singleton manager started - this node can host the reminder scheduler.");
             }
-
-            // Create and start the singleton manager as a /system actor
-            var singletonProps = ClusterSingletonManager.Props(
-                singletonProps: Props.Create(() => new ReminderScheduler(setup.Settings, resolver, storage, system.Scheduler)),
-                terminationMessage: PoisonPill.Instance,
-                settings: singletonSettings);
-
-            var singletonManager = extendedSystem.SystemActorOf(singletonProps, "reminder-scheduler");
+            else
+            {
+                log.Info(
+                    "Node does not have role '{0}' - reminder scheduler proxy will forward messages to singleton host. " +
+                    "This node cannot host the reminder scheduler but can still schedule and cancel reminders.",
+                    setup.Role);
+            }
 
             // Create proxy settings
             // NOTE: The proxy is created on ALL nodes, but needs to know which role hosts the singleton
