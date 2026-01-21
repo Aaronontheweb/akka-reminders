@@ -155,7 +155,7 @@ public sealed class SqlReminderStorage : IReminderStorage
 
         // Calculate overview from remaining reminders
         var nextReminder = remainingReminders.OrderBy(r => r.When).FirstOrDefault();
-        var timeUntilNext = nextReminder != null ? nextReminder.When - now : TimeSpan.Zero;
+        var timeUntilNext = nextReminder != null ? nextReminder.When - now : TimeSpan.MaxValue;
 
         var adjustedOverview = new ReminderOverview
         {
@@ -247,7 +247,7 @@ public sealed class SqlReminderStorage : IReminderStorage
 
         // Calculate time until next reminder
         var nextReminder = allReminders.OrderBy(r => r.When).FirstOrDefault();
-        var timeUntilNext = nextReminder != null ? nextReminder.When - now : TimeSpan.Zero;
+        var timeUntilNext = nextReminder != null ? nextReminder.When - now : TimeSpan.MaxValue;
 
         return new ReminderOverview
         {

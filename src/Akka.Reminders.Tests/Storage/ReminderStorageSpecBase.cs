@@ -375,7 +375,30 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
 
         // Assert
         Assert.Equal(0, overview.TotalPendingReminders);
-        Assert.True(overview.TimeUntilNext >= TimeSpan.MaxValue || overview.TimeUntilNext == TimeSpan.Zero);
+        Assert.Equal(TimeSpan.MaxValue, overview.TimeUntilNext);
+    }
+
+    [Fact]
+    public async Task GetRemindersOverview_ApplyMethod_ShouldReturnHasNewerDate_WhenDatabaseIsEmpty()
+    {
+        // This test validates the fix for a bug where reminders scheduled against an empty
+        // database were never executed until the system restarted.
+        // The root cause was that SQL storage returned TimeSpan.Zero for empty databases,
+        // causing Apply() to return hasNewerDate=false for future reminders.
+
+        // Arrange - get overview from empty database
+        var now = DateTimeOffset.UtcNow;
+        var emptyOverview = await Storage!.GetRemindersOverviewAsync(now);
+
+        // Act - apply a new reminder scheduled for 5 minutes in the future
+        var futureReminder = CreateTestReminder(when: now.AddMinutes(5));
+        var (newOverview, hasNewerDate) = emptyOverview.Apply(futureReminder, now);
+
+        // Assert - hasNewerDate must be true so TryScheduleFetchReminders() is called
+        Assert.True(hasNewerDate,
+            "When database is empty, any new reminder should be considered 'newer' to trigger scheduling. " +
+            $"TimeUntilNext was: {emptyOverview.TimeUntilNext}");
+        Assert.Equal(1, newOverview.TotalPendingReminders);
     }
 
     [Fact]
