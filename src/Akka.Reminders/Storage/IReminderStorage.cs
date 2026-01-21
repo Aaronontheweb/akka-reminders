@@ -5,7 +5,7 @@ public sealed record ReminderOverview
     /// <summary>
     /// Determined from our actual data set - how soon is the next reminder?
     /// </summary>
-    public TimeSpan TimeUntilNext { get; init; } = TimeSpan.Zero;
+    public TimeSpan TimeUntilNext { get; init; } = TimeSpan.MaxValue;
     
     /// <summary>
     /// How many reminders are pending?
@@ -15,7 +15,8 @@ public sealed record ReminderOverview
     public (ReminderOverview newOverview, bool hasNewerDate) Apply(ScheduledReminder newReminder, DateTimeOffset now)
     {
         var newTimespan = newReminder.When - now;
-        var hasNewerDate = newTimespan <= TimeUntilNext;
+        // If TimeUntilNext is Zero (no reminders), any new reminder is "newer"
+        var hasNewerDate = TimeUntilNext == TimeSpan.Zero || newTimespan <= TimeUntilNext;
 
         return (new ReminderOverview
         {
