@@ -7,17 +7,30 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <VersionPrefix>0.2.4</VersionPrefix>
-    <PackageReleaseNotes>**Improvements**
+    <VersionPrefix>0.3.0</VersionPrefix>
+    <PackageReleaseNotes>**New Features**
 
-- **Simplified Akka.Hosting API** - Removed non-functional configuration methods from `ReminderConfigurationBuilder` to streamline the API surface ([#35](https://github.com/Aaronontheweb/akka-reminders/pull/35))
-  - Removed `WithStorage&lt;TStorage&gt;()` generic method that didn't work as intended
-  - Removed `WithStorage(IReminderStorage storage)` direct instance method
-  - Removed `WithResolver(IShardRegionResolver factory)` factory method
-  - Use storage-specific methods like `WithSqlServerStorage()` or `WithPostgreSqlStorage()` instead
+- **ClusterSingletonProxy Support for Non-Host Roles** - Nodes without the reminder host role can now use the reminders library without crashing at startup ([#51](https://github.com/Aaronontheweb/akka-reminders/pull/51))
+  - Added automatic role detection at startup
+  - Nodes without the host role create only `ClusterSingletonProxy` (proxy-only mode)
+  - Non-host nodes can schedule and cancel reminders via the proxy
+  - Includes informational logging to show node mode at startup
+  - Prevents `ArgumentException` on nodes without required role
+
+**Bug Fixes**
+
+- **Fixed SQL Storage Empty Database Scheduling** - Reminders scheduled against an empty SQL database are now executed immediately instead of requiring a system restart ([#62](https://github.com/Aaronontheweb/akka-reminders/pull/62))
+  - SQL storage now returns `TimeSpan.MaxValue` when no reminders exist, matching `InMemoryReminderStorage` behavior
+  - Added defensive check in `ReminderOverview.Apply()` to handle edge cases
+  - Ensures consistent behavior across all storage implementations
+
+**Improvements**
 
 - **Dependency Updates**
-  - Updated Microsoft.Data.SqlClient from 5.1.5 to 6.1.3 ([#28](https://github.com/Aaronontheweb/akka-reminders/pull/28))</PackageReleaseNotes>
+  - Updated Akka.Cluster.Hosting from 1.5.57 to 1.5.58 ([#55](https://github.com/Aaronontheweb/akka-reminders/pull/55))
+  - Updated Akka.Cluster from 1.5.56 to 1.5.57 ([#42](https://github.com/Aaronontheweb/akka-reminders/pull/42))
+  - Simplified Akka dependency management using single `AkkaHostingVersion` variable ([#45](https://github.com/Aaronontheweb/akka-reminders/pull/45))
+  - Updated Microsoft.Data.SqlClient from 6.1.3 to 6.1.4 ([#59](https://github.com/Aaronontheweb/akka-reminders/pull/59))</PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Visual Studio C# settings -->
