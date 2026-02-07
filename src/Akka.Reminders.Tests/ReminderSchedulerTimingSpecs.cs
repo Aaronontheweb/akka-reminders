@@ -244,7 +244,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
     }
 
     [Fact]
-    public async Task ReminderWithinMaxSlippage_ShouldFireImmediately()
+    public async Task ReminderWithinMaxSlippage_ShouldFireAtScheduledTime()
     {
         // Arrange
         var testProbe = CreateTestProbe();
@@ -254,7 +254,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var client = extension.CreateClient("test-region", "entity-1");
 
         var testScheduler = (TestScheduler)Sys.Scheduler;
-        var now = DateTimeOffset.UtcNow;
+        var now = testScheduler.Now;
 
         // Act - Schedule a reminder within the max slippage window (1 second)
         var result = await client.ScheduleSingleReminderAsync(
@@ -264,9 +264,10 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
 
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
-        // The reminder should fire almost immediately (within slippage)
-        // Advance just slightly to trigger processing
-        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
+        // Advance past the scheduled time — the reminder fires via a timer
+        // (not Self.Tell) to prevent tight delivery loops when actors reschedule
+        // the same key from within their delivery handler.
+        testScheduler.Advance(TimeSpan.FromSeconds(2));
 
         // Assert
         var message = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
