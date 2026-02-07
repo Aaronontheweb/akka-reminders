@@ -1,3 +1,12 @@
+#### 0.3.1 February 6th 2026 ####
+
+**Bug Fixes**
+
+- **Fixed Duplicate Delivery Loop When Rescheduling Single Reminders** - Resolved a critical bug where rescheduling the same reminder key from within its delivery handler caused a tight delivery loop (~12 deliveries/sec) ([#69](https://github.com/Aaronontheweb/akka-reminders/pull/69), [#70](https://github.com/Aaronontheweb/akka-reminders/pull/70))
+  - Replaced immediate `Self.Tell(FetchReminders.Instance)` with `Timers.StartSingleTimer` in `TryScheduleFetchReminders`
+  - Timer-based approach naturally debounces rapid calls and allows mark-completed cycle time to finish
+  - Prevents UPSERT from resetting `is_completed=FALSE` before delivery completion
+
 #### 0.3.0 January 21st 2026 ####
 
 **New Features**

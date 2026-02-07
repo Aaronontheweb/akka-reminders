@@ -7,30 +7,13 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <VersionPrefix>0.3.0</VersionPrefix>
-    <PackageReleaseNotes>**New Features**
+    <VersionPrefix>0.3.1</VersionPrefix>
+    <PackageReleaseNotes>**Bug Fixes**
 
-- **ClusterSingletonProxy Support for Non-Host Roles** - Nodes without the reminder host role can now use the reminders library without crashing at startup ([#51](https://github.com/Aaronontheweb/akka-reminders/pull/51))
-  - Added automatic role detection at startup
-  - Nodes without the host role create only `ClusterSingletonProxy` (proxy-only mode)
-  - Non-host nodes can schedule and cancel reminders via the proxy
-  - Includes informational logging to show node mode at startup
-  - Prevents `ArgumentException` on nodes without required role
-
-**Bug Fixes**
-
-- **Fixed SQL Storage Empty Database Scheduling** - Reminders scheduled against an empty SQL database are now executed immediately instead of requiring a system restart ([#62](https://github.com/Aaronontheweb/akka-reminders/pull/62))
-  - SQL storage now returns `TimeSpan.MaxValue` when no reminders exist, matching `InMemoryReminderStorage` behavior
-  - Added defensive check in `ReminderOverview.Apply()` to handle edge cases
-  - Ensures consistent behavior across all storage implementations
-
-**Improvements**
-
-- **Dependency Updates**
-  - Updated Akka.Cluster.Hosting from 1.5.57 to 1.5.58 ([#55](https://github.com/Aaronontheweb/akka-reminders/pull/55))
-  - Updated Akka.Cluster from 1.5.56 to 1.5.57 ([#42](https://github.com/Aaronontheweb/akka-reminders/pull/42))
-  - Simplified Akka dependency management using single `AkkaHostingVersion` variable ([#45](https://github.com/Aaronontheweb/akka-reminders/pull/45))
-  - Updated Microsoft.Data.SqlClient from 6.1.3 to 6.1.4 ([#59](https://github.com/Aaronontheweb/akka-reminders/pull/59))</PackageReleaseNotes>
+- **Fixed Duplicate Delivery Loop When Rescheduling Single Reminders** - Resolved a critical bug where rescheduling the same reminder key from within its delivery handler caused a tight delivery loop (~12 deliveries/sec) ([#69](https://github.com/Aaronontheweb/akka-reminders/pull/69), [#70](https://github.com/Aaronontheweb/akka-reminders/pull/70))
+  - Replaced immediate `Self.Tell(FetchReminders.Instance)` with `Timers.StartSingleTimer` in `TryScheduleFetchReminders`
+  - Timer-based approach naturally debounces rapid calls and allows mark-completed cycle time to finish
+  - Prevents UPSERT from resetting `is_completed=FALSE` before delivery completion</PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Visual Studio C# settings -->
