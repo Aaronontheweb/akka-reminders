@@ -110,16 +110,18 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
     private void TryScheduleFetchReminders()
     {
-        // If we have pending reminders, and we're within the slippage window
-        if (PendingReminders?.TotalPendingReminders > 0 && PendingReminders.TimeUntilNext <= Settings.MaxSlippage)
+        if (PendingReminders?.TotalPendingReminders > 0)
         {
-            // Immediately fetch reminders
-            Self.Tell(FetchReminders.Instance);
-        }
-        else if (PendingReminders?.TotalPendingReminders > 0) // have reminders, but not within the slippage window
-        {
-            // Schedule a reminder to fetch reminders
-            Timers.StartSingleTimer(FetchReminders.Instance, FetchReminders.Instance, PendingReminders.TimeUntilNext);
+            // Always use a timer — never Self.Tell(FetchReminders.Instance) directly.
+            // Self.Tell creates a tight delivery loop when an actor reschedules the same
+            // reminder key from within its delivery handler (the UPSERT resets is_completed,
+            // and the immediate fetch re-delivers it ~12 times/second).
+            // StartSingleTimer with the same key cancels any prior pending timer,
+            // naturally debouncing rapid TryScheduleFetchReminders calls.
+            var delay = PendingReminders.TimeUntilNext;
+            if (delay < TimeSpan.Zero)
+                delay = TimeSpan.Zero;
+            Timers.StartSingleTimer(FetchReminders.Instance, FetchReminders.Instance, delay);
         }
     }
 
