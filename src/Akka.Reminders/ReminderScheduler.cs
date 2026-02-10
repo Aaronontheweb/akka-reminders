@@ -456,6 +456,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             }
 
             // Phase 3: Mark completed and permanently failed reminders
+            var markCompleteFailed = false;
             try
             {
                 var allCompleted = completedReminders.Concat(permanentlyFailedReminders);
@@ -464,15 +465,17 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 if (!markResult)
                 {
                     _log.Error(
-                        "MarkRemindersAsCompletedAsync returned false for [{0}] reminders — they may be re-delivered on the next tick",
+                        "MarkRemindersAsCompletedAsync returned false for [{0}] reminders — they will be retried on the next tick",
                         completedReminders.Count + permanentlyFailedReminders.Count);
+                    markCompleteFailed = true;
                 }
             }
             catch (Exception ex)
             {
                 _log.Error(ex,
-                    "Failed to mark [{0}] reminders as completed — they may be re-delivered on the next tick",
+                    "Failed to mark [{0}] reminders as completed — they will be retried on the next tick",
                     completedReminders.Count + permanentlyFailedReminders.Count);
+                markCompleteFailed = true;
             }
 
             // Phase 4: Schedule retries for failed reminders
@@ -508,6 +511,17 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             totalRecurring += recurringRemindersToSchedule.Count;
             totalRetried += failedRemindersToRetry.Count;
             totalFailed += permanentlyFailedReminders.Count;
+
+            // If mark-complete failed, stop processing — the next timer tick
+            // provides natural backoff rather than tight-looping against a
+            // struggling database. Un-marked reminders may be re-delivered on
+            // the next tick, which is acceptable under at-least-once semantics.
+            if (markCompleteFailed)
+            {
+                _log.Warning("Stopping batch processing early due to mark-complete failure. " +
+                             "Remaining due reminders will be processed on the next tick.");
+                break;
+            }
 
             // If we got fewer than MaxBatchSize, there are no more due reminders
             if (batch.Reminders.Count < Settings.MaxBatchSize)
