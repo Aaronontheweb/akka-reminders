@@ -77,6 +77,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// </summary>
     public ReminderOverview PendingReminders { get; set; } = ReminderOverview.Empty;
 
+    /// <summary>
+    /// Write circuit breaker. When database writes fail (mark-complete, schedule), this flag
+    /// is set to prevent fetching and delivering full batches against a database that can't
+    /// persist completions. While open, ProcessReminders probes with a single reminder to
+    /// detect write recovery before resuming full-batch processing.
+    /// </summary>
+    private bool _writeCircuitOpen;
+
     private readonly ILoggingAdapter _log = Context.GetLogger();
 
     public IStash Stash { get; set; } = null!;
@@ -357,9 +365,15 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         var totalRetried = 0;
         var totalFailed = 0;
 
-        // Track reminders already delivered in this run to avoid re-delivery
-        // if mark-complete fails and the same reminders are re-fetched.
-        var deliveredKeys = new HashSet<(string ShardRegionName, string EntityId, string ReminderKey)>();
+        // When the write circuit is open, probe with a single reminder to test
+        // write availability before resuming full-batch processing. This limits
+        // the blast radius to at most 1 duplicate delivery during the probe.
+        var effectiveBatchSize = _writeCircuitOpen ? 1 : Settings.MaxBatchSize;
+
+        if (_writeCircuitOpen)
+        {
+            _log.Warning("Write circuit is open — probing with a single reminder before resuming");
+        }
 
         // Process batches until we've handled all due reminders
         while (true)
@@ -370,7 +384,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             {
                 using var fetchCts = new CancellationTokenSource(Settings.StorageTimeout);
                 batch = await Storage.GetNextRemindersAsync(untilDeadline, TimeProvider.Now,
-                    Settings.MaxBatchSize, fetchCts.Token);
+                    effectiveBatchSize, fetchCts.Token);
                 _log.Info("Fetched {0} due reminders (batch)", batch.Reminders.Count);
             }
             catch (Exception ex)
@@ -390,9 +404,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
             foreach (var reminder in batch.Reminders)
             {
-                var reminderKey = (reminder.Entity.ShardRegionName, reminder.Entity.EntityId, reminder.Key.Name);
-                var alreadyDelivered = deliveredKeys.Contains(reminderKey);
-
                 var shardRegion = ShardRegionResolver.TryResolve(reminder.Entity);
                 if (shardRegion is null)
                 {
@@ -423,24 +434,13 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 }
                 else
                 {
-                    // Skip delivery if already sent in a previous batch iteration
-                    // (can happen if mark-complete failed and the reminder was re-fetched)
-                    if (!alreadyDelivered)
-                    {
-                        _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
-                        ShardRegionResolver.DeliverReminder(reminder.Entity, reminder.Message);
-                        deliveredKeys.Add(reminderKey);
-                    }
-                    else
-                    {
-                        _log.Debug("Skipping re-delivery of reminder {0} — already delivered in this processing run", reminder);
-                    }
+                    _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
+                    ShardRegionResolver.DeliverReminder(reminder.Entity, reminder.Message);
 
-                    // Always attempt to mark as completed, even if we skipped delivery
                     completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now,
                         ReminderCompletionStatus.Delivered));
 
-                    if (reminder.RepeatInterval.HasValue && !alreadyDelivered)
+                    if (reminder.RepeatInterval.HasValue)
                     {
                         var nextOccurrence = reminder with
                         {
@@ -456,7 +456,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             }
 
             // Phase 3: Mark completed and permanently failed reminders
-            var markCompleteFailed = false;
+            var writeFailed = false;
             try
             {
                 var allCompleted = completedReminders.Concat(permanentlyFailedReminders);
@@ -465,46 +465,54 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 if (!markResult)
                 {
                     _log.Error(
-                        "MarkRemindersAsCompletedAsync returned false for [{0}] reminders — they will be retried on the next tick",
+                        "MarkRemindersAsCompletedAsync returned false for [{0}] reminders",
                         completedReminders.Count + permanentlyFailedReminders.Count);
-                    markCompleteFailed = true;
+                    writeFailed = true;
                 }
             }
             catch (Exception ex)
             {
                 _log.Error(ex,
-                    "Failed to mark [{0}] reminders as completed — they will be retried on the next tick",
+                    "Failed to mark [{0}] reminders as completed",
                     completedReminders.Count + permanentlyFailedReminders.Count);
-                markCompleteFailed = true;
+                writeFailed = true;
             }
 
             // Phase 4: Schedule retries for failed reminders
-            try
+            if (!writeFailed)
             {
-                using var retryCts = new CancellationTokenSource(Settings.StorageTimeout);
-                foreach (var retryReminder in failedRemindersToRetry)
+                try
                 {
-                    await Storage.ScheduleReminderAsync(retryReminder, retryCts.Token);
+                    using var retryCts = new CancellationTokenSource(Settings.StorageTimeout);
+                    foreach (var retryReminder in failedRemindersToRetry)
+                    {
+                        await Storage.ScheduleReminderAsync(retryReminder, retryCts.Token);
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                _log.Error(ex, "Failed to schedule [{0}] retry reminders", failedRemindersToRetry.Count);
+                catch (Exception ex)
+                {
+                    _log.Error(ex, "Failed to schedule [{0}] retry reminders", failedRemindersToRetry.Count);
+                    writeFailed = true;
+                }
             }
 
             // Phase 5: Schedule next occurrences for recurring reminders
-            try
+            if (!writeFailed)
             {
-                using var recurCts = new CancellationTokenSource(Settings.StorageTimeout);
-                foreach (var recurringReminder in recurringRemindersToSchedule)
+                try
                 {
-                    await Storage.ScheduleReminderAsync(recurringReminder, recurCts.Token);
+                    using var recurCts = new CancellationTokenSource(Settings.StorageTimeout);
+                    foreach (var recurringReminder in recurringRemindersToSchedule)
+                    {
+                        await Storage.ScheduleReminderAsync(recurringReminder, recurCts.Token);
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                _log.Error(ex, "Failed to schedule [{0}] recurring reminders",
-                    recurringRemindersToSchedule.Count);
+                catch (Exception ex)
+                {
+                    _log.Error(ex, "Failed to schedule [{0}] recurring reminders",
+                        recurringRemindersToSchedule.Count);
+                    writeFailed = true;
+                }
             }
 
             totalDelivered += completedReminders.Count;
@@ -512,19 +520,28 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             totalRetried += failedRemindersToRetry.Count;
             totalFailed += permanentlyFailedReminders.Count;
 
-            // If mark-complete failed, stop processing — the next timer tick
-            // provides natural backoff rather than tight-looping against a
-            // struggling database. Un-marked reminders may be re-delivered on
-            // the next tick, which is acceptable under at-least-once semantics.
-            if (markCompleteFailed)
+            // If any write failed, open the circuit breaker and stop processing.
+            // The next timer tick will probe with a single reminder before resuming.
+            if (writeFailed)
             {
-                _log.Warning("Stopping batch processing early due to mark-complete failure. " +
-                             "Remaining due reminders will be processed on the next tick.");
+                _writeCircuitOpen = true;
+                _log.Warning("Write circuit OPEN — database writes are failing. " +
+                             "Pausing batch processing until writes recover. " +
+                             "Delivered [{0}] reminders in this run before failure.",
+                    totalDelivered);
                 break;
             }
 
-            // If we got fewer than MaxBatchSize, there are no more due reminders
-            if (batch.Reminders.Count < Settings.MaxBatchSize)
+            // Write probe succeeded — close the circuit and resume full batches
+            if (_writeCircuitOpen)
+            {
+                _writeCircuitOpen = false;
+                effectiveBatchSize = Settings.MaxBatchSize;
+                _log.Info("Write circuit CLOSED — database writes recovered, resuming full-batch processing");
+            }
+
+            // If we got fewer than the effective batch size, there are no more due reminders
+            if (batch.Reminders.Count < effectiveBatchSize)
                 break;
         }
 
