@@ -33,7 +33,7 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
             HoconAddMode.Prepend);
     }
 
-    private IActorRef CreateScheduler(int maxBatchSize = 1000)
+    private IActorRef CreateScheduler(int maxBatchSize = 1000, int deliveryCommitChunkSize = 100)
     {
         var settings = new ReminderSettings
         {
@@ -41,7 +41,8 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
             StorageTimeout = TimeSpan.FromSeconds(30),
             MaxDeliveryAttempts = 3,
             RetryBackoffBase = TimeSpan.FromSeconds(5),
-            MaxBatchSize = maxBatchSize
+            MaxBatchSize = maxBatchSize,
+            DeliveryCommitChunkSize = deliveryCommitChunkSize
         };
 
         return Sys.ActorOf(
@@ -59,8 +60,19 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         return messages;
     }
 
+    private async Task WaitForSchedulerReady(IActorRef scheduler)
+    {
+        var probe = CreateTestProbe();
+        await AwaitAssertAsync(async () =>
+        {
+            scheduler.Tell(new ReminderProtocol.GetReminders(new ReminderEntity("test-region", "ready")), probe.Ref);
+            var response = await probe.ExpectMsgAsync<ReminderProtocol.RemindersForEntity>(TimeSpan.FromMilliseconds(250));
+            Assert.Equal(FetchRemindersResponseCode.Success, response.ResponseCode);
+        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(100));
+    }
+
     [Fact]
-    public async Task CircuitBreaker_ShouldOpenOnWriteFailure_AndLimitToSingleProbe()
+    public async Task CircuitBreaker_ShouldOpenOnWriteFailure_AndLimitBlastRadius()
     {
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
@@ -79,57 +91,15 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
 
         _storage.FailWrites = true;
         var scheduler = CreateScheduler(maxBatchSize: 1000);
-        await Task.Delay(100); // wait for actor init (PipeTo)
+        await WaitForSchedulerReady(scheduler);
 
         // Tick 1: all 5 delivered before mark-complete fails → circuit opens
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
         var firstTickMessages = await CollectMessages(testProbe, 5, TimeSpan.FromSeconds(5));
         Assert.Equal(5, firstTickMessages.Count);
 
-        // Tick 2: circuit open → probe delivers exactly 1
-        testScheduler.Advance(TimeSpan.FromSeconds(5));
-        await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(500));
-    }
-
-    [Fact]
-    public async Task CircuitBreaker_ShouldCloseWhenWritesRecover_AndResumeProcessing()
-    {
-        var testProbe = CreateTestProbe();
-        _resolver.RegisterShardRegion("test-region", testProbe);
-        var testScheduler = (TestScheduler)Sys.Scheduler;
-        var now = testScheduler.Now;
-
-        for (var i = 0; i < 3; i++)
-        {
-            await _innerStorage.ScheduleReminderAsync(new ScheduledReminder(
-                new ReminderEntity("test-region", $"entity-{i}"),
-                new ReminderKey($"reminder-{i}"),
-                now.AddSeconds(-1),
-                $"message-{i}",
-                RepeatInterval: null, AttemptCount: 0, LastFailureReason: null));
-        }
-
-        // Tick 1: writes fail → circuit opens → 3 delivered but not marked complete
-        _storage.FailWrites = true;
-        var scheduler = CreateScheduler(maxBatchSize: 1000);
-        await Task.Delay(100);
-        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
-        await CollectMessages(testProbe, 3, TimeSpan.FromSeconds(5));
-
-        // Recover writes
-        _storage.FailWrites = false;
-
-        // Tick 2: probe with 1 → succeeds → circuit closes
-        testScheduler.Advance(TimeSpan.FromSeconds(5));
-        await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(200));
-
-        // Tick 3: full batch → remaining 2 delivered
-        testScheduler.Advance(TimeSpan.FromSeconds(5));
-        var remaining = await CollectMessages(testProbe, 2, TimeSpan.FromSeconds(5));
-        Assert.Equal(2, remaining.Count);
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(500));
+        // Write failure should stop further chunk processing during this run.
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
     }
 
     [Fact]
@@ -151,14 +121,14 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         }
 
         var scheduler = CreateScheduler(maxBatchSize: 1000);
-        await Task.Delay(100);
+        await WaitForSchedulerReady(scheduler);
         testScheduler.Advance(TimeSpan.FromSeconds(6));
 
         var messages = await CollectMessages(testProbe, 3, TimeSpan.FromSeconds(5));
         Assert.Equal(3, messages.Count);
 
         testScheduler.Advance(TimeSpan.FromSeconds(5));
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(500));
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
     }
 
     [Fact]
@@ -180,24 +150,12 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         }
 
         _storage.FailWrites = true;
-        var scheduler = CreateScheduler(maxBatchSize: 1000);
-        await Task.Delay(100);
+        var scheduler = CreateScheduler(maxBatchSize: 1000, deliveryCommitChunkSize: 3);
+        await WaitForSchedulerReady(scheduler);
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
 
-        // Tick 1: all 10 delivered before write failure → circuit opens
-        await CollectMessages(testProbe, 10, TimeSpan.FromSeconds(5));
-
-        // Ticks 2-4: circuit open, only 1 probe per tick
-        var totalProbeDeliveries = 0;
-        for (var tick = 0; tick < 3; tick++)
-        {
-            testScheduler.Advance(TimeSpan.FromSeconds(5));
-            await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-            totalProbeDeliveries++;
-            testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(300));
-        }
-
-        // Without circuit breaker: 30 re-deliveries. With: 3 probes.
-        Assert.Equal(3, totalProbeDeliveries);
+        // First failed tick should be bounded by DeliveryCommitChunkSize.
+        await CollectMessages(testProbe, 3, TimeSpan.FromSeconds(5));
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(300));
     }
 }

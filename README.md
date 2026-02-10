@@ -297,6 +297,10 @@ Configure reminder behavior and performance characteristics:
         // Maximum reminders fetched per batch (limits query size under load)
         MaxBatchSize = 1000,
 
+        // Maximum reminders delivered before writes are attempted.
+        // Lower values reduce duplicate blast radius during write outages.
+        DeliveryCommitChunkSize = 100,
+
         // Base delay for exponential backoff on retries
         // Actual delay = RetryBackoffBase * (2 ^ attemptCount)
         RetryBackoffBase = TimeSpan.FromSeconds(30)
@@ -577,6 +581,7 @@ public async Task Reminder_should_fire_at_scheduled_time()
 - **Delivery tracking**: Reminders track delivery attempts and failure reasons
 - **Periodic pruning**: Automatic cleanup of old completed/cancelled reminders
 - **Write circuit breaker**: Automatically pauses batch delivery when database writes fail, probing with a single reminder until writes recover. Prevents duplicate delivery storms during database outages.
+- **Bounded first-failure blast radius**: Interleaved deliver/persist chunking caps duplicate deliveries on the first failed tick to `DeliveryCommitChunkSize`.
 
 For a detailed analysis of failure modes and design trade-offs, see [Failure Modes and Design Decisions](docs/design/failure-modes.md).
 

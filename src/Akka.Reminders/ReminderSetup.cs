@@ -86,6 +86,7 @@ public sealed class ReminderSetup : Setup
     /// </summary>
     public ReminderSetup WithSettings(ReminderSettings settings)
     {
+        settings.Validate();
         return new ReminderSetup
         {
             StorageFactory = StorageFactory,

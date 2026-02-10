@@ -17,6 +17,16 @@ internal sealed class FailableReminderStorage : IReminderStorage
     /// </summary>
     public bool FailWrites { get; set; }
 
+    /// <summary>
+    /// When true, MarkRemindersAsCompletedAsync throws.
+    /// </summary>
+    public bool FailMarkCompletedWrites { get; set; }
+
+    /// <summary>
+    /// When true, ScheduleReminderAsync throws.
+    /// </summary>
+    public bool FailScheduleWrites { get; set; }
+
     public FailableReminderStorage(IReminderStorage inner)
     {
         _inner = inner;
@@ -26,14 +36,14 @@ internal sealed class FailableReminderStorage : IReminderStorage
 
     public Task<bool> MarkRemindersAsCompletedAsync(IEnumerable<CompletedReminder> keys, CancellationToken ct = default)
     {
-        if (FailWrites)
+        if (FailWrites || FailMarkCompletedWrites)
             throw new TimeoutException("Simulated database write timeout");
         return _inner.MarkRemindersAsCompletedAsync(keys, ct);
     }
 
     public Task<ReminderProtocol.ReminderScheduled> ScheduleReminderAsync(ScheduledReminder reminder, CancellationToken ct = default)
     {
-        if (FailWrites)
+        if (FailWrites || FailScheduleWrites)
             throw new TimeoutException("Simulated database write timeout");
         return _inner.ScheduleReminderAsync(reminder, ct);
     }

@@ -14,10 +14,11 @@ Each tick of the `ReminderScheduler` runs `ProcessReminders`, which loops throug
 
 ```
 Fetch batch (SELECT with LIMIT/TOP)
-  → Deliver via Tell (fire-and-forget, irrevocable)
-  → Mark completed (batched UPDATE)
-  → Schedule retries for unresolvable shard regions
-  → Schedule next occurrence for recurring reminders
+  → Process in delivery/persist chunks
+      → Deliver via Tell (fire-and-forget, irrevocable)
+      → Mark completed one-time reminders (batched UPDATE)
+      → Schedule retries for unresolvable shard regions
+      → Schedule next occurrence for recurring reminders
   → Loop until no more due reminders
 ```
 
@@ -80,12 +81,33 @@ Each chunk auto-commits independently (no wrapping transaction). If chunk 4 of 5
 - **Probing:** On the next tick, if the circuit is open, `effectiveBatchSize` drops to 1. The scheduler fetches and delivers a single reminder, then attempts mark-complete. This limits the blast radius to 1 duplicate delivery.
 - **Circuit closes:** If the probe's write succeeds, `_writeCircuitOpen` is reset to `false` and `effectiveBatchSize` returns to `MaxBatchSize`. The loop breaks (since `1 < MaxBatchSize`), and on the next tick, full-batch processing resumes.
 
+### 5. Interleaved Deliver/Persist Chunks (`DeliveryCommitChunkSize`)
+
+**Problem:** Even with a write circuit breaker, the first tick after writes fail could still deliver a full batch (for example, 1,000 reminders) before the first write failure is detected.
+
+**Fix:** Each fetched batch is processed in smaller chunks (`DeliveryCommitChunkSize`, default 100). After each chunk is delivered, writes are attempted immediately. If writes fail, processing stops before the next chunk.
+
+This bounds first-failure duplicate blast radius to chunk size instead of full fetch size.
+
+### 6. Recurring durability boundary changed
+
+**Problem:** If mark-complete succeeded for a recurring reminder but scheduling the next occurrence failed, the recurring chain could break permanently.
+
+**Fix:** Recurring reminders are no longer marked complete. Instead, their durability boundary is successful persistence of the next occurrence (idempotent upsert). If scheduling the next occurrence fails, the original reminder remains pending and can be retried on the next tick.
+
 **Blast radius comparison during a 1-minute write outage (12 ticks at 5s interval):**
 
 | Scenario | Deliveries per tick | Total duplicates |
 |----------|-------------------:|----------------:|
 | No mitigation (original code) | 1,000 | 12,000 |
 | With circuit breaker | 1 (probe) | 12 |
+
+**First-failure duplicate bound:**
+
+| Scenario | First failed tick duplicate upper bound |
+|----------|---------------------------------------:|
+| Legacy full-batch flow | `MaxBatchSize` |
+| Interleaved chunk flow | `DeliveryCommitChunkSize` |
 
 ## Remaining Accepted Risks
 
@@ -94,12 +116,6 @@ Each chunk auto-commits independently (no wrapping transaction). If chunk 4 of 5
 On the first tick after writes break, the scheduler has no way to know writes are failing until it tries. It delivers a full batch before discovering the problem. This is unavoidable without a health-check mechanism that runs before fetch.
 
 **Accepted because:** One batch of duplicates is tolerable. The circuit breaker prevents the sustained flood.
-
-### Recurring reminder chain break (narrow timing window)
-
-If mark-complete succeeds for a recurring reminder but scheduling the next occurrence fails (because writes broke between those two calls), the recurring chain is permanently broken. The original is marked `Delivered` and the next occurrence never gets scheduled.
-
-**Accepted because:** This requires a transient failure between two write calls within the same tick — a very narrow window. In the sustained "reads work, writes fail" scenario, both calls fail consistently, so the reminder stays pending and the chain is preserved. Detecting and recovering from this edge case would require a separate reconciliation process, which is out of scope for now.
 
 ### Probe re-delivery
 
