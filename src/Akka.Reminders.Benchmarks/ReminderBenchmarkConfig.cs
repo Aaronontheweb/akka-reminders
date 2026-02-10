@@ -35,7 +35,7 @@ public sealed class ReminderBenchmarkConfig : ManualConfig
         public int PriorityInCategory => 0;
         public bool IsNumeric => true;
         public UnitType UnitType => UnitType.Dimensionless;
-        public string Legend => "Reminders processed per second (based on OperationsPerInvoke)";
+        public string Legend => "Reminders processed per second (derived from ReminderCount parameter and mean time)";
 
         public string GetValue(Summary summary, BenchmarkCase benchmarkCase)
         {
@@ -52,8 +52,15 @@ public sealed class ReminderBenchmarkConfig : ManualConfig
             if (meanNs <= 0)
                 return "N/A";
 
-            // Mean is already per-operation when OperationsPerInvoke is set
-            var remindersPerSecond = 1_000_000_000.0 / meanNs;
+            // Read ReminderCount from the benchmark parameters to compute per-reminder throughput
+            var reminderCountParam = benchmarkCase.Parameters.Items
+                .FirstOrDefault(p => p.Name == "ReminderCount");
+            if (reminderCountParam == null)
+                return "N/A";
+
+            var reminderCount = (int)reminderCountParam.Value;
+            var meanSeconds = meanNs / 1_000_000_000.0;
+            var remindersPerSecond = reminderCount / meanSeconds;
             return remindersPerSecond.ToString("N0");
         }
 

@@ -16,7 +16,7 @@
   <ItemGroup>
     <PackageReference Include="Akka.Cluster.Hosting" />
     <PackageReference Include="BenchmarkDotNet" />
-    <PackageReference Include="Testcontainers.PostgreSql" />
+    <PackageReference Include="Npgsql" />
   </ItemGroup>
 
 </Project>

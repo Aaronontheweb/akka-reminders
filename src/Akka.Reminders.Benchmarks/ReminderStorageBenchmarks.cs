@@ -13,7 +13,7 @@ public class ReminderStorageBenchmarks : SqlReminderBenchmarkBase
     [Params(1000, 5000, 25000)]
     public int ReminderCount { get; set; }
 
-    [Params(500, 1000, 5000)]
+    [Params(1000, 5000)]
     public int MaxBatchSize { get; set; }
 
     [IterationSetup]
