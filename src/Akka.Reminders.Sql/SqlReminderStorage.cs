@@ -187,52 +187,43 @@ public sealed class SqlReminderStorage : IReminderStorage
             await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
             await connection.OpenAsync(cancellationToken);
 
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            // No transaction wrapper — each chunk auto-commits independently.
+            // If chunk 3 of 4 times out, chunks 1-2 are already persisted rather than
+            // rolling back all progress. This is safe because mark-complete is idempotent.
+            // Group by (Status, When) so each batch UPDATE shares the same completion metadata
+            var groups = remindersList.GroupBy(r => (r.Status, r.When));
 
-            try
+            foreach (var group in groups)
             {
-                // Group by (Status, When) so each batch UPDATE shares the same completion metadata
-                var groups = remindersList.GroupBy(r => (r.Status, r.When));
+                var items = group.ToList();
 
-                foreach (var group in groups)
+                // Chunk to stay within SQL parameter limits
+                for (var offset = 0; offset < items.Count; offset += MaxRemindersPerStatement)
                 {
-                    var items = group.ToList();
+                    var chunk = items.Skip(offset).Take(MaxRemindersPerStatement).ToList();
 
-                    // Chunk to stay within SQL parameter limits
-                    for (var offset = 0; offset < items.Count; offset += MaxRemindersPerStatement)
+                    await using var command = connection.CreateCommand();
+                    command.CommandText = _dialect.GetBatchMarkCompletedSql(
+                        _settings.SchemaName, _settings.TableName, chunk.Count);
+                    command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+
+                    // Shared parameters for this group
+                    _dialect.AddParameter(command, "@CompletedAtUtc", group.Key.When.UtcDateTime);
+                    _dialect.AddParameter(command, "@CompletionStatus", group.Key.Status.ToString());
+
+                    // Per-reminder key parameters
+                    for (var i = 0; i < chunk.Count; i++)
                     {
-                        var chunk = items.Skip(offset).Take(MaxRemindersPerStatement).ToList();
-
-                        await using var command = connection.CreateCommand();
-                        command.Transaction = transaction;
-                        command.CommandText = _dialect.GetBatchMarkCompletedSql(
-                            _settings.SchemaName, _settings.TableName, chunk.Count);
-                        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
-
-                        // Shared parameters for this group
-                        _dialect.AddParameter(command, "@CompletedAtUtc", group.Key.When.UtcDateTime);
-                        _dialect.AddParameter(command, "@CompletionStatus", group.Key.Status.ToString());
-
-                        // Per-reminder key parameters
-                        for (var i = 0; i < chunk.Count; i++)
-                        {
-                            _dialect.AddParameter(command, $"@sr{i}", chunk[i].Entity.ShardRegionName);
-                            _dialect.AddParameter(command, $"@eid{i}", chunk[i].Entity.EntityId);
-                            _dialect.AddParameter(command, $"@rk{i}", chunk[i].Key.Name);
-                        }
-
-                        await command.ExecuteNonQueryAsync(cancellationToken);
+                        _dialect.AddParameter(command, $"@sr{i}", chunk[i].Entity.ShardRegionName);
+                        _dialect.AddParameter(command, $"@eid{i}", chunk[i].Entity.EntityId);
+                        _dialect.AddParameter(command, $"@rk{i}", chunk[i].Key.Name);
                     }
-                }
 
-                await transaction.CommitAsync(cancellationToken);
-                return true;
+                    await command.ExecuteNonQueryAsync(cancellationToken);
+                }
             }
-            catch
-            {
-                await transaction.RollbackAsync(cancellationToken);
-                throw;
-            }
+
+            return true;
         }
         catch (Exception)
         {

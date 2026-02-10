@@ -357,6 +357,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         var totalRetried = 0;
         var totalFailed = 0;
 
+        // Track reminders already delivered in this run to avoid re-delivery
+        // if mark-complete fails and the same reminders are re-fetched.
+        var deliveredKeys = new HashSet<(string ShardRegionName, string EntityId, string ReminderKey)>();
+
         // Process batches until we've handled all due reminders
         while (true)
         {
@@ -386,6 +390,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
             foreach (var reminder in batch.Reminders)
             {
+                var reminderKey = (reminder.Entity.ShardRegionName, reminder.Entity.EntityId, reminder.Key.Name);
+                var alreadyDelivered = deliveredKeys.Contains(reminderKey);
+
                 var shardRegion = ShardRegionResolver.TryResolve(reminder.Entity);
                 if (shardRegion is null)
                 {
@@ -416,12 +423,24 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 }
                 else
                 {
-                    _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
-                    ShardRegionResolver.DeliverReminder(reminder.Entity, reminder.Message);
+                    // Skip delivery if already sent in a previous batch iteration
+                    // (can happen if mark-complete failed and the reminder was re-fetched)
+                    if (!alreadyDelivered)
+                    {
+                        _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
+                        ShardRegionResolver.DeliverReminder(reminder.Entity, reminder.Message);
+                        deliveredKeys.Add(reminderKey);
+                    }
+                    else
+                    {
+                        _log.Debug("Skipping re-delivery of reminder {0} — already delivered in this processing run", reminder);
+                    }
+
+                    // Always attempt to mark as completed, even if we skipped delivery
                     completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now,
                         ReminderCompletionStatus.Delivered));
 
-                    if (reminder.RepeatInterval.HasValue)
+                    if (reminder.RepeatInterval.HasValue && !alreadyDelivered)
                     {
                         var nextOccurrence = reminder with
                         {
