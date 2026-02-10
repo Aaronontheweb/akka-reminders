@@ -132,6 +132,30 @@ internal sealed class SqlServerDialect : ISqlDialect
             """;
     }
 
+    public string GetBatchMarkCompletedSql(string schemaName, string tableName, int count)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+
+        // Build VALUES list: (@sr0, @eid0, @rk0), (@sr1, @eid1, @rk1), ...
+        var values = string.Join(",\n                ",
+            Enumerable.Range(0, count).Select(i =>
+                $"(@sr{i}, @eid{i}, @rk{i})"));
+
+        return $"""
+            UPDATE t
+            SET t.IsCompleted = 1,
+                t.CompletedAtUtc = @CompletedAtUtc,
+                t.CompletionStatus = @CompletionStatus
+            FROM {fullTableName} t
+            INNER JOIN (VALUES
+                {values}
+            ) AS v(ShardRegionName, EntityId, ReminderKey)
+            ON t.ShardRegionName = v.ShardRegionName
+               AND t.EntityId = v.EntityId
+               AND t.ReminderKey = v.ReminderKey;
+            """;
+    }
+
     public string GetCleanupSql(string schemaName, string tableName)
     {
         var fullTableName = $"[{schemaName}].[{tableName}]";

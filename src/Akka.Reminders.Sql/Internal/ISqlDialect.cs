@@ -29,10 +29,18 @@ internal interface ISqlDialect
     string GetSelectDueRemindersSql(string schemaName, string tableName, int? maxCount = null);
 
     /// <summary>
-    /// Gets the SQL statement to mark reminders as completed.
-    /// Uses batch UPDATE with IN clause for multiple reminders.
+    /// Gets the SQL statement to mark a single reminder as completed.
     /// </summary>
     string GetMarkCompletedSql(string schemaName, string tableName);
+
+    /// <summary>
+    /// Gets the SQL statement to mark multiple reminders as completed in a single round-trip.
+    /// Uses a VALUES join with numbered parameters (@sr0, @eid0, @rk0, @sr1, ...).
+    /// </summary>
+    /// <param name="schemaName">Database schema name</param>
+    /// <param name="tableName">Table name</param>
+    /// <param name="count">Number of reminders to mark completed</param>
+    string GetBatchMarkCompletedSql(string schemaName, string tableName, int count);
 
     /// <summary>
     /// Gets the SQL statement to clean up old completed reminders.
