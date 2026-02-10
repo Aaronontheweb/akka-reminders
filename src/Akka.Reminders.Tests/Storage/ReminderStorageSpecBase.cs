@@ -498,6 +498,34 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         Assert.True(result.NextOverview.TimeUntilNext >= TimeSpan.FromMinutes(4));
     }
 
+    [Fact]
+    public async Task GetNextReminders_ShouldRespectMaxCount()
+    {
+        // Arrange - schedule N reminders that are all due now
+        var now = DateTimeOffset.UtcNow;
+        var past = now.AddMinutes(-1);
+        const int totalReminders = 10;
+        const int maxCount = 4;
+
+        for (int i = 0; i < totalReminders; i++)
+        {
+            await Storage!.ScheduleReminderAsync(
+                CreateTestReminder(
+                    CreateTestEntity($"batch-type", $"batch-id-{i}"),
+                    CreateTestKey($"batch-key-{i}"),
+                    when: past));
+        }
+
+        // Act - fetch with maxCount
+        var result = await Storage!.GetNextRemindersAsync(now, now, maxCount: maxCount);
+
+        // Assert - should only return maxCount reminders
+        Assert.Equal(maxCount, result.Reminders.Count);
+
+        // The overview should reflect the remaining reminders (not yet fetched)
+        Assert.Equal(totalReminders - maxCount, result.NextOverview.TotalPendingReminders);
+    }
+
     #endregion
 
     #region Mark Completed Tests

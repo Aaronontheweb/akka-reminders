@@ -80,9 +80,10 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             """;
     }
 
-    public string GetSelectDueRemindersSql(string schemaName, string tableName)
+    public string GetSelectDueRemindersSql(string schemaName, string tableName, int? maxCount = null)
     {
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+        var limitClause = maxCount.HasValue ? $"\n            LIMIT {maxCount.Value}" : "";
 
         return $"""
             SELECT shard_region_name, entity_id, reminder_key, when_utc, repeat_interval_ticks,
@@ -90,7 +91,7 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             FROM {fullTableName}
             WHERE is_completed = FALSE
               AND when_utc <= @UntilDeadline
-            ORDER BY when_utc ASC;
+            ORDER BY when_utc ASC{limitClause};
             """;
     }
 

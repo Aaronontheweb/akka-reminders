@@ -93,9 +93,10 @@ public interface IReminderStorage
     /// </summary>
     /// <param name="untilDeadline">Deadline for fetching reminders</param>
     /// <param name="now">Current time from scheduler</param>
+    /// <param name="maxCount">Maximum number of reminders to return. When null, returns all due reminders.</param>
     /// <param name="ct">Cancellation token</param>
     Task<PendingRemindersWithSummary> GetNextRemindersAsync(DateTimeOffset untilDeadline, DateTimeOffset now,
-        CancellationToken ct = default);
+        int? maxCount = null, CancellationToken ct = default);
     
     /// <summary>
     /// Used to soft-delete reminders from the storage.

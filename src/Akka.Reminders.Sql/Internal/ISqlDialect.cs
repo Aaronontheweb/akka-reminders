@@ -23,7 +23,10 @@ internal interface ISqlDialect
     /// Gets the SQL statement to select reminders that are due by the specified deadline.
     /// Only returns reminders that are not completed.
     /// </summary>
-    string GetSelectDueRemindersSql(string schemaName, string tableName);
+    /// <param name="schemaName">Database schema name</param>
+    /// <param name="tableName">Table name</param>
+    /// <param name="maxCount">When provided, limits the number of rows returned</param>
+    string GetSelectDueRemindersSql(string schemaName, string tableName, int? maxCount = null);
 
     /// <summary>
     /// Gets the SQL statement to mark reminders as completed.

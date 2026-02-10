@@ -134,22 +134,28 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     public Task<PendingRemindersWithSummary> GetNextRemindersAsync(
         DateTimeOffset untilDeadline,
         DateTimeOffset now,
+        int? maxCount = null,
         CancellationToken ct = default)
     {
-        var dueReminders = _pendingReminders
+        var allDueReminders = _pendingReminders
             .Where(kvp => kvp.Value.When <= untilDeadline)
             .Select(kvp => kvp.Value)
-            .OrderBy(r => r.When)
-            .ToList();
+            .OrderBy(r => r.When);
 
-        // Get overview of remaining reminders
+        var dueReminders = maxCount.HasValue
+            ? allDueReminders.Take(maxCount.Value).ToList()
+            : allDueReminders.ToList();
+
+        // Get overview of remaining reminders (those not returned in this batch)
+        var fetchedKeys = new HashSet<(ReminderEntity, ReminderKey)>(
+            dueReminders.Select(r => (r.Entity, r.Key)));
         var remainingCount = _pendingReminders.Count - dueReminders.Count;
         var timeUntilNext = TimeSpan.MaxValue;
 
         if (remainingCount > 0)
         {
             var nextReminder = _pendingReminders.Values
-                .Where(r => r.When > untilDeadline)
+                .Where(r => !fetchedKeys.Contains((r.Entity, r.Key)))
                 .OrderBy(r => r.When)
                 .FirstOrDefault();
 

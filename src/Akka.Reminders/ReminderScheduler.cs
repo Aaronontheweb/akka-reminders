@@ -31,6 +31,12 @@ public sealed record ReminderSettings
     public TimeSpan PruneOlderThan { get; init; } = TimeSpan.FromDays(12);
 
     /// <summary>
+    /// Maximum number of reminders to fetch from storage in a single batch.
+    /// When more reminders are due, multiple batches will be processed in a loop.
+    /// </summary>
+    public int MaxBatchSize { get; init; } = 1000;
+
+    /// <summary>
     /// Maximum number of delivery attempts before a reminder is marked as permanently failed.
     /// </summary>
     public int MaxDeliveryAttempts { get; init; } = 3;
@@ -346,92 +352,164 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
     private async Task ProcessReminders(DateTimeOffset untilDeadline)
     {
-        using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-        var reminders = await Storage.GetNextRemindersAsync(untilDeadline, TimeProvider.Now, cts.Token);
-        _log.Info("Fetched {0} due reminders", reminders.Reminders.Count);
+        var totalDelivered = 0;
+        var totalRecurring = 0;
+        var totalRetried = 0;
+        var totalFailed = 0;
 
-        var completedReminders = new List<CompletedReminder>();
-        var recurringRemindersToSchedule = new List<ScheduledReminder>();
-        var failedRemindersToRetry = new List<ScheduledReminder>();
-        var permanentlyFailedReminders = new List<CompletedReminder>();
-
-        foreach (var reminder in reminders.Reminders)
+        // Process batches until we've handled all due reminders
+        while (true)
         {
-            var shardRegion = ShardRegionResolver.TryResolve(reminder.Entity);
-            if (shardRegion is null)
+            // Phase 1: Fetch a batch of due reminders
+            PendingRemindersWithSummary batch;
+            try
             {
-                _log.Warning("Reminder {0} could not be resolved to a ShardRegion. Attempt {1} of {2}",
-                    reminder, reminder.AttemptCount + 1, Settings.MaxDeliveryAttempts);
+                using var fetchCts = new CancellationTokenSource(Settings.StorageTimeout);
+                batch = await Storage.GetNextRemindersAsync(untilDeadline, TimeProvider.Now,
+                    Settings.MaxBatchSize, fetchCts.Token);
+                _log.Info("Fetched {0} due reminders (batch)", batch.Reminders.Count);
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Failed to fetch due reminders from storage");
+                break;
+            }
 
-                // Check if we should retry
-                if (reminder.AttemptCount + 1 < Settings.MaxDeliveryAttempts)
+            if (batch.Reminders.Count == 0)
+                break;
+
+            // Phase 2: Deliver reminders and categorize results
+            var completedReminders = new List<CompletedReminder>();
+            var recurringRemindersToSchedule = new List<ScheduledReminder>();
+            var failedRemindersToRetry = new List<ScheduledReminder>();
+            var permanentlyFailedReminders = new List<CompletedReminder>();
+
+            foreach (var reminder in batch.Reminders)
+            {
+                var shardRegion = ShardRegionResolver.TryResolve(reminder.Entity);
+                if (shardRegion is null)
                 {
-                    // Schedule retry with exponential backoff
-                    var backoffSeconds = Settings.RetryBackoffBase.TotalSeconds * Math.Pow(2, reminder.AttemptCount);
-                    var retryReminder = reminder with
+                    _log.Warning("Reminder {0} could not be resolved to a ShardRegion. Attempt {1} of {2}",
+                        reminder, reminder.AttemptCount + 1, Settings.MaxDeliveryAttempts);
+
+                    if (reminder.AttemptCount + 1 < Settings.MaxDeliveryAttempts)
                     {
-                        When = TimeProvider.Now.Add(TimeSpan.FromSeconds(backoffSeconds)),
-                        AttemptCount = reminder.AttemptCount + 1,
-                        LastFailureReason = $"ShardRegion [{reminder.Entity.ShardRegionName}] not found"
-                    };
-                    failedRemindersToRetry.Add(retryReminder);
-                    _log.Info("Scheduling retry for reminder {0} at {1}", reminder.Key, retryReminder.When);
+                        var backoffSeconds =
+                            Settings.RetryBackoffBase.TotalSeconds * Math.Pow(2, reminder.AttemptCount);
+                        var retryReminder = reminder with
+                        {
+                            When = TimeProvider.Now.Add(TimeSpan.FromSeconds(backoffSeconds)),
+                            AttemptCount = reminder.AttemptCount + 1,
+                            LastFailureReason = $"ShardRegion [{reminder.Entity.ShardRegionName}] not found"
+                        };
+                        failedRemindersToRetry.Add(retryReminder);
+                        _log.Info("Scheduling retry for reminder {0} at {1}", reminder.Key, retryReminder.When);
+                    }
+                    else
+                    {
+                        _log.Error(
+                            "Reminder {0} exceeded max delivery attempts ({1}). Marking as permanently failed.",
+                            reminder.Key, Settings.MaxDeliveryAttempts);
+                        permanentlyFailedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key,
+                            TimeProvider.Now, ReminderCompletionStatus.Failed));
+                    }
                 }
                 else
                 {
-                    // Max retries exceeded - mark as permanently failed
-                    _log.Error("Reminder {0} exceeded max delivery attempts ({1}). Marking as permanently failed.",
-                        reminder.Key, Settings.MaxDeliveryAttempts);
-                    permanentlyFailedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now, ReminderCompletionStatus.Failed));
-                }
-            }
-            else
-            {
-                _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
+                    _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
+                    ShardRegionResolver.DeliverReminder(reminder.Entity, reminder.Message);
+                    completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now,
+                        ReminderCompletionStatus.Delivered));
 
-                // Use the resolver to deliver the message - it handles wrapping (e.g., ShardingEnvelope)
-                ShardRegionResolver.DeliverReminder(reminder.Entity, reminder.Message);
-                completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, TimeProvider.Now, ReminderCompletionStatus.Delivered));
-
-                // Handle recurring reminders - schedule next occurrence
-                if (reminder.RepeatInterval.HasValue)
-                {
-                    var nextOccurrence = reminder with
+                    if (reminder.RepeatInterval.HasValue)
                     {
-                        When = TimeProvider.Now.Add(reminder.RepeatInterval.Value),
-                        AttemptCount = 0, // Reset attempt count for new occurrence
-                        LastFailureReason = null
-                    };
-                    recurringRemindersToSchedule.Add(nextOccurrence);
-                    _log.Info("Scheduling next occurrence of recurring reminder {0} at {1}",
-                        reminder.Key, nextOccurrence.When);
+                        var nextOccurrence = reminder with
+                        {
+                            When = TimeProvider.Now.Add(reminder.RepeatInterval.Value),
+                            AttemptCount = 0,
+                            LastFailureReason = null
+                        };
+                        recurringRemindersToSchedule.Add(nextOccurrence);
+                        _log.Info("Scheduling next occurrence of recurring reminder {0} at {1}",
+                            reminder.Key, nextOccurrence.When);
+                    }
                 }
             }
+
+            // Phase 3: Mark completed and permanently failed reminders
+            try
+            {
+                var allCompleted = completedReminders.Concat(permanentlyFailedReminders);
+                using var markCts = new CancellationTokenSource(Settings.StorageTimeout);
+                var markResult = await Storage.MarkRemindersAsCompletedAsync(allCompleted, markCts.Token);
+                if (!markResult)
+                {
+                    _log.Error(
+                        "MarkRemindersAsCompletedAsync returned false for [{0}] reminders — they may be re-delivered on the next tick",
+                        completedReminders.Count + permanentlyFailedReminders.Count);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex,
+                    "Failed to mark [{0}] reminders as completed — they may be re-delivered on the next tick",
+                    completedReminders.Count + permanentlyFailedReminders.Count);
+            }
+
+            // Phase 4: Schedule retries for failed reminders
+            try
+            {
+                using var retryCts = new CancellationTokenSource(Settings.StorageTimeout);
+                foreach (var retryReminder in failedRemindersToRetry)
+                {
+                    await Storage.ScheduleReminderAsync(retryReminder, retryCts.Token);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Failed to schedule [{0}] retry reminders", failedRemindersToRetry.Count);
+            }
+
+            // Phase 5: Schedule next occurrences for recurring reminders
+            try
+            {
+                using var recurCts = new CancellationTokenSource(Settings.StorageTimeout);
+                foreach (var recurringReminder in recurringRemindersToSchedule)
+                {
+                    await Storage.ScheduleReminderAsync(recurringReminder, recurCts.Token);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Failed to schedule [{0}] recurring reminders",
+                    recurringRemindersToSchedule.Count);
+            }
+
+            totalDelivered += completedReminders.Count;
+            totalRecurring += recurringRemindersToSchedule.Count;
+            totalRetried += failedRemindersToRetry.Count;
+            totalFailed += permanentlyFailedReminders.Count;
+
+            // If we got fewer than MaxBatchSize, there are no more due reminders
+            if (batch.Reminders.Count < Settings.MaxBatchSize)
+                break;
         }
 
-        // Mark completed and permanently failed reminders
-        var allCompleted = completedReminders.Concat(permanentlyFailedReminders);
-        await Storage.MarkRemindersAsCompletedAsync(allCompleted, cts.Token);
-
-        // Schedule retries for failed reminders
-        foreach (var retryReminder in failedRemindersToRetry)
+        // Final overview reload with its own CTS
+        try
         {
-            await Storage.ScheduleReminderAsync(retryReminder, cts.Token);
+            using var overviewCts = new CancellationTokenSource(Settings.StorageTimeout);
+            PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, overviewCts.Token);
         }
-
-        // Schedule next occurrences for recurring reminders
-        foreach (var recurringReminder in recurringRemindersToSchedule)
+        catch (Exception ex)
         {
-            await Storage.ScheduleReminderAsync(recurringReminder, cts.Token);
+            _log.Error(ex, "Failed to reload reminder overview after processing");
         }
-
-        // Reload overview to account for retries and recurring reminders
-        PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
 
         _log.Info(
             "Successfully delivered [{0}] reminders; scheduled [{1}] recurring reminders; retrying [{2}] failed reminders; permanently failed [{3}] reminders. Next reminder due: {4}",
-            completedReminders.Count, recurringRemindersToSchedule.Count, failedRemindersToRetry.Count,
-            permanentlyFailedReminders.Count, PendingReminders.TimeUntilNext);
+            totalDelivered, totalRecurring, totalRetried,
+            totalFailed, PendingReminders.TimeUntilNext);
 
         TryScheduleFetchReminders();
     }

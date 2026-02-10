@@ -10,5 +10,6 @@
     <Project Path="src/Akka.Reminders.Sql/Akka.Reminders.Sql.csproj" />
   </Folder>
   <Project Path="src/Akka.Reminders.Tests/Akka.Reminders.Tests.csproj" />
+  <Project Path="src/Akka.Reminders.Benchmarks/Akka.Reminders.Benchmarks.csproj" />
   <Project Path="src\Akka.Reminders\Akka.Reminders.csproj" />
 </Solution>

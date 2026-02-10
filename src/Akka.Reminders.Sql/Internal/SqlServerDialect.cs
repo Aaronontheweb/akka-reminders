@@ -102,12 +102,13 @@ internal sealed class SqlServerDialect : ISqlDialect
             """;
     }
 
-    public string GetSelectDueRemindersSql(string schemaName, string tableName)
+    public string GetSelectDueRemindersSql(string schemaName, string tableName, int? maxCount = null)
     {
         var fullTableName = $"[{schemaName}].[{tableName}]";
+        var topClause = maxCount.HasValue ? $"TOP ({maxCount.Value}) " : "";
 
         return $"""
-            SELECT ShardRegionName, EntityId, ReminderKey, WhenUtc, RepeatIntervalTicks,
+            SELECT {topClause}ShardRegionName, EntityId, ReminderKey, WhenUtc, RepeatIntervalTicks,
                    SerializerId, Manifest, Payload, AttemptCount, LastFailureReason
             FROM {fullTableName}
             WHERE IsCompleted = 0
