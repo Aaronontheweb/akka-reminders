@@ -71,83 +71,74 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(100));
     }
 
+    private async Task SeedOverdueReminders(int count, DateTimeOffset now)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            await _innerStorage.ScheduleReminderAsync(new ScheduledReminder(
+                new ReminderEntity("test-region", $"entity-{i}"),
+                new ReminderKey($"reminder-{i}"),
+                // Intentionally overdue so we can trigger processing immediately in tests.
+                now.AddSeconds(-1),
+                $"message-{i}",
+                RepeatInterval: null,
+                AttemptCount: 0,
+                LastFailureReason: null));
+        }
+    }
+
     [Fact]
-    public async Task CircuitBreaker_ShouldOpenOnWriteFailure_AndLimitBlastRadius()
+    public async Task CircuitBreaker_ShouldOpenOnWriteFailure_AndStopFurtherProcessingInRun()
     {
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var now = testScheduler.Now;
 
-        for (var i = 0; i < 5; i++)
-        {
-            await _innerStorage.ScheduleReminderAsync(new ScheduledReminder(
-                new ReminderEntity("test-region", $"entity-{i}"),
-                new ReminderKey($"reminder-{i}"),
-                now.AddSeconds(-1),
-                $"message-{i}",
-                RepeatInterval: null, AttemptCount: 0, LastFailureReason: null));
-        }
+        await SeedOverdueReminders(5, now);
 
         _storage.FailWrites = true;
-        var scheduler = CreateScheduler(maxBatchSize: 1000);
+        var scheduler = CreateScheduler(maxBatchSize: 1000, deliveryCommitChunkSize: 1000);
         await WaitForSchedulerReady(scheduler);
 
-        // Tick 1: all 5 delivered before mark-complete fails → circuit opens
+        // Tick 1: all 5 delivered before mark-complete fails -> circuit opens.
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
         var firstTickMessages = await CollectMessages(testProbe, 5, TimeSpan.FromSeconds(5));
         Assert.Equal(5, firstTickMessages.Count);
 
-        // Write failure should stop further chunk processing during this run.
         await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
     }
 
     [Fact]
-    public async Task CircuitBreaker_ShouldNotAffectNormalOperation()
+    public async Task CircuitBreaker_ShouldNotAffectNormalOperation_WhenWritesSucceed()
     {
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var now = testScheduler.Now;
 
-        for (var i = 0; i < 3; i++)
-        {
-            await _innerStorage.ScheduleReminderAsync(new ScheduledReminder(
-                new ReminderEntity("test-region", $"entity-{i}"),
-                new ReminderKey($"reminder-{i}"),
-                now.AddSeconds(5),
-                $"message-{i}",
-                RepeatInterval: null, AttemptCount: 0, LastFailureReason: null));
-        }
+        await SeedOverdueReminders(5, now);
 
         var scheduler = CreateScheduler(maxBatchSize: 1000);
         await WaitForSchedulerReady(scheduler);
-        testScheduler.Advance(TimeSpan.FromSeconds(6));
+        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
 
-        var messages = await CollectMessages(testProbe, 3, TimeSpan.FromSeconds(5));
-        Assert.Equal(3, messages.Count);
+        var messages = await CollectMessages(testProbe, 5, TimeSpan.FromSeconds(5));
+        Assert.Equal(5, messages.Count);
 
-        testScheduler.Advance(TimeSpan.FromSeconds(5));
+        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
         await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
     }
 
     [Fact]
-    public async Task CircuitBreaker_ShouldLimitBlastRadius_DuringWriteOutage()
+    public async Task CircuitBreaker_ShouldLimitFirstFailureBlastRadius_ByDeliveryChunkSize()
     {
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var now = testScheduler.Now;
 
-        for (var i = 0; i < 10; i++)
-        {
-            await _innerStorage.ScheduleReminderAsync(new ScheduledReminder(
-                new ReminderEntity("test-region", $"entity-{i}"),
-                new ReminderKey($"reminder-{i}"),
-                now.AddSeconds(-1),
-                $"message-{i}",
-                RepeatInterval: null, AttemptCount: 0, LastFailureReason: null));
-        }
+        await SeedOverdueReminders(10, now);
 
         _storage.FailWrites = true;
         var scheduler = CreateScheduler(maxBatchSize: 1000, deliveryCommitChunkSize: 3);
@@ -157,5 +148,38 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         // First failed tick should be bounded by DeliveryCommitChunkSize.
         await CollectMessages(testProbe, 3, TimeSpan.FromSeconds(5));
         await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(300));
+    }
+
+    [Fact]
+    public async Task CircuitBreaker_ShouldCloseAndResumeBatchProcessing_WhenWritesRecover()
+    {
+        var testProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", testProbe);
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var now = testScheduler.Now;
+
+        await SeedOverdueReminders(6, now);
+
+        _storage.FailWrites = true;
+        var scheduler = CreateScheduler(maxBatchSize: 1000, deliveryCommitChunkSize: 3);
+        await WaitForSchedulerReady(scheduler);
+
+        // Outage tick: first-failure blast radius is bounded by chunk size.
+        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
+        await CollectMessages(testProbe, 3, TimeSpan.FromSeconds(5));
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(300));
+
+        // Database recovers: first successful probe should close the circuit,
+        // and the following tick should resume full-batch processing.
+        _storage.FailWrites = false;
+
+        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
+        await CollectMessages(testProbe, 1, TimeSpan.FromSeconds(5));
+
+        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
+        await CollectMessages(testProbe, 5, TimeSpan.FromSeconds(5));
+
+        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
     }
 }

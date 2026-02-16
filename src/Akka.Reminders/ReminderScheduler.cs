@@ -405,11 +405,13 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             {
                 using var fetchCts = new CancellationTokenSource(Settings.StorageTimeout);
                 batch = await Storage.GetNextRemindersAsync(untilDeadline, TimeProvider.Now,
-                    effectiveBatchSize, fetchCts.Token);
+                    new ReminderBatchSize(effectiveBatchSize), fetchCts.Token);
                 _log.Info("Fetched {0} due reminders (batch)", batch.Reminders.Count);
             }
             catch (Exception ex)
             {
+                // If fetch fails, no reminders were delivered and no write operations were attempted,
+                // so the write circuit remains unchanged.
                 _log.Error(ex, "Failed to fetch due reminders from storage");
                 break;
             }
@@ -418,6 +420,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 break;
 
             var stopProcessing = false;
+            var recoveredFromProbe = false;
 
             // Process the fetched batch in smaller chunks to cap duplicate blast radius
             // if writes fail after delivery.
@@ -586,12 +589,18 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 {
                     _writeCircuitOpen = false;
                     effectiveBatchSize = Settings.MaxBatchSize;
+                    recoveredFromProbe = true;
                     _log.Info("Write circuit CLOSED — database writes recovered, resuming full-batch processing");
                 }
             }
 
             if (stopProcessing)
                 break;
+
+            // If a single-reminder probe succeeded, immediately continue with full-batch
+            // processing in this same run rather than waiting for a later timer tick.
+            if (recoveredFromProbe)
+                continue;
 
             // If we got fewer than the effective fetch batch size, there are no more due reminders
             if (batch.Reminders.Count < effectiveBatchSize)

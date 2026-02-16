@@ -99,7 +99,7 @@ public sealed class SqlReminderStorage : IReminderStorage
     public async Task<PendingRemindersWithSummary> GetNextRemindersAsync(
         DateTimeOffset untilDeadline,
         DateTimeOffset now,
-        int? maxCount = null,
+        ReminderBatchSize maxCount,
         CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
@@ -110,7 +110,10 @@ public sealed class SqlReminderStorage : IReminderStorage
         await connection.OpenAsync(cancellationToken);
 
         await using var command = connection.CreateCommand();
-        command.CommandText = _dialect.GetSelectDueRemindersSql(_settings.SchemaName, _settings.TableName, maxCount);
+        command.CommandText = _dialect.GetSelectDueRemindersSql(
+            _settings.SchemaName,
+            _settings.TableName,
+            maxCount.Value);
         command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
 
         _dialect.AddParameter(command, "@UntilDeadline", untilDeadline.UtcDateTime);

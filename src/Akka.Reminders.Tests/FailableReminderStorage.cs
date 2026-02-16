@@ -72,7 +72,7 @@ internal sealed class FailableReminderStorage : IReminderStorage
     // --- Read operations: always work ---
 
     public Task<PendingRemindersWithSummary> GetNextRemindersAsync(DateTimeOffset untilDeadline, DateTimeOffset now,
-        int? maxCount = null, CancellationToken ct = default)
+        ReminderBatchSize maxCount, CancellationToken ct = default)
     {
         return _inner.GetNextRemindersAsync(untilDeadline, now, maxCount, ct);
     }

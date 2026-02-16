@@ -79,7 +79,7 @@ Each chunk auto-commits independently (no wrapping transaction). If chunk 4 of 5
 - **Normal state:** `ProcessReminders` fetches `MaxBatchSize` per batch.
 - **Circuit opens:** When any write operation fails (mark-complete, schedule-retry, schedule-recurring), `_writeCircuitOpen` is set to `true` and the loop breaks.
 - **Probing:** On the next tick, if the circuit is open, `effectiveBatchSize` drops to 1. The scheduler fetches and delivers a single reminder, then attempts mark-complete. This limits the blast radius to 1 duplicate delivery.
-- **Circuit closes:** If the probe's write succeeds, `_writeCircuitOpen` is reset to `false` and `effectiveBatchSize` returns to `MaxBatchSize`. The loop breaks (since `1 < MaxBatchSize`), and on the next tick, full-batch processing resumes.
+- **Circuit closes:** If the probe's write succeeds, `_writeCircuitOpen` is reset to `false` and `effectiveBatchSize` returns to `MaxBatchSize`. The scheduler immediately continues with full-batch processing in the same run.
 
 ### 5. Interleaved Deliver/Persist Chunks (`DeliveryCommitChunkSize`)
 

@@ -38,7 +38,7 @@ public class ReminderStorageBenchmarks : SqlReminderBenchmarkBase
 
         while (true)
         {
-            var batch = await Storage.GetNextRemindersAsync(deadline, now, maxCount: MaxBatchSize);
+            var batch = await Storage.GetNextRemindersAsync(deadline, now, maxCount: new ReminderBatchSize(MaxBatchSize));
 
             if (batch.Reminders.Count == 0)
                 break;

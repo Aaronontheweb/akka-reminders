@@ -25,8 +25,8 @@ internal interface ISqlDialect
     /// </summary>
     /// <param name="schemaName">Database schema name</param>
     /// <param name="tableName">Table name</param>
-    /// <param name="maxCount">When provided, limits the number of rows returned</param>
-    string GetSelectDueRemindersSql(string schemaName, string tableName, int? maxCount = null);
+    /// <param name="maxCount">Maximum number of rows returned</param>
+    string GetSelectDueRemindersSql(string schemaName, string tableName, int maxCount);
 
     /// <summary>
     /// Gets the SQL statement to mark a single reminder as completed.

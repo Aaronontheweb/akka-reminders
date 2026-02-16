@@ -29,6 +29,22 @@ public sealed record ReminderOverview
 }
 
 /// <summary>
+/// Validated fetch batch size for reminder retrieval operations.
+/// </summary>
+public readonly record struct ReminderBatchSize
+{
+    public ReminderBatchSize(int value)
+    {
+        if (value < 1)
+            throw new ArgumentOutOfRangeException(nameof(value), "ReminderBatchSize must be greater than or equal to 1.");
+
+        Value = value;
+    }
+
+    public int Value { get; }
+}
+
+/// <summary>
 /// Gets the next N reminders, along with a summary of the pending reminders.
 /// </summary>
 /// <param name="Reminders">The next reminders that need to be delivered right now.</param>
@@ -93,10 +109,10 @@ public interface IReminderStorage
     /// </summary>
     /// <param name="untilDeadline">Deadline for fetching reminders</param>
     /// <param name="now">Current time from scheduler</param>
-    /// <param name="maxCount">Maximum number of reminders to return. When null, returns all due reminders.</param>
+    /// <param name="maxCount">Maximum number of reminders to return.</param>
     /// <param name="ct">Cancellation token</param>
     Task<PendingRemindersWithSummary> GetNextRemindersAsync(DateTimeOffset untilDeadline, DateTimeOffset now,
-        int? maxCount = null, CancellationToken ct = default);
+        ReminderBatchSize maxCount, CancellationToken ct = default);
     
     /// <summary>
     /// Used to soft-delete reminders from the storage.
