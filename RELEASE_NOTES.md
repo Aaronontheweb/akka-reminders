@@ -1,3 +1,39 @@
+#### 0.4.0 February 16th 2026 ####
+
+**New Features**
+
+- **Batch Size Limiting** - Added `MaxBatchSize` configuration setting (default: 1000) to control the maximum number of reminders processed in a single batch ([#74](https://github.com/Aaronontheweb/akka-reminders/pull/74))
+  - Prevents overwhelming the system when large numbers of reminders become due simultaneously
+  - Configurable via `ReminderSettings.MaxBatchSize`
+  - Implemented with LIMIT/TOP clauses in SQL storage layer
+
+- **Write Circuit Breaker for Database Resilience** - Implemented automatic circuit breaker pattern to handle database write failures gracefully ([#74](https://github.com/Aaronontheweb/akka-reminders/pull/74))
+  - When database writes fail but reads succeed, circuit opens and limits next tick to single-reminder probe
+  - Prevents self-inflicted DoS during database write outages
+  - Automatic recovery when probe succeeds
+  - Circuit stays open during continued failures, providing natural backoff
+
+**Bug Fixes**
+
+- **Fixed Duplicate Reminder Delivery Loop Under Database Load** - Resolved critical issue where high database load caused infinite re-delivery of reminders ([#73](https://github.com/Aaronontheweb/akka-reminders/issues/73), [#74](https://github.com/Aaronontheweb/akka-reminders/pull/74))
+  - Root cause: Shared timeout budget across all storage operations caused mark-complete phase to fail when fetch phase was slow
+  - Solution: Refactored to use separate `CancellationTokenSource` per storage phase with independent timeouts
+  - Added batch processing loop that processes reminders in chunks up to `MaxBatchSize`
+  - Track delivered reminders to prevent duplicate delivery within same processing run
+  - Remove transaction wrapper from mark-complete operations - each chunk now auto-commits independently
+
+**Improvements**
+
+- **Optimized Batch Mark-Complete Operations** - Replaced N individual UPDATE statements with batched operations using VALUES JOIN pattern ([#74](https://github.com/Aaronontheweb/akka-reminders/pull/74))
+  - For 1,000 reminders: reduced mark-complete time from ~400ms to ~180ms (2.2x improvement)
+  - Groups completions by status and timestamp, chunks at 500 rows to stay within SQL Server parameter limits
+  - Prevents timeout issues on Azure SQL under DTU pressure
+
+- **Enhanced Failure Mode Documentation** - Added comprehensive documentation of all failure scenarios and system trade-offs in `docs/design/failure-modes.md` ([#74](https://github.com/Aaronontheweb/akka-reminders/pull/74))
+  - Documents circuit breaker behavior and recovery patterns
+  - Explains at-least-once delivery semantics during outages
+  - Referenced in main README architecture section
+
 #### 0.3.1 February 6th 2026 ####
 
 **Bug Fixes**
