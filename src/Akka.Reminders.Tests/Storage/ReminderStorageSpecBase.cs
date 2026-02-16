@@ -11,6 +11,8 @@ namespace Akka.Reminders.Tests.Storage;
 /// </remarks>
 public abstract class ReminderStorageSpecBase : IAsyncLifetime
 {
+    private static readonly ReminderBatchSize DefaultBatchSize = new(1000);
+
     /// <summary>
     /// Creates an instance of the storage implementation to test.
     /// </summary>
@@ -452,7 +454,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
 
         // Act
         var now = DateTimeOffset.UtcNow;
-        var result = await Storage.GetNextRemindersAsync(now, now);
+        var result = await Storage.GetNextRemindersAsync(now, now, DefaultBatchSize);
 
         // Assert
         Assert.Empty(result.Reminders);
@@ -473,7 +475,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("t3", "i3"), when: farFuture));
 
         // Act - get reminders due up until nearFuture
-        var result = await Storage.GetNextRemindersAsync(nearFuture, nearFuture);
+        var result = await Storage.GetNextRemindersAsync(nearFuture, nearFuture, DefaultBatchSize);
 
         // Assert
         Assert.Equal(2, result.Reminders.Count); // past and nearFuture
@@ -490,12 +492,40 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
 
         // Act
         var deadline = now.AddMinutes(5);
-        var result = await Storage.GetNextRemindersAsync(deadline, deadline);
+        var result = await Storage.GetNextRemindersAsync(deadline, deadline, DefaultBatchSize);
 
         // Assert
         Assert.Single(result.Reminders);
         Assert.Equal(1, result.NextOverview.TotalPendingReminders);
         Assert.True(result.NextOverview.TimeUntilNext >= TimeSpan.FromMinutes(4));
+    }
+
+    [Fact]
+    public async Task GetNextReminders_ShouldRespectMaxCount()
+    {
+        // Arrange - schedule N reminders that are all due now
+        var now = DateTimeOffset.UtcNow;
+        var past = now.AddMinutes(-1);
+        const int totalReminders = 10;
+        const int maxCount = 4;
+
+        for (int i = 0; i < totalReminders; i++)
+        {
+            await Storage!.ScheduleReminderAsync(
+                CreateTestReminder(
+                    CreateTestEntity($"batch-type", $"batch-id-{i}"),
+                    CreateTestKey($"batch-key-{i}"),
+                    when: past));
+        }
+
+        // Act - fetch with maxCount
+        var result = await Storage!.GetNextRemindersAsync(now, now, maxCount: new ReminderBatchSize(maxCount));
+
+        // Assert - should only return maxCount reminders
+        Assert.Equal(maxCount, result.Reminders.Count);
+
+        // The overview should reflect the remaining reminders (not yet fetched)
+        Assert.Equal(totalReminders - maxCount, result.NextOverview.TotalPendingReminders);
     }
 
     #endregion

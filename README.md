@@ -36,6 +36,7 @@ Akka.Reminders provides a reliable way to schedule reminders (time-delayed messa
 - [API Reference](#api-reference)
 - [Testing](#testing)
 - [Architecture](#architecture)
+- [Design Documents](#design-documents)
 
 ## Installation
 
@@ -292,6 +293,13 @@ Configure reminder behavior and performance characteristics:
 
         // Maximum delivery attempts before marking as permanently failed
         MaxDeliveryAttempts = 3,
+
+        // Maximum reminders fetched per batch (limits query size under load)
+        MaxBatchSize = 1000,
+
+        // Maximum reminders delivered before writes are attempted.
+        // Lower values reduce duplicate blast radius during write outages.
+        DeliveryCommitChunkSize = 100,
 
         // Base delay for exponential backoff on retries
         // Actual delay = RetryBackoffBase * (2 ^ attemptCount)
@@ -566,11 +574,20 @@ public async Task Reminder_should_fire_at_scheduled_time()
 
 ### Reliability Features
 
+- **At-least-once delivery**: Reminders are delivered via fire-and-forget `Tell`. Consumers must be idempotent.
 - **Durable persistence**: Reminders survive actor restarts and cluster failures
 - **Automatic retries**: Failed deliveries retry with exponential backoff
 - **Cluster singleton**: Single scheduler instance with automatic failover
 - **Delivery tracking**: Reminders track delivery attempts and failure reasons
 - **Periodic pruning**: Automatic cleanup of old completed/cancelled reminders
+- **Write circuit breaker**: Automatically pauses batch delivery when database writes fail, probing with a single reminder until writes recover. Prevents duplicate delivery storms during database outages.
+- **Bounded first-failure blast radius**: Interleaved deliver/persist chunking caps duplicate deliveries on the first failed tick to `DeliveryCommitChunkSize`.
+
+For a detailed analysis of failure modes and design trade-offs, see [Failure Modes and Design Decisions](docs/design/failure-modes.md).
+
+## Design Documents
+
+- [Failure Modes and Design Decisions](docs/design/failure-modes.md) - Delivery semantics, threat model, circuit breaker design, and accepted trade-offs
 
 ## Building from Source
 

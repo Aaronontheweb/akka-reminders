@@ -99,6 +99,7 @@ public sealed class SqlReminderStorage : IReminderStorage
     public async Task<PendingRemindersWithSummary> GetNextRemindersAsync(
         DateTimeOffset untilDeadline,
         DateTimeOffset now,
+        ReminderBatchSize maxCount,
         CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
@@ -109,7 +110,10 @@ public sealed class SqlReminderStorage : IReminderStorage
         await connection.OpenAsync(cancellationToken);
 
         await using var command = connection.CreateCommand();
-        command.CommandText = _dialect.GetSelectDueRemindersSql(_settings.SchemaName, _settings.TableName);
+        command.CommandText = _dialect.GetSelectDueRemindersSql(
+            _settings.SchemaName,
+            _settings.TableName,
+            maxCount.Value);
         command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
 
         _dialect.AddParameter(command, "@UntilDeadline", untilDeadline.UtcDateTime);
@@ -166,6 +170,11 @@ public sealed class SqlReminderStorage : IReminderStorage
         return new PendingRemindersWithSummary(reminders, adjustedOverview);
     }
 
+    // SQL Server has a limit of 2100 parameters per query.
+    // With 3 parameters per reminder (sr, eid, rk) + 2 shared (completedAtUtc, status),
+    // we can safely fit ~690 reminders per batch statement. Use 500 to leave headroom.
+    private const int MaxRemindersPerStatement = 500;
+
     public async Task<bool> MarkRemindersAsCompletedAsync(
         IEnumerable<CompletedReminder> completedReminders,
         CancellationToken cancellationToken = default)
@@ -181,35 +190,43 @@ public sealed class SqlReminderStorage : IReminderStorage
             await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
             await connection.OpenAsync(cancellationToken);
 
-            // Use a transaction for batch updates
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            // No transaction wrapper — each chunk auto-commits independently.
+            // If chunk 3 of 4 times out, chunks 1-2 are already persisted rather than
+            // rolling back all progress. This is safe because mark-complete is idempotent.
+            // Group by (Status, When) so each batch UPDATE shares the same completion metadata
+            var groups = remindersList.GroupBy(r => (r.Status, r.When));
 
-            try
+            foreach (var group in groups)
             {
-                foreach (var completed in remindersList)
+                var items = group.ToList();
+
+                // Chunk to stay within SQL parameter limits
+                for (var offset = 0; offset < items.Count; offset += MaxRemindersPerStatement)
                 {
+                    var chunk = items.Skip(offset).Take(MaxRemindersPerStatement).ToList();
+
                     await using var command = connection.CreateCommand();
-                    command.Transaction = transaction;
-                    command.CommandText = _dialect.GetMarkCompletedSql(_settings.SchemaName, _settings.TableName);
+                    command.CommandText = _dialect.GetBatchMarkCompletedSql(
+                        _settings.SchemaName, _settings.TableName, chunk.Count);
                     command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
 
-                    _dialect.AddParameter(command, "@ShardRegionName", completed.Entity.ShardRegionName);
-                    _dialect.AddParameter(command, "@EntityId", completed.Entity.EntityId);
-                    _dialect.AddParameter(command, "@ReminderKey", completed.Key.Name);
-                    _dialect.AddParameter(command, "@CompletedAtUtc", completed.When.UtcDateTime);
-                    _dialect.AddParameter(command, "@CompletionStatus", completed.Status.ToString());
+                    // Shared parameters for this group
+                    _dialect.AddParameter(command, "@CompletedAtUtc", group.Key.When.UtcDateTime);
+                    _dialect.AddParameter(command, "@CompletionStatus", group.Key.Status.ToString());
+
+                    // Per-reminder key parameters
+                    for (var i = 0; i < chunk.Count; i++)
+                    {
+                        _dialect.AddParameter(command, $"@sr{i}", chunk[i].Entity.ShardRegionName);
+                        _dialect.AddParameter(command, $"@eid{i}", chunk[i].Entity.EntityId);
+                        _dialect.AddParameter(command, $"@rk{i}", chunk[i].Key.Name);
+                    }
 
                     await command.ExecuteNonQueryAsync(cancellationToken);
                 }
+            }
 
-                await transaction.CommitAsync(cancellationToken);
-                return true;
-            }
-            catch
-            {
-                await transaction.RollbackAsync(cancellationToken);
-                throw;
-            }
+            return true;
         }
         catch (Exception)
         {

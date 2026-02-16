@@ -80,8 +80,11 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             """;
     }
 
-    public string GetSelectDueRemindersSql(string schemaName, string tableName)
+    public string GetSelectDueRemindersSql(string schemaName, string tableName, int maxCount)
     {
+        if (maxCount < 1)
+            throw new ArgumentOutOfRangeException(nameof(maxCount), "maxCount must be greater than or equal to 1.");
+
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
 
         return $"""
@@ -90,7 +93,8 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             FROM {fullTableName}
             WHERE is_completed = FALSE
               AND when_utc <= @UntilDeadline
-            ORDER BY when_utc ASC;
+            ORDER BY when_utc ASC
+            LIMIT {maxCount};
             """;
     }
 
@@ -106,6 +110,29 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             WHERE shard_region_name = @ShardRegionName
               AND entity_id = @EntityId
               AND reminder_key = @ReminderKey;
+            """;
+    }
+
+    public string GetBatchMarkCompletedSql(string schemaName, string tableName, int count)
+    {
+        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+
+        // Build VALUES list: (@sr0, @eid0, @rk0), (@sr1, @eid1, @rk1), ...
+        var values = string.Join(",\n                ",
+            Enumerable.Range(0, count).Select(i =>
+                $"(@sr{i}::varchar, @eid{i}::varchar, @rk{i}::varchar)"));
+
+        return $"""
+            UPDATE {fullTableName} t
+            SET is_completed = TRUE,
+                completed_at_utc = @CompletedAtUtc,
+                completion_status = @CompletionStatus
+            FROM (VALUES
+                {values}
+            ) AS v(shard_region_name, entity_id, reminder_key)
+            WHERE t.shard_region_name = v.shard_region_name
+              AND t.entity_id = v.entity_id
+              AND t.reminder_key = v.reminder_key;
             """;
     }
 
