@@ -18,6 +18,10 @@
   - Supported HOCON keys: `schema-name`, `table-name`, `auto-initialize`, `command-timeout`
   - Default schema remains `reminders` for full backward compatibility
 
+**Dependency Updates**
+
+- Updated Npgsql from 8.0.8 to 10.0.1 ([#47](https://github.com/Aaronontheweb/akka-reminders/pull/47))
+
 #### 0.4.0 February 16th 2026 ####
 
 **New Features**
