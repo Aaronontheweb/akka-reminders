@@ -3,12 +3,8 @@ using System.Data.Common;
 using Npgsql;
 using NpgsqlTypes;
 
-namespace Akka.Reminders.Sql.Internal;
+namespace Akka.Reminders.PostgreSql.Internal;
 
-/// <summary>
-/// PostgreSQL implementation of the SQL dialect for reminder storage.
-/// Uses PostgreSQL-specific features like INSERT ON CONFLICT and TIMESTAMP WITH TIME ZONE.
-/// </summary>
 internal sealed class PostgreSqlDialect : ISqlDialect
 {
     public static readonly PostgreSqlDialect Instance = new();
@@ -40,12 +36,10 @@ internal sealed class PostgreSqlDialect : ISqlDialect
                 CONSTRAINT pk_{tableName} PRIMARY KEY (shard_region_name, entity_id, reminder_key)
             );
 
-            -- Filtered index for efficient queries on pending reminders
             CREATE INDEX IF NOT EXISTS ix_{tableName}_due_reminders
             ON {fullTableName} (when_utc, shard_region_name, entity_id)
             WHERE is_completed = FALSE;
 
-            -- Index for cleanup operations
             CREATE INDEX IF NOT EXISTS ix_{tableName}_cleanup
             ON {fullTableName} (completed_at_utc)
             WHERE is_completed = TRUE;
@@ -117,7 +111,6 @@ internal sealed class PostgreSqlDialect : ISqlDialect
     {
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
 
-        // Build VALUES list: (@sr0, @eid0, @rk0), (@sr1, @eid1, @rk1), ...
         var values = string.Join(",\n                ",
             Enumerable.Range(0, count).Select(i =>
                 $"(@sr{i}::varchar, @eid{i}::varchar, @rk{i}::varchar)"));
@@ -172,9 +165,6 @@ internal sealed class PostgreSqlDialect : ISqlDialect
               AND entity_id = @EntityId
               AND reminder_key = @ReminderKey
               AND is_completed = FALSE;
-
-            -- PostgreSQL doesn't have @@ROWCOUNT, use GET DIAGNOSTICS
-            -- This will be handled in the storage implementation
             """;
     }
 
@@ -190,9 +180,6 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             WHERE shard_region_name = @ShardRegionName
               AND entity_id = @EntityId
               AND is_completed = FALSE;
-
-            -- PostgreSQL doesn't have @@ROWCOUNT, use GET DIAGNOSTICS
-            -- This will be handled in the storage implementation
             """;
     }
 
@@ -220,26 +207,20 @@ internal sealed class PostgreSqlDialect : ISqlDialect
     {
         var npgsqlCommand = (NpgsqlCommand)command;
 
-        // Handle null values
         if (value == null)
         {
             npgsqlCommand.Parameters.AddWithValue(name, DBNull.Value);
             return;
         }
 
-        // Handle specific types with proper PostgreSQL types
         switch (value)
         {
             case DateTimeOffset dto:
-                // PostgreSQL TimestampTz has microsecond precision (6 decimals), .NET has 100ns precision (7 decimals)
-                // Truncate to microseconds to avoid precision loss on round-trip
-                // 1 microsecond = 10 ticks, so truncate to the nearest 10 ticks
                 var ticksToRemove = dto.Ticks % 10;
                 var truncatedDto = ticksToRemove == 0 ? dto : new DateTimeOffset(dto.Ticks - ticksToRemove, dto.Offset);
                 npgsqlCommand.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = truncatedDto });
                 break;
             case DateTime dt:
-                // Truncate to microseconds for consistency
                 var dtTicksToRemove = dt.Ticks % 10;
                 var truncatedDt = dtTicksToRemove == 0 ? dt : new DateTime(dt.Ticks - dtTicksToRemove, dt.Kind);
                 npgsqlCommand.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = truncatedDt });

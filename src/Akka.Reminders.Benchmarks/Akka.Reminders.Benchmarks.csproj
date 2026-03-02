@@ -10,7 +10,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Akka.Reminders\Akka.Reminders.csproj" />
-    <ProjectReference Include="..\Akka.Reminders.Sql\Akka.Reminders.Sql.csproj" />
+    <ProjectReference Include="..\Akka.Reminders.PostgreSql\Akka.Reminders.PostgreSql.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -14,7 +14,7 @@ Akka.Reminders provides a reliable way to schedule reminders (time-delayed messa
 ## Features
 
 - ✅ **Single and recurring reminders** - Schedule one-time or repeating time-based messages
-- ✅ **SQL storage backends** - Production-ready SQL Server and PostgreSQL support
+- ✅ **SQL storage backends** - Production-ready SQL Server, PostgreSQL, and SQLite support
 - ✅ **Automatic retries** - Failed deliveries retry with exponential backoff
 - ✅ **Cluster singleton** - Reminder scheduler with automatic failover
 - ✅ **Akka.Hosting integration** - First-class configuration API
@@ -30,6 +30,7 @@ Akka.Reminders provides a reliable way to schedule reminders (time-delayed messa
 - [Configuration](#configuration)
   - [SQL Server Storage](#sql-server-storage)
   - [PostgreSQL Storage](#postgresql-storage)
+  - [SQLite Storage](#sqlite-storage)
   - [In-Memory Storage](#in-memory-storage)
   - [Reminder Settings](#reminder-settings)
 - [Usage Examples](#usage-examples)
@@ -47,10 +48,20 @@ dotnet add package Aaron.Akka.Reminders
 
 **SQL Server Storage:**
 ```bash
-dotnet add package Aaron.Akka.Reminders.Sql
+dotnet add package Aaron.Akka.Reminders.SqlServer
 ```
 
 **PostgreSQL Storage:**
+```bash
+dotnet add package Aaron.Akka.Reminders.PostgreSql
+```
+
+**SQLite Storage:**
+```bash
+dotnet add package Aaron.Akka.Reminders.Sqlite
+```
+
+**Legacy Compatibility Package (all providers):**
 ```bash
 dotnet add package Aaron.Akka.Reminders.Sql
 ```
@@ -59,9 +70,12 @@ dotnet add package Aaron.Akka.Reminders.Sql
 
 | Storage Backend | Package | Auto-Initialize | Documentation |
 |----------------|---------|-----------------|---------------|
-| In-Memory | `Akka.Reminders` | N/A | Built-in (development/testing only) |
-| SQL Server | `Akka.Reminders.Sql` | Yes | [SQL Server Schema](src/Akka.Reminders.Sql/Scripts/SqlServer-Create.sql) |
-| PostgreSQL | `Akka.Reminders.Sql` | Yes | [PostgreSQL Schema](src/Akka.Reminders.Sql/Scripts/PostgreSql-Create.sql) |
+| In-Memory | `Aaron.Akka.Reminders` | N/A | Built-in (development/testing only) |
+| SQL Server | `Aaron.Akka.Reminders.SqlServer` | Yes | [SQL Server Schema](src/Akka.Reminders.SqlServer/Scripts/SqlServer-Create.sql) |
+| PostgreSQL | `Aaron.Akka.Reminders.PostgreSql` | Yes | [PostgreSQL Schema](src/Akka.Reminders.PostgreSql/Scripts/PostgreSql-Create.sql) |
+| SQLite | `Aaron.Akka.Reminders.Sqlite` | Yes | [SQLite Schema](src/Akka.Reminders.Sqlite/Scripts/Sqlite-Create.sql) |
+
+> **Compatibility:** `Aaron.Akka.Reminders.Sql` remains available and fully functional as a compatibility package, but new projects should prefer provider-specific packages (`SqlServer`, `PostgreSql`, or `Sqlite`).
 
 > **Note:** For production deployments, you can manually create database schemas using the provided SQL scripts instead of using auto-initialization.
 
@@ -95,6 +109,7 @@ builder.Services.AddAkka("MySystem", (configBuilder, provider) =>
 ```csharp
 using Akka.Hosting;
 using Akka.Reminders;
+using Akka.Reminders.SqlServer.Hosting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -166,6 +181,9 @@ public class MyEntityActor : ReceiveActor
 
 ### SQL Server Storage
 
+`using Akka.Reminders.SqlServer.Hosting;`
+`using Akka.Reminders.SqlServer.Configuration;`
+
 The `WithSqlServerStorage` extension method configures SQL Server as the reminder storage backend:
 
 ```csharp
@@ -179,21 +197,21 @@ The `WithSqlServerStorage` extension method configures SQL Server as the reminde
 
 **Parameters:**
 - `connectionString`: SQL Server connection string
-- `schemaName`: Database schema name (default: "dbo")
-- `tableName`: Table name for reminders (default: "reminders")
+- `schemaName`: Database schema name (default: "reminders")
+- `tableName`: Table name for reminders (default: "scheduled_reminders")
 - `autoInitialize`: Auto-create schema/table if missing (default: true)
 
 **Advanced Configuration:**
 
 ```csharp
 .WithReminders("reminder-host", reminders => reminders
-    .WithSqlServerStorage(settings =>
+    .WithSqlServerStorage(new SqlServerReminderStorageSettings
     {
-        settings.ConnectionString = "Server=localhost;...";
-        settings.SchemaName = "custom_schema";
-        settings.TableName = "my_reminders";
-        settings.CommandTimeout = TimeSpan.FromSeconds(60);
-        settings.AutoInitialize = false; // Manual schema management
+        ConnectionString = "Server=localhost;...",
+        SchemaName = "custom_schema",
+        TableName = "my_reminders",
+        CommandTimeout = TimeSpan.FromSeconds(60),
+        AutoInitialize = false // Manual schema management
     }))
 ```
 
@@ -201,7 +219,7 @@ The `WithSqlServerStorage` extension method configures SQL Server as the reminde
 
 For production environments, you may prefer to manually create the database schema. Use the provided SQL script:
 
-📄 [SQL Server Schema Script](src/Akka.Reminders.Sql/Scripts/SqlServer-Create.sql)
+📄 [SQL Server Schema Script](src/Akka.Reminders.SqlServer/Scripts/SqlServer-Create.sql)
 
 ```sql
 -- Run this script against your database
@@ -209,6 +227,9 @@ For production environments, you may prefer to manually create the database sche
 ```
 
 ### PostgreSQL Storage
+
+`using Akka.Reminders.PostgreSql.Hosting;`
+`using Akka.Reminders.PostgreSql.Configuration;`
 
 The `WithPostgreSqlStorage` extension method configures PostgreSQL as the reminder storage backend:
 
@@ -223,21 +244,21 @@ The `WithPostgreSqlStorage` extension method configures PostgreSQL as the remind
 
 **Parameters:**
 - `connectionString`: PostgreSQL connection string
-- `schemaName`: Database schema name (default: "public")
-- `tableName`: Table name for reminders (default: "reminders")
+- `schemaName`: Database schema name (default: "reminders")
+- `tableName`: Table name for reminders (default: "scheduled_reminders")
 - `autoInitialize`: Auto-create schema/table if missing (default: true)
 
 **Advanced Configuration:**
 
 ```csharp
 .WithReminders("reminder-host", reminders => reminders
-    .WithPostgreSqlStorage(settings =>
+    .WithPostgreSqlStorage(new PostgreSqlReminderStorageSettings
     {
-        settings.ConnectionString = "Host=localhost;...";
-        settings.SchemaName = "custom_schema";
-        settings.TableName = "my_reminders";
-        settings.CommandTimeout = TimeSpan.FromSeconds(60);
-        settings.AutoInitialize = false; // Manual schema management
+        ConnectionString = "Host=localhost;...",
+        SchemaName = "custom_schema",
+        TableName = "my_reminders",
+        CommandTimeout = TimeSpan.FromSeconds(60),
+        AutoInitialize = false // Manual schema management
     }))
 ```
 
@@ -245,12 +266,35 @@ The `WithPostgreSqlStorage` extension method configures PostgreSQL as the remind
 
 For production environments, you may prefer to manually create the database schema. Use the provided SQL script:
 
-📄 [PostgreSQL Schema Script](src/Akka.Reminders.Sql/Scripts/PostgreSql-Create.sql)
+📄 [PostgreSQL Schema Script](src/Akka.Reminders.PostgreSql/Scripts/PostgreSql-Create.sql)
 
 ```sql
 -- Run this script against your database
 -- Creates schema, table, and indexes
 ```
+
+### SQLite Storage
+
+`using Akka.Reminders.Sqlite.Hosting;`
+
+The `WithSqliteStorage` extension method configures SQLite as the reminder storage backend:
+
+```csharp
+.WithReminders("reminder-host", reminders => reminders
+    .WithSqliteStorage(
+        connectionString: "Data Source=reminders.db;Mode=ReadWriteCreate;Cache=Shared",
+        tableName: "akka_reminders",
+        autoInitialize: true))
+```
+
+**Parameters:**
+- `connectionString`: SQLite connection string
+- `tableName`: Table name for reminders (default: "scheduled_reminders")
+- `autoInitialize`: Auto-create table if missing (default: true)
+
+**Manual Schema Setup:**
+
+📄 [SQLite Schema Script](src/Akka.Reminders.Sqlite/Scripts/Sqlite-Create.sql)
 
 ### In-Memory Storage
 

@@ -1,5 +1,11 @@
 using Akka.Actor;
 using Akka.Reminders.Sql.Configuration;
+using Akka.Reminders.Sqlite;
+using Akka.Reminders.Sqlite.Configuration;
+using Akka.Reminders.SqlServer;
+using Akka.Reminders.SqlServer.Configuration;
+using Akka.Reminders.PostgreSql;
+using Akka.Reminders.PostgreSql.Configuration;
 
 namespace Akka.Reminders.Sql.Hosting;
 
@@ -8,15 +14,6 @@ namespace Akka.Reminders.Sql.Hosting;
 /// </summary>
 public static class SqlStorageExtensions
 {
-    /// <summary>
-    /// Configures SQL Server storage for reminders.
-    /// </summary>
-    /// <param name="builder">The reminder configuration builder.</param>
-    /// <param name="connectionString">The SQL Server connection string.</param>
-    /// <param name="schemaName">Optional schema name (default: "reminders").</param>
-    /// <param name="tableName">Optional table name (default: "scheduled_reminders").</param>
-    /// <param name="autoInitialize">Whether to auto-create schema/table (default: true).</param>
-    /// <returns>The builder for method chaining.</returns>
     public static ReminderConfigurationBuilder WithSqlServerStorage(
         this ReminderConfigurationBuilder builder,
         string connectionString,
@@ -24,24 +21,15 @@ public static class SqlStorageExtensions
         string? tableName = null,
         bool? autoInitialize = null)
     {
-        var settings = SqlReminderStorageSettings.CreateSqlServer(
+        var settings = SqlServerReminderStorageSettings.Create(
             connectionString,
             schemaName,
             tableName,
             autoInitialize);
 
-        return builder.WithStorage(system => new SqlReminderStorage(settings, system));
+        return builder.WithStorage(system => new SqlServerReminderStorage(settings, system));
     }
 
-    /// <summary>
-    /// Configures PostgreSQL storage for reminders.
-    /// </summary>
-    /// <param name="builder">The reminder configuration builder.</param>
-    /// <param name="connectionString">The PostgreSQL connection string.</param>
-    /// <param name="schemaName">Optional schema name (default: "reminders").</param>
-    /// <param name="tableName">Optional table name (default: "scheduled_reminders").</param>
-    /// <param name="autoInitialize">Whether to auto-create schema/table (default: true).</param>
-    /// <returns>The builder for method chaining.</returns>
     public static ReminderConfigurationBuilder WithPostgreSqlStorage(
         this ReminderConfigurationBuilder builder,
         string connectionString,
@@ -49,22 +37,29 @@ public static class SqlStorageExtensions
         string? tableName = null,
         bool? autoInitialize = null)
     {
-        var settings = SqlReminderStorageSettings.CreatePostgreSql(
+        var settings = PostgreSqlReminderStorageSettings.Create(
             connectionString,
             schemaName,
             tableName,
             autoInitialize);
 
-        return builder.WithStorage(system => new SqlReminderStorage(settings, system));
+        return builder.WithStorage(system => new PostgreSqlReminderStorage(settings, system));
     }
 
-    /// <summary>
-    /// Configures SQL storage for reminders with custom settings.
-    /// Allows full control over all storage settings.
-    /// </summary>
-    /// <param name="builder">The reminder configuration builder.</param>
-    /// <param name="settings">The SQL storage settings.</param>
-    /// <returns>The builder for method chaining.</returns>
+    public static ReminderConfigurationBuilder WithSqliteStorage(
+        this ReminderConfigurationBuilder builder,
+        string connectionString,
+        string? tableName = null,
+        bool? autoInitialize = null)
+    {
+        var settings = SqliteReminderStorageSettings.Create(
+            connectionString,
+            tableName,
+            autoInitialize);
+
+        return builder.WithStorage(system => new SqliteReminderStorage(settings, system));
+    }
+
     public static ReminderConfigurationBuilder WithSqlStorage(
         this ReminderConfigurationBuilder builder,
         SqlReminderStorageSettings settings)
@@ -72,13 +67,6 @@ public static class SqlStorageExtensions
         return builder.WithStorage(system => new SqlReminderStorage(settings, system));
     }
 
-    /// <summary>
-    /// Configures SQL storage for reminders with a settings factory.
-    /// Allows settings to be created based on the actor system configuration.
-    /// </summary>
-    /// <param name="builder">The reminder configuration builder.</param>
-    /// <param name="settingsFactory">Factory function to create settings from the actor system.</param>
-    /// <returns>The builder for method chaining.</returns>
     public static ReminderConfigurationBuilder WithSqlStorage(
         this ReminderConfigurationBuilder builder,
         Func<ActorSystem, SqlReminderStorageSettings> settingsFactory)

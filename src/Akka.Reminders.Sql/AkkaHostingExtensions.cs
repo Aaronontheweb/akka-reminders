@@ -140,4 +140,47 @@ public static class SqlReminderStorageHostingExtensions
             return new SqlReminderStorage(settings, system);
         });
     }
+
+    /// <summary>
+    /// Configures the reminder system to use SQLite storage.
+    /// </summary>
+    /// <param name="builder">The reminder configuration builder.</param>
+    /// <param name="connectionString">The SQLite connection string.</param>
+    /// <param name="tableName">Optional table name (defaults to "reminders").</param>
+    /// <param name="autoInitialize">Whether to automatically create the table if it doesn't exist (defaults to true).</param>
+    /// <returns>The builder for method chaining.</returns>
+    public static ReminderConfigurationBuilder WithSqliteStorage(
+        this ReminderConfigurationBuilder builder,
+        string connectionString,
+        string tableName = "reminders",
+        bool autoInitialize = true)
+    {
+        return builder.WithStorage(system =>
+        {
+            var settings = SqlReminderStorageSettings.CreateSqlite(
+                connectionString,
+                tableName,
+                autoInitialize);
+            return new SqlReminderStorage(settings, system);
+        });
+    }
+
+    /// <summary>
+    /// Configures the reminder system to use SQLite storage with custom settings.
+    /// </summary>
+    /// <param name="builder">The reminder configuration builder.</param>
+    /// <param name="configure">Action to configure the SQLite storage settings.</param>
+    /// <returns>The builder for method chaining.</returns>
+    public static ReminderConfigurationBuilder WithSqliteStorage(
+        this ReminderConfigurationBuilder builder,
+        Action<SqlReminderStorageSettings> configure)
+    {
+        return builder.WithStorage(system =>
+        {
+            var settings = SqlReminderStorageSettings.CreateSqlite("");
+            configure(settings);
+            settings.Validate();
+            return new SqlReminderStorage(settings, system);
+        });
+    }
 }
