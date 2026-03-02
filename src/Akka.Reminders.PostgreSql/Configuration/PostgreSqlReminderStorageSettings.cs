@@ -1,3 +1,5 @@
+using Akka.Configuration;
+
 namespace Akka.Reminders.PostgreSql.Configuration;
 
 /// <summary>
@@ -5,6 +7,11 @@ namespace Akka.Reminders.PostgreSql.Configuration;
 /// </summary>
 public sealed record PostgreSqlReminderStorageSettings
 {
+    /// <summary>
+    /// Default HOCON path for PostgreSQL reminder storage settings.
+    /// </summary>
+    public const string DefaultConfigPath = "akka.reminders.postgresql";
+
     /// <summary>
     /// The PostgreSQL connection string.
     /// </summary>
@@ -49,6 +56,34 @@ public sealed record PostgreSqlReminderStorageSettings
             SchemaName = schemaName ?? "reminders",
             TableName = tableName ?? "scheduled_reminders",
             AutoInitialize = autoInitialize ?? true
+        };
+    }
+
+    /// <summary>
+    /// Creates settings from HOCON.
+    /// </summary>
+    /// <param name="config">HOCON config section.</param>
+    /// <param name="connectionString">Optional connection string override.</param>
+    public static PostgreSqlReminderStorageSettings Create(
+        Config config,
+        string? connectionString = null)
+    {
+        var resolvedConnectionString = connectionString ?? config.GetString("connection-string", null);
+
+        if (string.IsNullOrWhiteSpace(resolvedConnectionString))
+            throw new ArgumentException(
+                "connection-string is required in HOCON config or must be provided explicitly.",
+                nameof(connectionString));
+
+        return new PostgreSqlReminderStorageSettings
+        {
+            ConnectionString = resolvedConnectionString,
+            SchemaName = config.GetString("schema-name", "reminders"),
+            TableName = config.GetString("table-name", "scheduled_reminders"),
+            AutoInitialize = config.HasPath("auto-initialize") ? config.GetBoolean("auto-initialize") : true,
+            CommandTimeout = config.HasPath("command-timeout")
+                ? config.GetTimeSpan("command-timeout")
+                : TimeSpan.FromSeconds(30)
         };
     }
 
