@@ -46,6 +46,23 @@ public static class SqlStorageExtensions
         return builder.WithStorage(system => new PostgreSqlReminderStorage(settings, system));
     }
 
+    public static ReminderConfigurationBuilder WithPostgreSqlStorageFromConfig(
+        this ReminderConfigurationBuilder builder,
+        string configPath = PostgreSqlReminderStorageSettings.DefaultConfigPath,
+        string? connectionString = null)
+    {
+        return builder.WithStorage(system =>
+        {
+            var config = system.Settings.Config.GetConfig(configPath);
+
+            if (config == null)
+                throw new ArgumentException($"HOCON path '{configPath}' was not found.", nameof(configPath));
+
+            var settings = PostgreSqlReminderStorageSettings.Create(config, connectionString);
+            return new PostgreSqlReminderStorage(settings, system);
+        });
+    }
+
     public static ReminderConfigurationBuilder WithSqliteStorage(
         this ReminderConfigurationBuilder builder,
         string connectionString,

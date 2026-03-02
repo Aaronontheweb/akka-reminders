@@ -248,6 +248,8 @@ The `WithPostgreSqlStorage` extension method configures PostgreSQL as the remind
 - `tableName`: Table name for reminders (default: "scheduled_reminders")
 - `autoInitialize`: Auto-create schema/table if missing (default: true)
 
+> Backward compatibility: default schema remains `reminders` unless you explicitly override it.
+
 **Advanced Configuration:**
 
 ```csharp
@@ -271,6 +273,23 @@ For production environments, you may prefer to manually create the database sche
 ```sql
 -- Run this script against your database
 -- Creates schema, table, and indexes
+```
+
+**HOCON Configuration:**
+
+```hocon
+akka.reminders.postgresql {
+  connection-string = "Host=localhost;Database=reminders;Username=postgres;Password=postgres"
+  schema-name = "public"
+  table-name = "scheduled_reminders"
+  auto-initialize = true
+  command-timeout = 30s
+}
+```
+
+```csharp
+.WithReminders("reminder-host", reminders => reminders
+    .WithPostgreSqlStorageFromConfig())
 ```
 
 ### SQLite Storage
