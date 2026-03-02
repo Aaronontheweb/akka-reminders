@@ -21,7 +21,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Akka.Reminders\Akka.Reminders.csproj" />
+    <ProjectReference Include="..\Akka.Reminders.PostgreSql\Akka.Reminders.PostgreSql.csproj" />
     <ProjectReference Include="..\Akka.Reminders.Sql\Akka.Reminders.Sql.csproj" />
+    <ProjectReference Include="..\Akka.Reminders.SqlServer\Akka.Reminders.SqlServer.csproj" />
+    <ProjectReference Include="..\Akka.Reminders.Sqlite\Akka.Reminders.Sqlite.csproj" />
   </ItemGroup>
 
   <ItemGroup>

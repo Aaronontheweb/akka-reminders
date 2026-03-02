@@ -2,12 +2,8 @@ using System.Data;
 using System.Data.Common;
 using Microsoft.Data.SqlClient;
 
-namespace Akka.Reminders.Sql.Internal;
+namespace Akka.Reminders.SqlServer.Internal;
 
-/// <summary>
-/// SQL Server implementation of the SQL dialect for reminder storage.
-/// Uses SQL Server-specific features like MERGE and DATETIME2.
-/// </summary>
 internal sealed class SqlServerDialect : ISqlDialect
 {
     public static readonly SqlServerDialect Instance = new();
@@ -46,12 +42,10 @@ internal sealed class SqlServerDialect : ISqlDialect
                     CONSTRAINT PK_{tableName} PRIMARY KEY (ShardRegionName, EntityId, ReminderKey)
                 );
 
-                -- Filtered index for efficient queries on pending reminders
                 CREATE INDEX IX_{tableName}_DueReminders
                 ON {fullTableName} (WhenUtc, ShardRegionName, EntityId)
                 WHERE IsCompleted = 0;
 
-                -- Index for cleanup operations
                 CREATE INDEX IX_{tableName}_Cleanup
                 ON {fullTableName} (CompletedAtUtc)
                 WHERE IsCompleted = 1;
@@ -138,7 +132,6 @@ internal sealed class SqlServerDialect : ISqlDialect
     {
         var fullTableName = $"[{schemaName}].[{tableName}]";
 
-        // Build VALUES list: (@sr0, @eid0, @rk0), (@sr1, @eid1, @rk1), ...
         var values = string.Join(",\n                ",
             Enumerable.Range(0, count).Select(i =>
                 $"(@sr{i}, @eid{i}, @rk{i})"));
@@ -236,18 +229,15 @@ internal sealed class SqlServerDialect : ISqlDialect
     {
         var sqlCommand = (SqlCommand)command;
 
-        // Handle null values
         if (value == null)
         {
             sqlCommand.Parameters.AddWithValue(name, DBNull.Value);
             return;
         }
 
-        // Handle specific types
         switch (value)
         {
             case DateTimeOffset dto:
-                // SQL Server DATETIME2 has 100ns precision matching .NET, but store as UTC DateTime
                 sqlCommand.Parameters.Add(name, SqlDbType.DateTime2).Value = dto.UtcDateTime;
                 break;
             case DateTime dt:

@@ -54,7 +54,6 @@ BEGIN
     EXEC(@CreateTableSql);
     PRINT 'Created table: ' + @FullTableName
 
-    -- Create filtered index for efficient queries on pending reminders
     DECLARE @IndexName1 NVARCHAR(500) = 'IX_' + @TableName + '_DueReminders';
     DECLARE @CreateIndex1Sql NVARCHAR(MAX) = '
     CREATE INDEX ' + @IndexName1 + '
@@ -64,7 +63,6 @@ BEGIN
     EXEC(@CreateIndex1Sql);
     PRINT 'Created index: ' + @IndexName1
 
-    -- Create index for cleanup operations
     DECLARE @IndexName2 NVARCHAR(500) = 'IX_' + @TableName + '_Cleanup';
     DECLARE @CreateIndex2Sql NVARCHAR(MAX) = '
     CREATE INDEX ' + @IndexName2 + '

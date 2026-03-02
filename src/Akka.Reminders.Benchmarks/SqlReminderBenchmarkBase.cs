@@ -1,6 +1,6 @@
 using Akka.Actor;
-using Akka.Reminders.Sql;
-using Akka.Reminders.Sql.Configuration;
+using Akka.Reminders.PostgreSql;
+using Akka.Reminders.PostgreSql.Configuration;
 using BenchmarkDotNet.Attributes;
 using Npgsql;
 using NpgsqlTypes;
@@ -17,15 +17,15 @@ public abstract class SqlReminderBenchmarkBase
         "Host=localhost;Port=5432;Database=reminders_bench;Username=postgres;Password=postgres";
 
     private ActorSystem? _system;
-    protected SqlReminderStorage Storage { get; private set; } = null!;
+    protected PostgreSqlReminderStorage Storage { get; private set; } = null!;
 
     [GlobalSetup]
     public async Task GlobalSetup()
     {
         _system = ActorSystem.Create("benchmark-system");
 
-        var settings = SqlReminderStorageSettings.CreatePostgreSql(ConnectionString);
-        Storage = new SqlReminderStorage(settings, _system);
+        var settings = PostgreSqlReminderStorageSettings.Create(ConnectionString);
+        Storage = new PostgreSqlReminderStorage(settings, _system);
 
         // Force table creation via auto-initialize
         await Storage.GetRemindersOverviewAsync(DateTimeOffset.UtcNow);
