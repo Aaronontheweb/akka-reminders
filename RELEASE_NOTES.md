@@ -1,3 +1,27 @@
+#### 0.5.0 March 2nd 2026 ####
+
+**New Features**
+
+- **SQLite Storage Backend** - Added SQLite as a first-class storage provider for akka-reminders ([#83](https://github.com/Aaronontheweb/akka-reminders/pull/83), closes [#63](https://github.com/Aaronontheweb/akka-reminders/issues/63))
+  - Configure via `WithSqliteStorage(...)` in the Akka.Hosting API
+  - Full feature parity with SQL Server and PostgreSQL storage backends
+  - Well suited for local development, testing, and single-node deployments
+
+- **Provider-Specific NuGet Packages** - SQL storage implementations are now available as dedicated packages ([#83](https://github.com/Aaronontheweb/akka-reminders/pull/83))
+  - `Aaron.Akka.Reminders.SqlServer` - SQL Server storage provider
+  - `Aaron.Akka.Reminders.PostgreSql` - PostgreSQL storage provider
+  - `Aaron.Akka.Reminders.Sqlite` - SQLite storage provider
+  - `Aaron.Akka.Reminders.Sql` remains fully functional as a compatibility package that re-exports all three providers
+
+- **Configurable PostgreSQL Schema Settings** - PostgreSQL storage can now be configured via HOCON for schema name, table name, auto-initialization, and command timeout ([#84](https://github.com/Aaronontheweb/akka-reminders/pull/84), closes [#67](https://github.com/Aaronontheweb/akka-reminders/issues/67))
+  - New `WithPostgreSqlStorageFromConfig(...)` Akka.Hosting API reads settings directly from the actor system config
+  - Supported HOCON keys: `schema-name`, `table-name`, `auto-initialize`, `command-timeout`
+  - Default schema remains `reminders` for full backward compatibility
+
+**Dependency Updates**
+
+- Updated Npgsql from 8.0.8 to 10.0.1 ([#47](https://github.com/Aaronontheweb/akka-reminders/pull/47))
+
 #### 0.4.0 February 16th 2026 ####
 
 **New Features**
