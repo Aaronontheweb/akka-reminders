@@ -7,40 +7,24 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <VersionPrefix>0.4.0</VersionPrefix>
+    <VersionPrefix>0.5.0</VersionPrefix>
     <PackageReleaseNotes>**New Features**
 
-- **Batch Size Limiting** - Added `MaxBatchSize` configuration setting (default: 1000) to control the maximum number of reminders processed in a single batch ([#74](https://github.com/Aaronontheweb/akka-reminders/pull/74))
-  - Prevents overwhelming the system when large numbers of reminders become due simultaneously
-  - Configurable via `ReminderSettings.MaxBatchSize`
-  - Implemented with LIMIT/TOP clauses in SQL storage layer
+- **SQLite Storage Backend** - Added SQLite as a first-class storage provider for akka-reminders ([#83](https://github.com/Aaronontheweb/akka-reminders/pull/83), closes [#63](https://github.com/Aaronontheweb/akka-reminders/issues/63))
+  - Configure via `WithSqliteStorage(...)` in the Akka.Hosting API
+  - Full feature parity with SQL Server and PostgreSQL storage backends
+  - Well suited for local development, testing, and single-node deployments
 
-- **Write Circuit Breaker for Database Resilience** - Implemented automatic circuit breaker pattern to handle database write failures gracefully ([#74](https://github.com/Aaronontheweb/akka-reminders/pull/74))
-  - When database writes fail but reads succeed, circuit opens and limits next tick to single-reminder probe
-  - Prevents self-inflicted DoS during database write outages
-  - Automatic recovery when probe succeeds
-  - Circuit stays open during continued failures, providing natural backoff
+- **Provider-Specific NuGet Packages** - SQL storage implementations are now available as dedicated packages ([#83](https://github.com/Aaronontheweb/akka-reminders/pull/83))
+  - `Aaron.Akka.Reminders.SqlServer` - SQL Server storage provider
+  - `Aaron.Akka.Reminders.PostgreSql` - PostgreSQL storage provider
+  - `Aaron.Akka.Reminders.Sqlite` - SQLite storage provider
+  - `Aaron.Akka.Reminders.Sql` remains fully functional as a compatibility package that re-exports all three providers
 
-**Bug Fixes**
-
-- **Fixed Duplicate Reminder Delivery Loop Under Database Load** - Resolved critical issue where high database load caused infinite re-delivery of reminders ([#73](https://github.com/Aaronontheweb/akka-reminders/issues/73), [#74](https://github.com/Aaronontheweb/akka-reminders/pull/74))
-  - Root cause: Shared timeout budget across all storage operations caused mark-complete phase to fail when fetch phase was slow
-  - Solution: Refactored to use separate `CancellationTokenSource` per storage phase with independent timeouts
-  - Added batch processing loop that processes reminders in chunks up to `MaxBatchSize`
-  - Track delivered reminders to prevent duplicate delivery within same processing run
-  - Remove transaction wrapper from mark-complete operations - each chunk now auto-commits independently
-
-**Improvements**
-
-- **Optimized Batch Mark-Complete Operations** - Replaced N individual UPDATE statements with batched operations using VALUES JOIN pattern ([#74](https://github.com/Aaronontheweb/akka-reminders/pull/74))
-  - For 1,000 reminders: reduced mark-complete time from ~400ms to ~180ms (2.2x improvement)
-  - Groups completions by status and timestamp, chunks at 500 rows to stay within SQL Server parameter limits
-  - Prevents timeout issues on Azure SQL under DTU pressure
-
-- **Enhanced Failure Mode Documentation** - Added comprehensive documentation of all failure scenarios and system trade-offs in `docs/design/failure-modes.md` ([#74](https://github.com/Aaronontheweb/akka-reminders/pull/74))
-  - Documents circuit breaker behavior and recovery patterns
-  - Explains at-least-once delivery semantics during outages
-  - Referenced in main README architecture section</PackageReleaseNotes>
+- **Configurable PostgreSQL Schema Settings** - PostgreSQL storage can now be configured via HOCON for schema name, table name, auto-initialization, and command timeout ([#84](https://github.com/Aaronontheweb/akka-reminders/pull/84), closes [#67](https://github.com/Aaronontheweb/akka-reminders/issues/67))
+  - New `WithPostgreSqlStorageFromConfig(...)` Akka.Hosting API reads settings directly from the actor system config
+  - Supported HOCON keys: `schema-name`, `table-name`, `auto-initialize`, `command-timeout`
+  - Default schema remains `reminders` for full backward compatibility</PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Visual Studio C# settings -->
