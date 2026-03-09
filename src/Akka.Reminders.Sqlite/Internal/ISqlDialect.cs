@@ -10,7 +10,8 @@ internal interface ISqlDialect
     string GetMarkCompletedSql(string tableName);
     string GetBatchMarkCompletedSql(string tableName, int count);
     string GetCleanupSql(string tableName);
-    string GetOverviewSql(string tableName);
+    string GetOverviewAggregateSql(string tableName);
+    string GetNextReminderTimeSql(string tableName);
     string GetCancelReminderSql(string tableName);
     string GetCancelAllRemindersSql(string tableName);
     string GetFetchRemindersSql(string tableName);

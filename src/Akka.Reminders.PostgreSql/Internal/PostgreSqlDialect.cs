@@ -140,15 +140,27 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             """;
     }
 
-    public string GetOverviewSql(string schemaName, string tableName)
+    public string GetOverviewAggregateSql(string schemaName, string tableName)
     {
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
 
         return $"""
-            SELECT shard_region_name, entity_id, reminder_key, when_utc, repeat_interval_ticks,
-                   serializer_id, manifest, payload, attempt_count, last_failure_reason, is_completed
+            SELECT COUNT(*) AS total_count, MIN(when_utc) AS next_when_utc
             FROM {fullTableName}
-            ORDER BY when_utc ASC;
+            WHERE is_completed = FALSE;
+            """;
+    }
+
+    public string GetNextReminderTimeSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+
+        return $"""
+            SELECT when_utc
+            FROM {fullTableName}
+            WHERE is_completed = FALSE
+            ORDER BY when_utc ASC
+            LIMIT 1 OFFSET @Skip;
             """;
     }
 

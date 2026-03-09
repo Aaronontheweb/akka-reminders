@@ -99,40 +99,43 @@ public sealed class SqlServerReminderStorage : IReminderStorage
             reminders.Add(reminder);
         }
 
-        var overview = await GetRemindersOverviewAsync(now, cancellationToken);
-
-        var fetchedKeys = new HashSet<(string, string, string)>(
-            reminders.Select(r => (r.Entity.ShardRegionName, r.Entity.EntityId, r.Key.Name)));
-
+        // Get overview of remaining reminders using aggregate queries
         await using var conn2 = _dialect.CreateConnection(_settings.ConnectionString);
         await conn2.OpenAsync(cancellationToken);
-        await using var cmd2 = conn2.CreateCommand();
-        cmd2.CommandText = _dialect.GetOverviewSql(_settings.SchemaName, _settings.TableName);
-        cmd2.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
-        await using var reader2 = await cmd2.ExecuteReaderAsync(cancellationToken);
 
-        var remainingReminders = new List<ScheduledReminder>();
-        while (await reader2.ReadAsync(cancellationToken))
+        long totalPending = 0;
+        await using (var cmd2 = conn2.CreateCommand())
         {
-            var isCompleted = reader2.GetBoolean(reader2.GetOrdinal("IsCompleted"));
-            if (!isCompleted)
+            cmd2.CommandText = _dialect.GetOverviewAggregateSql(_settings.SchemaName, _settings.TableName);
+            cmd2.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+            await using var reader2 = await cmd2.ExecuteReaderAsync(cancellationToken);
+            if (await reader2.ReadAsync(cancellationToken))
             {
-                var reminder = ReadReminderFromReader(reader2);
-                var key = (reminder.Entity.ShardRegionName, reminder.Entity.EntityId, reminder.Key.Name);
-                if (!fetchedKeys.Contains(key))
-                {
-                    remainingReminders.Add(reminder);
-                }
+                totalPending = reader2.GetInt32(reader2.GetOrdinal("TotalCount"));
             }
         }
 
-        var nextReminder = remainingReminders.OrderBy(r => r.When).FirstOrDefault();
-        var timeUntilNext = nextReminder != null ? nextReminder.When - now : TimeSpan.MaxValue;
+        var remainingCount = totalPending - reminders.Count;
+        var timeUntilNext = TimeSpan.MaxValue;
+
+        if (remainingCount > 0)
+        {
+            await using var cmd3 = conn2.CreateCommand();
+            cmd3.CommandText = _dialect.GetNextReminderTimeSql(_settings.SchemaName, _settings.TableName);
+            cmd3.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+            _dialect.AddParameter(cmd3, "@Skip", reminders.Count);
+
+            var result = await cmd3.ExecuteScalarAsync(cancellationToken);
+            if (result is DateTime nextWhenUtc)
+            {
+                timeUntilNext = new DateTimeOffset(DateTime.SpecifyKind(nextWhenUtc, DateTimeKind.Utc)) - now;
+            }
+        }
 
         var adjustedOverview = new ReminderOverview
         {
             TimeUntilNext = timeUntilNext,
-            TotalPendingReminders = remainingReminders.Count
+            TotalPendingReminders = remainingCount
         };
 
         return new PendingRemindersWithSummary(reminders, adjustedOverview);
@@ -192,42 +195,41 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         }
     }
 
+    /// <inheritdoc />
     public async Task<ReminderOverview> GetRemindersOverviewAsync(
         DateTimeOffset now,
         CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
 
-        var allReminders = new List<ScheduledReminder>();
-
         await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
         await connection.OpenAsync(cancellationToken);
 
         await using var command = connection.CreateCommand();
-        command.CommandText = _dialect.GetOverviewSql(_settings.SchemaName, _settings.TableName);
+        command.CommandText = _dialect.GetOverviewAggregateSql(_settings.SchemaName, _settings.TableName);
         command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-        while (await reader.ReadAsync(cancellationToken))
+        if (await reader.ReadAsync(cancellationToken))
         {
-            var isCompleted = reader.GetBoolean(reader.GetOrdinal("IsCompleted"));
+            var totalCount = reader.GetInt32(reader.GetOrdinal("TotalCount"));
+            var nextWhenUtcOrdinal = reader.GetOrdinal("NextWhenUtc");
 
-            if (!isCompleted)
+            if (totalCount == 0 || reader.IsDBNull(nextWhenUtcOrdinal))
+                return ReminderOverview.Empty;
+
+            var nextWhenUtc = reader.GetDateTime(nextWhenUtcOrdinal);
+            var timeUntilNext = new DateTimeOffset(DateTime.SpecifyKind(nextWhenUtc, DateTimeKind.Utc)) - now;
+
+            return new ReminderOverview
             {
-                var reminder = ReadReminderFromReader(reader);
-                allReminders.Add(reminder);
-            }
+                TotalPendingReminders = totalCount,
+                TimeUntilNext = timeUntilNext
+            };
         }
 
-        var nextReminder = allReminders.OrderBy(r => r.When).FirstOrDefault();
-        var timeUntilNext = nextReminder != null ? nextReminder.When - now : TimeSpan.MaxValue;
-
-        return new ReminderOverview
-        {
-            TimeUntilNext = timeUntilNext,
-            TotalPendingReminders = allReminders.Count
-        };
+        return ReminderOverview.Empty;
     }
 
     public async Task<bool> CleanUpCompletedRemindersAsync(
