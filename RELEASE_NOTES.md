@@ -1,3 +1,12 @@
+#### 0.5.1 March 9th 2026 ####
+
+**Bug Fixes**
+
+- **Fixed Full Table Scans in Reminder Storage Queries** - Resolved significant performance regression introduced in 0.5.0 where `GetNextRemindersAsync` and `GetRemindersOverviewAsync` loaded all rows from the database on every scheduling tick ([#92](https://github.com/Aaronontheweb/akka-reminders/pull/92))
+  - Replaced full-row scans with efficient aggregate queries (`COUNT(*) / MIN(when_utc)`) across all three SQL providers (SqlServer, PostgreSQL, SQLite)
+  - Removed an unused internal call to `GetRemindersOverviewAsync` inside `GetNextRemindersAsync` that was performing a full table load and discarding the result
+  - Removed `GetOverviewSql` from the `ISqlDialect` interface entirely, making it structurally impossible to reintroduce the full-scan path in the future
+
 #### 0.5.0 March 2nd 2026 ####
 
 **New Features**
