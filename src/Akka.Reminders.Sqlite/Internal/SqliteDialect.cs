@@ -132,15 +132,27 @@ internal sealed class SqliteDialect : ISqlDialect
             """;
     }
 
-    public string GetOverviewSql(string tableName)
+    public string GetOverviewAggregateSql(string tableName)
     {
         var fullTableName = $"\"{tableName}\"";
 
         return $"""
-            SELECT shard_region_name, entity_id, reminder_key, when_utc, repeat_interval_ticks,
-                   serializer_id, manifest, payload, attempt_count, last_failure_reason, is_completed
+            SELECT COUNT(*) AS total_count, MIN(when_utc) AS next_when_utc
             FROM {fullTableName}
-            ORDER BY when_utc ASC;
+            WHERE is_completed = 0;
+            """;
+    }
+
+    public string GetNextReminderTimeSql(string tableName)
+    {
+        var fullTableName = $"\"{tableName}\"";
+
+        return $"""
+            SELECT when_utc
+            FROM {fullTableName}
+            WHERE is_completed = 0
+            ORDER BY when_utc ASC
+            LIMIT 1 OFFSET @Skip;
             """;
     }
 

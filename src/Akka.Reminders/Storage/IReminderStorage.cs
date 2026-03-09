@@ -98,8 +98,17 @@ public interface IReminderStorage
     Task<ReminderProtocol.RemindersCancelled> CancelAllRemindersForEntityAsync(ReminderEntity entity, CancellationToken ct = default);
     
     /// <summary>
-    /// Fetches a summary of pending reminders.
+    /// Fetches a summary of pending reminders for diagnostics, testing, and ad-hoc queries.
     /// </summary>
+    /// <remarks>
+    /// This method is intended for external use cases: diagnostic tooling, integration tests,
+    /// health check endpoints, and monitoring dashboards.
+    ///
+    /// It MUST NOT be called from the scheduling hot path (e.g., inside <see cref="GetNextRemindersAsync"/>).
+    /// The scheduling actor computes its own overview from efficient aggregate queries as part of
+    /// <see cref="GetNextRemindersAsync"/> — calling this method from there would introduce
+    /// redundant database round-trips.
+    /// </remarks>
     /// <param name="now">Current time from scheduler</param>
     /// <param name="ct">Cancellation token</param>
     Task<ReminderOverview> GetRemindersOverviewAsync(DateTimeOffset now, CancellationToken ct = default);

@@ -97,40 +97,45 @@ public sealed class SqliteReminderStorage : IReminderStorage
             reminders.Add(reminder);
         }
 
-        var overview = await GetRemindersOverviewAsync(now, cancellationToken);
-
-        var fetchedKeys = new HashSet<(string, string, string)>(
-            reminders.Select(r => (r.Entity.ShardRegionName, r.Entity.EntityId, r.Key.Name)));
-
+        // Get overview of remaining reminders using aggregate queries
         await using var conn2 = _dialect.CreateConnection(_settings.ConnectionString);
         await conn2.OpenAsync(cancellationToken);
-        await using var cmd2 = conn2.CreateCommand();
-        cmd2.CommandText = _dialect.GetOverviewSql(_settings.TableName);
-        cmd2.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
-        await using var reader2 = await cmd2.ExecuteReaderAsync(cancellationToken);
 
-        var remainingReminders = new List<ScheduledReminder>();
-        while (await reader2.ReadAsync(cancellationToken))
+        long totalPending = 0;
+        await using (var cmd2 = conn2.CreateCommand())
         {
-            var isCompleted = ReadBoolean(reader2, "is_completed");
-            if (!isCompleted)
+            cmd2.CommandText = _dialect.GetOverviewAggregateSql(_settings.TableName);
+            cmd2.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+            await using var reader2 = await cmd2.ExecuteReaderAsync(cancellationToken);
+            if (await reader2.ReadAsync(cancellationToken))
             {
-                var reminder = ReadReminderFromReader(reader2);
-                var key = (reminder.Entity.ShardRegionName, reminder.Entity.EntityId, reminder.Key.Name);
-                if (!fetchedKeys.Contains(key))
-                {
-                    remainingReminders.Add(reminder);
-                }
+                totalPending = Convert.ToInt64(reader2.GetValue(reader2.GetOrdinal("total_count")),
+                    CultureInfo.InvariantCulture);
             }
         }
 
-        var nextReminder = remainingReminders.OrderBy(r => r.When).FirstOrDefault();
-        var timeUntilNext = nextReminder != null ? nextReminder.When - now : TimeSpan.MaxValue;
+        var remainingCount = totalPending - reminders.Count;
+        var timeUntilNext = TimeSpan.MaxValue;
+
+        if (remainingCount > 0)
+        {
+            await using var cmd3 = conn2.CreateCommand();
+            cmd3.CommandText = _dialect.GetNextReminderTimeSql(_settings.TableName);
+            cmd3.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+            _dialect.AddParameter(cmd3, "@Skip", reminders.Count);
+
+            var result = await cmd3.ExecuteScalarAsync(cancellationToken);
+            if (result != null && result != DBNull.Value)
+            {
+                var nextWhenUtc = ParseDateTimeOffset(result);
+                timeUntilNext = nextWhenUtc - now;
+            }
+        }
 
         var adjustedOverview = new ReminderOverview
         {
             TimeUntilNext = timeUntilNext,
-            TotalPendingReminders = remainingReminders.Count
+            TotalPendingReminders = remainingCount
         };
 
         return new PendingRemindersWithSummary(reminders, adjustedOverview);
@@ -197,36 +202,35 @@ public sealed class SqliteReminderStorage : IReminderStorage
     {
         await EnsureInitializedAsync(cancellationToken);
 
-        var allReminders = new List<ScheduledReminder>();
-
         await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
         await connection.OpenAsync(cancellationToken);
 
         await using var command = connection.CreateCommand();
-        command.CommandText = _dialect.GetOverviewSql(_settings.TableName);
+        command.CommandText = _dialect.GetOverviewAggregateSql(_settings.TableName);
         command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-        while (await reader.ReadAsync(cancellationToken))
+        if (await reader.ReadAsync(cancellationToken))
         {
-            var isCompleted = ReadBoolean(reader, "is_completed");
+            var totalCount = Convert.ToInt64(reader.GetValue(reader.GetOrdinal("total_count")),
+                CultureInfo.InvariantCulture);
+            var nextWhenUtcOrdinal = reader.GetOrdinal("next_when_utc");
 
-            if (!isCompleted)
+            if (totalCount == 0 || reader.IsDBNull(nextWhenUtcOrdinal))
+                return ReminderOverview.Empty;
+
+            var nextWhenUtc = ParseDateTimeOffset(reader.GetValue(nextWhenUtcOrdinal));
+            var timeUntilNext = nextWhenUtc - now;
+
+            return new ReminderOverview
             {
-                var reminder = ReadReminderFromReader(reader);
-                allReminders.Add(reminder);
-            }
+                TotalPendingReminders = totalCount,
+                TimeUntilNext = timeUntilNext
+            };
         }
 
-        var nextReminder = allReminders.OrderBy(r => r.When).FirstOrDefault();
-        var timeUntilNext = nextReminder != null ? nextReminder.When - now : TimeSpan.MaxValue;
-
-        return new ReminderOverview
-        {
-            TimeUntilNext = timeUntilNext,
-            TotalPendingReminders = allReminders.Count
-        };
+        return ReminderOverview.Empty;
     }
 
     public async Task<bool> CleanUpCompletedRemindersAsync(
@@ -455,13 +459,17 @@ public sealed class SqliteReminderStorage : IReminderStorage
     {
         var ordinal = reader.GetOrdinal(columnName);
         var value = reader.GetValue(ordinal);
+        return ParseDateTimeOffset(value);
+    }
 
+    private static DateTimeOffset ParseDateTimeOffset(object value)
+    {
         return value switch
         {
             DateTimeOffset dto => dto,
             DateTime dt => new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc)),
             string s => DateTimeOffset.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-            _ => throw new InvalidOperationException($"Unexpected datetime value type '{value.GetType()}' for column '{columnName}'.")
+            _ => throw new InvalidOperationException($"Unexpected datetime value type '{value.GetType()}'.")
         };
     }
 

@@ -162,15 +162,27 @@ internal sealed class SqlServerDialect : ISqlDialect
             """;
     }
 
-    public string GetOverviewSql(string schemaName, string tableName)
+    public string GetOverviewAggregateSql(string schemaName, string tableName)
     {
         var fullTableName = $"[{schemaName}].[{tableName}]";
 
         return $"""
-            SELECT ShardRegionName, EntityId, ReminderKey, WhenUtc, RepeatIntervalTicks,
-                   SerializerId, Manifest, Payload, AttemptCount, LastFailureReason, IsCompleted
+            SELECT COUNT(*) AS TotalCount, MIN(WhenUtc) AS NextWhenUtc
             FROM {fullTableName}
-            ORDER BY WhenUtc ASC;
+            WHERE IsCompleted = 0;
+            """;
+    }
+
+    public string GetNextReminderTimeSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+
+        return $"""
+            SELECT WhenUtc
+            FROM {fullTableName}
+            WHERE IsCompleted = 0
+            ORDER BY WhenUtc ASC
+            OFFSET @Skip ROWS FETCH NEXT 1 ROW ONLY;
             """;
     }
 
