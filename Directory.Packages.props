@@ -28,6 +28,6 @@
   </ItemGroup>
   <!-- SourceLink support for all Akka.NET projects -->
   <ItemGroup>
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.103" />
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.200" />
   </ItemGroup>
 </Project>
