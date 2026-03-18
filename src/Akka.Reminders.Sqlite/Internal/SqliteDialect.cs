@@ -265,6 +265,20 @@ internal sealed class SqliteDialect : ISqlDialect
             """;
     }
 
+    public string GetResetAwaitingAckSql(string tableName)
+    {
+        var fullTableName = $"\"{tableName}\"";
+
+        return $"""
+            UPDATE {fullTableName}
+            SET completion_status = 'Pending',
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL
+            WHERE completion_status = 'AwaitingAck'
+              AND is_completed = 0;
+            """;
+    }
+
     public DbConnection CreateConnection(string connectionString)
     {
         return new SqliteConnection(connectionString);

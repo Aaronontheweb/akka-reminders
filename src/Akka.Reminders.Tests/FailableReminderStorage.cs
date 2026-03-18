@@ -112,4 +112,11 @@ internal sealed class FailableReminderStorage : IReminderStorage
             throw new TimeoutException("Simulated database write timeout");
         return _inner.AcknowledgeReminderAsync(entity, key, ackedAt, ct);
     }
+
+    public Task<int> ResetAwaitingAckToPendingAsync(CancellationToken ct = default)
+    {
+        if (FailWrites)
+            throw new TimeoutException("Simulated database write timeout");
+        return _inner.ResetAwaitingAckToPendingAsync(ct);
+    }
 }

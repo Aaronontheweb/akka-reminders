@@ -89,4 +89,7 @@ public sealed class SqlReminderStorage : IReminderStorage
         DateTimeOffset ackedAt,
         CancellationToken ct = default)
         => _storage.AcknowledgeReminderAsync(entity, key, ackedAt, ct);
+
+    public Task<int> ResetAwaitingAckToPendingAsync(CancellationToken ct = default)
+        => _storage.ResetAwaitingAckToPendingAsync(ct);
 }

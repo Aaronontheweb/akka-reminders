@@ -527,6 +527,20 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
         }
     }
 
+    public async Task<int> ResetAwaitingAckToPendingAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+
+        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = _dialect.GetResetAwaitingAckSql(_settings.SchemaName, _settings.TableName);
+        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private Task EnsureInitializedAsync(CancellationToken cancellationToken)
     {
         if (_initialized || !_settings.AutoInitialize)

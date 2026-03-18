@@ -58,18 +58,28 @@ public sealed class ReminderClientExtension : IExtension
     }
 
     /// <summary>
+    /// Longer timeout applied specifically to ack operations. The scheduler's ack handler performs
+    /// a storage write that may take up to <c>StorageTimeout</c> (default 5 s) to complete.
+    /// Using the same 5-second default would race against that write and cause the caller to
+    /// misreport a successful ack as a timeout failure.
+    /// </summary>
+    private static readonly TimeSpan AckTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>
     /// Helper method to send a command to the scheduler proxy with error handling.
+    /// Uses <paramref name="timeout"/> for the Ask call; defaults to 5 seconds when not specified.
     /// </summary>
     private async Task<TResponse> SendToSchedulerAsync<TCommand, TResponse>(
         TCommand command,
         CancellationToken ct,
-        Func<string, TResponse> errorFactory)
+        Func<string, TResponse> errorFactory,
+        TimeSpan? timeout = null)
     {
         try
         {
             var response = await _schedulerProxy.Value.Ask<TResponse>(
                 command,
-                TimeSpan.FromSeconds(5),
+                timeout ?? TimeSpan.FromSeconds(5),
                 ct);
 
             return response;
@@ -230,7 +240,8 @@ public sealed class ReminderClientExtension : IExtension
                 envelope.Entity,
                 envelope.Key,
                 ReminderAckResponseCode.Error,
-                errorMessage));
+                errorMessage),
+            AckTimeout);
     }
 
     /// <summary>

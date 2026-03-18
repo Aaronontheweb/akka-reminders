@@ -18,6 +18,7 @@ internal interface ISqlDialect
     string GetMarkAsAwaitingAckSql(string tableName);
     string GetTimedOutAckRemindersSql(string tableName, int maxCount);
     string GetAcknowledgeReminderSql(string tableName);
+    string GetResetAwaitingAckSql(string tableName);
     DbConnection CreateConnection(string connectionString);
     void AddParameter(DbCommand command, string name, object value);
 }

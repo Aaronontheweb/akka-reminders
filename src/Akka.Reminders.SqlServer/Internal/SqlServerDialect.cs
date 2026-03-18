@@ -297,6 +297,20 @@ internal sealed class SqlServerDialect : ISqlDialect
             """;
     }
 
+    public string GetResetAwaitingAckSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+
+        return $"""
+            UPDATE {fullTableName}
+            SET CompletionStatus = 'Pending',
+                DeliveredAtUtc = NULL,
+                AckDeadlineUtc = NULL
+            WHERE CompletionStatus = 'AwaitingAck'
+              AND IsCompleted = 0;
+            """;
+    }
+
     public DbConnection CreateConnection(string connectionString)
     {
         return new SqlConnection(connectionString);

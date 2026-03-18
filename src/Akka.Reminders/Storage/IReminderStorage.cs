@@ -213,4 +213,18 @@ public interface IReminderStorage
         ReminderKey key,
         DateTimeOffset ackedAt,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Resets all reminders stuck in <c>AwaitingAck</c> state back to <c>Pending</c> so they will
+    /// be re-delivered on the next fetch cycle.
+    /// </summary>
+    /// <remarks>
+    /// Called once during scheduler startup to recover reminders that were left in <c>AwaitingAck</c>
+    /// by a previous scheduler instance that crashed or was relocated before the ack arrived.
+    /// The in-memory <c>_awaitingAck</c> dictionary is always empty at startup, so without this
+    /// call those reminders would be permanently stuck.
+    /// </remarks>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The number of reminders that were reset to <c>Pending</c>.</returns>
+    Task<int> ResetAwaitingAckToPendingAsync(CancellationToken ct = default);
 }

@@ -277,4 +277,14 @@ public sealed class InMemoryReminderStorage : IReminderStorage
             IsRecurring: isRecurring,
             OriginalReminder: isRecurring ? original : null));
     }
+
+    /// <inheritdoc />
+    public Task<int> ResetAwaitingAckToPendingAsync(CancellationToken ct = default)
+    {
+        // Clear all awaiting-ack tracking so those reminders become visible to GetNextRemindersAsync again.
+        // The underlying _pendingReminders entries are untouched — they were never removed during delivery.
+        var count = _awaitingAckReminders.Count;
+        _awaitingAckReminders.Clear();
+        return Task.FromResult(count);
+    }
 }

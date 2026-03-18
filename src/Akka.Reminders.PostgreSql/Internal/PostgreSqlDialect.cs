@@ -273,6 +273,20 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             """;
     }
 
+    public string GetResetAwaitingAckSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+
+        return $"""
+            UPDATE {fullTableName}
+            SET completion_status = 'Pending',
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL
+            WHERE completion_status = 'AwaitingAck'
+              AND is_completed = FALSE;
+            """;
+    }
+
     public DbConnection CreateConnection(string connectionString)
     {
         return new NpgsqlConnection(connectionString);

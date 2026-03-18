@@ -211,6 +211,29 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 Stash.UnstashAll(); // Process any messages that arrived during initialization
                 TryScheduleFetchReminders();
                 Timers.Cancel(RestartBackoffTimer.Instance); // if needed
+
+                // Recover reminders left in AwaitingAck by a previous scheduler instance.
+                // The in-memory _awaitingAck dict is always empty at startup, so any row
+                // still marked AwaitingAck in the DB would be permanently stuck without this reset.
+                // Non-fatal: if the reset fails those reminders will be recovered on next restart.
+                RunTask(async () =>
+                {
+                    try
+                    {
+                        using var cts = new CancellationTokenSource(Settings.StorageTimeout);
+                        var resetCount = await Storage.ResetAwaitingAckToPendingAsync(cts.Token);
+                        if (resetCount > 0)
+                            _log.Warning(
+                                "Reset [{0}] AwaitingAck reminder(s) from previous scheduler instance back to Pending",
+                                resetCount);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex,
+                            "Failed to reset AwaitingAck reminders to Pending on startup — " +
+                            "they will be recovered on the next scheduler restart");
+                    }
+                });
                 break;
             case Status.Failure failure:
                 _log.Error(failure.Cause, "Failed to load reminder overview from storage - restarting...");
@@ -407,9 +430,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     break;
                 }
 
+                // Optimistically remove — will re-add on storage failure so the timeout checker can retry
                 _awaitingAck.Remove(lookupKey);
 
                 var ackedReminder = entry.Reminder;
+                var originalEntry = entry; // captured for re-add on failure
 
                 RunTask(async () =>
                 {
@@ -418,10 +443,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         if (ackedReminder.RepeatInterval.HasValue)
                         {
                             // Recurring reminder: schedule the next occurrence.
+                            // Anchor to the original When so repeated acks cannot drift the schedule.
                             // ScheduleReminderAsync clears any lingering AwaitingAck state for the key.
                             var nextOccurrence = ackedReminder with
                             {
-                                When = TimeProvider.Now.Add(ackedReminder.RepeatInterval.Value),
+                                When = ackedReminder.When.Add(ackedReminder.RepeatInterval.Value),
                                 AttemptCount = 0,
                                 LastFailureReason = null
                             };
@@ -465,8 +491,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     }
                     catch (Exception ex)
                     {
-                        _log.Error(ex, "Error processing ReminderAck for [{0}] / [{1}]",
+                        _log.Error(ex,
+                            "Error processing ReminderAck for [{0}] / [{1}] — re-adding to awaiting-ack for retry",
                             ack.Entity, ack.Key);
+                        // Re-add with the original deadline so the timeout checker will eventually retry
+                        _awaitingAck[lookupKey] = originalEntry;
                         ackSender.Tell(new ReminderProtocol.ReminderAckResponse(
                             ack.Entity, ack.Key, ReminderAckResponseCode.Error, ex.Message),
                             ActorRefs.NoSender);
