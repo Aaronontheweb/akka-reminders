@@ -1,9 +1,7 @@
 using Akka.Actor;
-using Akka.Cluster.Sharding;
 using Akka.Hosting;
 using Akka.Reminders.Sharding;
 using FluentAssertions;
-using FluentAssertions.Extensions;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -67,9 +65,9 @@ public class LocalReminderSpecs : Akka.Hosting.TestKit.TestKit
         var scheduleResult = await client.ScheduleSingleReminderAsync(key, when, message);
         scheduleResult.ResponseCode.Should().Be(ReminderScheduleResponseCode.Success);
 
-        // Assert - the reminder should be delivered directly (no ShardingEnvelope wrapping in tests)
-        var receivedMessage = await targetActor.ExpectMsgAsync<TestMessage>(TimeSpan.FromSeconds(2));
-        receivedMessage.Content.Should().Be("Payment Retry");
+        // Assert - the reminder should be delivered as a ReminderEnvelope
+        var envelope = await targetActor.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(2));
+        ((TestMessage)envelope.Message).Content.Should().Be("Payment Retry");
 
         Output?.WriteLine($"Reminder delivered successfully to {targetActor.Ref.Path}");
     }
@@ -99,12 +97,12 @@ public class LocalReminderSpecs : Akka.Hosting.TestKit.TestKit
             DateTimeOffset.UtcNow.AddMilliseconds(100),
             new TestMessage("Send Notification"));
 
-        // Assert - each reminder should be delivered directly to its respective shard region (no ShardingEnvelope wrapping in tests)
-        var billingMessage = await billingActor.ExpectMsgAsync<TestMessage>(TimeSpan.FromSeconds(2));
-        billingMessage.Content.Should().Be("Bill Customer");
+        // Assert - each reminder should be delivered as a ReminderEnvelope to its respective shard region
+        var billingEnvelope = await billingActor.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(2));
+        ((TestMessage)billingEnvelope.Message).Content.Should().Be("Bill Customer");
 
-        var notificationMessage = await notificationActor.ExpectMsgAsync<TestMessage>(TimeSpan.FromSeconds(2));
-        notificationMessage.Content.Should().Be("Send Notification");
+        var notificationEnvelope = await notificationActor.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(2));
+        ((TestMessage)notificationEnvelope.Message).Content.Should().Be("Send Notification");
     }
 
     private record TestMessage(string Content);

@@ -18,6 +18,11 @@ internal sealed class FailableReminderStorage : IReminderStorage
     public bool FailWrites { get; set; }
 
     /// <summary>
+    /// When true, all read operations throw.
+    /// </summary>
+    public bool FailReads { get; set; }
+
+    /// <summary>
     /// When true, MarkRemindersAsCompletedAsync throws.
     /// </summary>
     public bool FailMarkCompletedWrites { get; set; }
@@ -85,5 +90,26 @@ internal sealed class FailableReminderStorage : IReminderStorage
     public Task<IReadOnlyList<ScheduledReminder>> GetRemindersForEntityAsync(ReminderEntity entity, int take = 10, int skip = 0, CancellationToken ct = default)
     {
         return _inner.GetRemindersForEntityAsync(entity, take, skip, ct);
+    }
+
+    public Task<bool> MarkRemindersAsAwaitingAckAsync(IEnumerable<AwaitingAckReminder> reminders, CancellationToken ct = default)
+    {
+        if (FailWrites)
+            throw new TimeoutException("Simulated database write timeout");
+        return _inner.MarkRemindersAsAwaitingAckAsync(reminders, ct);
+    }
+
+    public Task<IReadOnlyList<ScheduledReminder>> GetTimedOutAckRemindersAsync(DateTimeOffset now, ReminderBatchSize maxCount, CancellationToken ct = default)
+    {
+        if (FailReads)
+            throw new TimeoutException("Simulated database read timeout");
+        return _inner.GetTimedOutAckRemindersAsync(now, maxCount, ct);
+    }
+
+    public Task<AckResult> AcknowledgeReminderAsync(ReminderEntity entity, ReminderKey key, DateTimeOffset ackedAt, CancellationToken ct = default)
+    {
+        if (FailWrites)
+            throw new TimeoutException("Simulated database write timeout");
+        return _inner.AcknowledgeReminderAsync(entity, key, ackedAt, ct);
     }
 }

@@ -400,6 +400,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 }
 
                 _awaitingAck.Remove(lookupKey);
+
                 var ackedReminder = entry.Reminder;
 
                 RunTask(async () =>
@@ -408,7 +409,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     {
                         if (ackedReminder.RepeatInterval.HasValue)
                         {
-                            // Recurring reminder: schedule the next occurrence
+                            // Recurring reminder: schedule the next occurrence.
+                            // ScheduleReminderAsync clears any lingering AwaitingAck state for the key.
                             var nextOccurrence = ackedReminder with
                             {
                                 When = TimeProvider.Now.Add(ackedReminder.RepeatInterval.Value),
@@ -436,7 +438,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         }
                         else
                         {
-                            // One-time reminder: mark as delivered
+                            // One-time reminder: mark as delivered and clear AwaitingAck state.
                             var completed = new CompletedReminder(
                                 ackedReminder.Entity, ackedReminder.Key,
                                 TimeProvider.Now, ReminderCompletionStatus.Delivered);
@@ -644,6 +646,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 // go through the immediate retry / permanent-fail path.
                 var failedRemindersToRetry = new List<ScheduledReminder>();
                 var permanentlyFailedReminders = new List<CompletedReminder>();
+                var deliveredReminders = new List<AwaitingAckReminder>();
 
                 foreach (var reminder in chunk)
                 {
@@ -683,15 +686,43 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                         var ackDeadline = TimeProvider.Now.Add(Settings.AckTimeout);
                         _awaitingAck[(reminder.Entity, reminder.Key)] = (reminder, ackDeadline);
+                        deliveredReminders.Add(new AwaitingAckReminder(
+                            reminder.Entity, reminder.Key, completedAt, ackDeadline));
 
                         totalDelivered += 1;
                     }
                 }
 
+                // Phase 2.5: Persist AwaitingAck state for successfully delivered reminders.
+                // This prevents re-delivery on the next fetch and enables the circuit breaker
+                // to detect storage failures in the delivery hot path.
+                var writeFailed = false;
+                if (deliveredReminders.Count > 0)
+                {
+                    try
+                    {
+                        using var ackCts = new CancellationTokenSource(Settings.StorageTimeout);
+                        var ackResult = await Storage.MarkRemindersAsAwaitingAckAsync(deliveredReminders, ackCts.Token);
+                        if (!ackResult)
+                        {
+                            _log.Error(
+                                "MarkRemindersAsAwaitingAckAsync returned false for [{0}] delivered reminders",
+                                deliveredReminders.Count);
+                            writeFailed = true;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex,
+                            "Failed to mark [{0}] reminders as awaiting ack",
+                            deliveredReminders.Count);
+                        writeFailed = true;
+                    }
+                }
+
                 // Phase 3: Mark permanently failed reminders as complete in storage.
                 // Delivered reminders are NOT marked here — that happens in the ReminderAck handler.
-                var writeFailed = false;
-                if (permanentlyFailedReminders.Count > 0)
+                if (!writeFailed && permanentlyFailedReminders.Count > 0)
                 {
                     try
                     {

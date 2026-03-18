@@ -168,10 +168,14 @@ public class MyEntityActor : ReceiveActor
                 new PerformHealthCheck());
         });
 
-        Receive<DoSomething>(msg =>
+        ReceiveAsync<ReminderEnvelope<DoSomething>>(async envelope =>
         {
             // Handle the reminder when it fires
             Console.WriteLine("Reminder received!");
+
+            // Acknowledge receipt so the scheduler marks it delivered.
+            // If AckAsync fails or times out, the reminder will be retried.
+            await _reminders.AckAsync(envelope);
         });
     }
 }
@@ -366,7 +370,13 @@ Configure reminder behavior and performance characteristics:
 
         // Base delay for exponential backoff on retries
         // Actual delay = RetryBackoffBase * (2 ^ attemptCount)
-        RetryBackoffBase = TimeSpan.FromSeconds(30)
+        RetryBackoffBase = TimeSpan.FromSeconds(30),
+
+        // How long to wait for a recipient ack before retrying delivery
+        AckTimeout = TimeSpan.FromSeconds(30),
+
+        // How frequently to scan for reminders whose ack deadline has passed
+        AckTimeoutCheckInterval = TimeSpan.FromSeconds(10)
     }))
 ```
 
@@ -394,8 +404,10 @@ public class HealthCheckActor : ReceiveActor
                 new PerformHealthCheck());
         });
 
-        ReceiveAsync<PerformHealthCheck>(async _ =>
+        ReceiveAsync<ReminderEnvelope<PerformHealthCheck>>(async envelope =>
         {
+            await _reminders.AckAsync(envelope);
+
             var isHealthy = await CheckHealth();
             if (!isHealthy)
             {
@@ -429,8 +441,10 @@ public class OrderActor : ReceiveActor
                 new CheckPayment());
         });
 
-        ReceiveAsync<CheckPayment>(async _ =>
+        ReceiveAsync<ReminderEnvelope<CheckPayment>>(async envelope =>
         {
+            await _reminders.AckAsync(envelope);
+
             if (!await PaymentReceived())
             {
                 Self.Tell(new CancelOrder());
@@ -500,6 +514,49 @@ Task<FetchedReminders> ListRemindersAsync(
 
 Lists all active reminders for the current entity.
 
+#### Acknowledge Reminder
+```csharp
+Task<ReminderAckResponse> AckAsync(
+    ReminderEnvelope envelope,
+    CancellationToken cancellationToken = default)
+```
+
+Acknowledges receipt of a delivered reminder. Must be called after processing a `ReminderEnvelope<T>`. If this call faults or times out, the scheduler will redeliver the reminder after `AckTimeout` elapses.
+
+### Acknowledgement Protocol
+
+Reminders are wrapped in `ReminderEnvelope<T>` before delivery. The envelope carries the original payload alongside the `ReminderEntity` and `ReminderKey` needed to acknowledge receipt.
+
+**Receiving and acknowledging a reminder:**
+
+```csharp
+ReceiveAsync<ReminderEnvelope<DoSomething>>(async envelope =>
+{
+    // Process the reminder payload first (idempotently)
+    await DoWork(envelope.Message);
+
+    // Then acknowledge. If this fails, the reminder is retried.
+    var ack = await _reminders.AckAsync(envelope);
+    if (ack.ResponseCode != ReminderAckResponseCode.Success)
+    {
+        // Log the failure; the scheduler will retry after AckTimeout
+        Log.Warning("Ack failed: {0}", ack.Message);
+    }
+});
+```
+
+**What happens on each outcome:**
+
+| Outcome | Scheduler behavior |
+|---------|-------------------|
+| `AckAsync` succeeds (one-time reminder) | Reminder marked Delivered |
+| `AckAsync` succeeds (recurring reminder) | Next occurrence scheduled; original entry updated |
+| `AckAsync` times out or returns Error | Reminder retried after `AckTimeout` with exponential backoff |
+| Retry attempts exhausted (`MaxDeliveryAttempts`) | Reminder marked Failed |
+| Ack received after timeout deadline but before retry | Scheduler returns `NotFound`; harmless, retry will deliver again |
+
+Because duplicates are possible whenever an ack is lost or times out, **consumers must be idempotent**.
+
 ### Response Codes
 
 **ReminderScheduleResponseCode:**
@@ -516,8 +573,9 @@ Lists all active reminders for the current entity.
 
 Reminders progress through the following states:
 - **Pending**: Scheduled but not yet delivered
-- **Delivered**: Successfully delivered to target entity
-- **Failed**: Permanently failed after max retry attempts
+- **AwaitingAck**: Delivered via `Tell`; waiting for recipient to call `AckAsync`
+- **Delivered**: Acknowledged by recipient; one-time reminder is complete
+- **Failed**: Permanently failed after `MaxDeliveryAttempts` exhausted
 - **Cancelled**: Manually cancelled by user
 
 ## Testing
@@ -562,10 +620,10 @@ public class ReminderTests : Akka.Hosting.TestKit.TestKit
             DateTimeOffset.UtcNow.AddMilliseconds(200),
             new PaymentRetry());
 
-        // Assert - Reminder delivered
-        var envelope = targetActor.ExpectMsg<ShardingEnvelope>(TimeSpan.FromSeconds(2));
-        Assert.Equal("customer-123", envelope.EntityId);
-        Assert.IsType<PaymentRetry>(envelope.Message);
+        // Assert - Reminder delivered wrapped in ReminderEnvelope
+        var shardEnvelope = targetActor.ExpectMsg<ShardingEnvelope>(TimeSpan.FromSeconds(2));
+        Assert.Equal("customer-123", shardEnvelope.EntityId);
+        var reminderEnvelope = Assert.IsType<ReminderEnvelope<PaymentRetry>>(shardEnvelope.Message);
     }
 }
 ```
@@ -609,8 +667,8 @@ public async Task Reminder_should_fire_at_scheduled_time()
     // Act - Advance time
     testScheduler.Advance(TimeSpan.FromMinutes(5));
 
-    // Assert - Reminder fires
-    testProbe.ExpectMsg<TestMessage>();
+    // Assert - Reminder fires (wrapped in ReminderEnvelope)
+    testProbe.ExpectMsg<ReminderEnvelope<TestMessage>>();
 }
 ```
 
@@ -630,14 +688,16 @@ public async Task Reminder_should_fire_at_scheduled_time()
 2. Request routed to ReminderScheduler singleton (via cluster singleton proxy)
 3. Reminder persisted to storage backend
 4. Scheduler tracks next due reminder time
-5. When due, message delivered to target shard region
-6. For recurring reminders, next occurrence automatically scheduled
-7. Failed deliveries retry with exponential backoff (up to MaxDeliveryAttempts)
-8. Completed/cancelled reminders pruned periodically based on PruneInterval setting
+5. When due, message wrapped in `ReminderEnvelope<T>` and delivered to target shard region via `Tell`
+6. Reminder moved to AwaitingAck state; ack deadline set based on `AckTimeout`
+7. Recipient calls `IReminderClient.AckAsync(envelope)` to confirm receipt
+8. On successful ack: one-time reminders marked Delivered; recurring reminders have next occurrence scheduled
+9. If ack times out: delivery retried with exponential backoff (up to `MaxDeliveryAttempts`)
+10. Completed/cancelled reminders pruned periodically based on PruneInterval setting
 
 ### Reliability Features
 
-- **At-least-once delivery**: Reminders are delivered via fire-and-forget `Tell`. Consumers must be idempotent.
+- **At-least-once delivery with acknowledgement**: Reminders are wrapped in `ReminderEnvelope<T>` and delivered via `Tell`. Recipients call `IReminderClient.AckAsync(envelope)` to confirm receipt. Unacknowledged reminders are retried with exponential backoff. Consumers must be idempotent.
 - **Durable persistence**: Reminders survive actor restarts and cluster failures
 - **Automatic retries**: Failed deliveries retry with exponential backoff
 - **Cluster singleton**: Single scheduler instance with automatic failover

@@ -215,16 +215,23 @@ internal sealed class TestEntity : ReceiveActor
     {
         _entityId = entityId;
 
-        Receive<EntityMessage>(msg =>
+        Receive<ReminderEnvelope>(envelope =>
         {
-            // Publish reminder receipt to event stream for test verification
-            Context.System.EventStream.Publish(new ReminderReceived(_entityId, msg.Payload));
+            // Extract the EntityMessage payload from the reminder envelope
+            if (envelope.Message is EntityMessage msg)
+            {
+                Context.System.EventStream.Publish(new ReminderReceived(_entityId, msg.Payload));
+            }
+            else
+            {
+                Context.System.EventStream.Publish(new ReminderReceived(_entityId, envelope.Message.ToString() ?? ""));
+            }
         });
 
-        ReceiveAny(msg =>
+        Receive<EntityMessage>(msg =>
         {
-            // Fallback for any other messages
-            Context.System.EventStream.Publish(new ReminderReceived(_entityId, msg.ToString() ?? ""));
+            // Handle direct EntityMessage delivery (non-reminder path)
+            Context.System.EventStream.Publish(new ReminderReceived(_entityId, msg.Payload));
         });
     }
 }

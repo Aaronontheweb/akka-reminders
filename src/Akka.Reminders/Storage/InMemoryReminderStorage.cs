@@ -22,8 +22,10 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     {
         var key = (reminder.Entity, reminder.Key);
 
-        // Always upsert - overwrite any existing reminder with the same key
+        // Always upsert - overwrite any existing reminder with the same key.
+        // Also clear any AwaitingAck state so the reminder is visible to future fetches.
         _pendingReminders[key] = reminder;
+        _awaitingAckReminders.TryRemove(key, out _);
 
         return Task.FromResult(new ReminderProtocol.ReminderScheduled(
             reminder.ToScheduleReminder(),
@@ -40,6 +42,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
 
         if (_pendingReminders.TryRemove(reminderKey, out _))
         {
+            _awaitingAckReminders.TryRemove(reminderKey, out _);
             return Task.FromResult(new ReminderProtocol.RemindersCancelled(
                 entity,
                 ReminderCancelResponseCode.Success,
@@ -65,6 +68,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
             {
                 if (_pendingReminders.TryRemove(kvp.Key, out _))
                 {
+                    _awaitingAckReminders.TryRemove(kvp.Key, out _);
                     cancelledKeys.Add(kvp.Key.Item2);
                 }
             }
@@ -187,6 +191,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         {
             var key = (completed.Entity, completed.Key);
             _pendingReminders.TryRemove(key, out _);
+            _awaitingAckReminders.TryRemove(key, out _);
             _completedReminders[key] = completed;
         }
 

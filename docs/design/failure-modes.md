@@ -2,24 +2,36 @@
 
 ## Delivery Semantics
 
-Akka.Reminders uses **at-least-once delivery**. Reminders are delivered via fire-and-forget `Tell` (no acknowledgement from the target entity). This means:
+Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**. Reminders are delivered via fire-and-forget `Tell`, but the payload is wrapped in a `ReminderEnvelope<T>` that recipients must acknowledge. This means:
 
-- A reminder may be delivered more than once if the system can't confirm completion.
+- A reminder may be delivered more than once if the acknowledgement is lost or times out.
 - Consumers MUST be idempotent — receiving the same reminder twice should not cause incorrect behavior.
 - There is no exactly-once guarantee and no plan to add one.
+- Recipients call `IReminderClient.AckAsync(envelope)` to confirm successful processing.
+- When an ack succeeds: one-time reminders are marked Delivered; recurring reminders have their next occurrence scheduled.
+- When an ack times out: the scheduler retries delivery with exponential backoff, controlled by `MaxDeliveryAttempts` and `RetryBackoffBase`.
 
 ## Processing Pipeline
 
 Each tick of the `ReminderScheduler` runs `ProcessReminders`, which loops through batches:
 
 ```
-Fetch batch (SELECT with LIMIT/TOP)
+Fetch batch (SELECT with LIMIT/TOP, WHERE completion_status = 'Pending')
   → Process in delivery/persist chunks
-      → Deliver via Tell (fire-and-forget, irrevocable)
-      → Mark completed one-time reminders (batched UPDATE)
+      → Wrap in ReminderEnvelope, deliver via Tell
+      → Add to in-memory AwaitingAck tracker
       → Schedule retries for unresolvable shard regions
-      → Schedule next occurrence for recurring reminders
   → Loop until no more due reminders
+
+Ack handler (async, triggered by ReminderAck messages):
+  → Mark one-time reminders as Delivered
+  → Schedule next occurrence for recurring reminders
+  → Reply with ReminderAckResponse
+
+Ack timeout checker (periodic timer, interval = AckTimeoutCheckInterval):
+  → Scan AwaitingAck reminders past deadline
+  → Retry with backoff if under MaxDeliveryAttempts
+  → Mark as Failed if attempts exhausted
 ```
 
 ## Threat Model
@@ -36,8 +48,8 @@ When reads work but writes fail:
 
 1. **Fetch succeeds** — we get a batch of reminders
 2. **Deliver succeeds** — `Tell` is in-process, doesn't touch the database
-3. **Mark-complete fails** — write timeout
-4. Reminders remain `IsCompleted = 0` in the database
+3. **AwaitingAck write fails** — the scheduler cannot record that delivery is pending
+4. Reminders remain `Pending` in the database
 5. On the next tick, the same reminders are re-fetched and re-delivered
 
 Without mitigation, this creates a **self-inflicted denial of service**:
@@ -45,6 +57,15 @@ Without mitigation, this creates a **self-inflicted denial of service**:
 - Those entities' mailboxes fill with duplicate messages
 - Other due reminders beyond the `LIMIT`/`TOP` batch are never reached
 - The shard regions can't process real work
+
+### Ack-specific failure modes
+
+| Failure | What happens |
+|---------|-------------|
+| Ack lost (network partition) | Scheduler retries after `AckTimeout` expires; recipient may get a duplicate delivery |
+| Recipient crashes before acking | Same as ack lost — scheduler retries after timeout |
+| Scheduler singleton handoff while acks in-flight | `ReminderAck` messages route through the `ClusterSingletonProxy` and survive the handoff. The in-memory `AwaitingAck` dictionary is lost on the old node, but DB state is authoritative — the ack timeout checker on the new scheduler instance will pick up any lingering in-flight reminders and retry them |
+| Ack arrives after timeout but before retry delivery | Scheduler replies `NotFound` (the ack is harmless; the reminder was already moved back to Pending for re-delivery) |
 
 ## Mitigations
 
@@ -78,8 +99,10 @@ Each chunk auto-commits independently (no wrapping transaction). If chunk 4 of 5
 
 - **Normal state:** `ProcessReminders` fetches `MaxBatchSize` per batch.
 - **Circuit opens:** When any write operation fails (mark-complete, schedule-retry, schedule-recurring), `_writeCircuitOpen` is set to `true` and the loop breaks.
-- **Probing:** On the next tick, if the circuit is open, `effectiveBatchSize` drops to 1. The scheduler fetches and delivers a single reminder, then attempts mark-complete. This limits the blast radius to 1 duplicate delivery.
+- **Probing:** On the next tick, if the circuit is open, `effectiveBatchSize` drops to 1. The scheduler fetches and delivers a single reminder, then attempts the ack-tracking write. This limits the blast radius to 1 duplicate delivery.
 - **Circuit closes:** If the probe's write succeeds, `_writeCircuitOpen` is reset to `false` and `effectiveBatchSize` returns to `MaxBatchSize`. The scheduler immediately continues with full-batch processing in the same run.
+
+**Blast radius with the ack protocol:** Reminders currently awaiting acknowledgement are in `AwaitingAck` state, not `Pending`, so they are not re-fetched by the circuit breaker probe. Only genuinely `Pending` reminders are fetched. The probe behavior is therefore unchanged from the pre-ack design. Write failures that occur during ack processing (marking a reminder Delivered or scheduling the next occurrence) are surfaced as an `Error` response code in `ReminderAckResponse`; the reminder remains in `AwaitingAck` and will be retried by the ack timeout checker.
 
 ### 5. Interleaved Deliver/Persist Chunks (`DeliveryCommitChunkSize`)
 
@@ -120,3 +143,9 @@ On the first tick after writes break, the scheduler has no way to know writes ar
 ### Probe re-delivery
 
 During the circuit-open period, each probe tick delivers 1 reminder that may have already been delivered. Under at-least-once semantics, this is expected behavior. The consumer must be idempotent.
+
+### AwaitingAck state lost on scheduler restart
+
+The in-memory `AwaitingAck` dictionary is not persisted. If the scheduler singleton restarts (crash or planned handoff), any reminders that were in-flight at the time are lost from the dictionary. The database is authoritative: those reminders remain in `AwaitingAck` state in the DB. The ack timeout checker on the new scheduler instance will eventually scan them, find them past their deadline, and trigger a retry delivery. This causes one extra duplicate delivery per in-flight reminder at the time of restart.
+
+**Accepted because:** This is consistent with at-least-once semantics. Consumers must already be idempotent to handle normal ack-timeout retries.
