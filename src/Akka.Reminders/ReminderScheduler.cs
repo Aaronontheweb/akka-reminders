@@ -594,6 +594,22 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         return reminders.PipeTo(Self, success: overview => overview, failure: ex => new Status.Failure(ex));
     }
 
+    private static readonly Type OpenGenericEnvelopeType = typeof(ReminderEnvelope<>);
+
+    /// <summary>
+    /// Constructs a <see cref="ReminderEnvelope{T}"/> using the runtime type of the message.
+    /// Ensures both local and remote delivery produce the strongly-typed generic envelope
+    /// so that <c>Receive&lt;ReminderEnvelope&lt;T&gt;&gt;</c> handlers match correctly.
+    /// </summary>
+    private static ReminderEnvelope CreateTypedEnvelope(ReminderEntity entity, ReminderKey key, object message)
+    {
+        var messageType = message.GetType();
+        var closedType = OpenGenericEnvelopeType.MakeGenericType(messageType);
+        return (ReminderEnvelope)(Activator.CreateInstance(closedType, entity, key, message)
+            ?? throw new InvalidOperationException(
+                $"Failed to create {closedType.FullName} for message type {messageType.FullName}"));
+    }
+
     private async Task ProcessReminders(DateTimeOffset untilDeadline)
     {
         var totalDelivered = 0;
@@ -693,7 +709,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     else
                     {
                         _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
-                        var envelope = new ReminderEnvelope(reminder.Entity, reminder.Key, reminder.Message);
+                        var envelope = CreateTypedEnvelope(reminder.Entity, reminder.Key, reminder.Message);
                         ShardRegionResolver.DeliverReminder(reminder.Entity, envelope, Self);
 
                         var ackDeadline = TimeProvider.Now.Add(Settings.AckTimeout);

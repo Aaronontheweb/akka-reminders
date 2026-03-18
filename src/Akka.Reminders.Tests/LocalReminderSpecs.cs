@@ -66,8 +66,8 @@ public class LocalReminderSpecs : Akka.Hosting.TestKit.TestKit
         scheduleResult.ResponseCode.Should().Be(ReminderScheduleResponseCode.Success);
 
         // Assert - the reminder should be delivered as a ReminderEnvelope
-        var envelope = await targetActor.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(2));
-        ((TestMessage)envelope.Message).Content.Should().Be("Payment Retry");
+        var envelope = await targetActor.ExpectMsgAsync<ReminderEnvelope<TestMessage>>(TimeSpan.FromSeconds(2));
+        envelope.Message.Content.Should().Be("Payment Retry");
 
         Output?.WriteLine($"Reminder delivered successfully to {targetActor.Ref.Path}");
     }
@@ -98,11 +98,11 @@ public class LocalReminderSpecs : Akka.Hosting.TestKit.TestKit
             new TestMessage("Send Notification"));
 
         // Assert - each reminder should be delivered as a ReminderEnvelope to its respective shard region
-        var billingEnvelope = await billingActor.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(2));
-        ((TestMessage)billingEnvelope.Message).Content.Should().Be("Bill Customer");
+        var billingEnvelope = await billingActor.ExpectMsgAsync<ReminderEnvelope<TestMessage>>(TimeSpan.FromSeconds(2));
+        billingEnvelope.Message.Content.Should().Be("Bill Customer");
 
-        var notificationEnvelope = await notificationActor.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(2));
-        ((TestMessage)notificationEnvelope.Message).Content.Should().Be("Send Notification");
+        var notificationEnvelope = await notificationActor.ExpectMsgAsync<ReminderEnvelope<TestMessage>>(TimeSpan.FromSeconds(2));
+        notificationEnvelope.Message.Content.Should().Be("Send Notification");
     }
 
     private record TestMessage(string Content);

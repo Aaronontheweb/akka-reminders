@@ -92,7 +92,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"TestScheduler.Now after second advance: {testScheduler.Now}");
 
         // Assert - Verify the reminder message was received
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
         Assert.Equal("test message", envelope.Message);
     }
 
@@ -133,7 +133,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"Advancing by 11 seconds...");
         testScheduler.Advance(TimeSpan.FromSeconds(11));
         Output?.WriteLine($"TestScheduler.Now after first advance: {testScheduler.Now}");
-        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(5));
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
         Assert.Equal("first", envelope1.Message);
         Output?.WriteLine($"Received first message");
 
@@ -144,7 +144,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         await AwaitConditionAsync(() => Task.FromResult(true), TimeSpan.FromMilliseconds(100));
 
         testScheduler.Advance(TimeSpan.FromSeconds(10));
-        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(5));
+        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
         Assert.Equal("second", envelope2.Message);
 
         // Ack to prevent "second" from being re-delivered on the next fetch
@@ -154,7 +154,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         await AwaitConditionAsync(() => Task.FromResult(true), TimeSpan.FromMilliseconds(100));
 
         testScheduler.Advance(TimeSpan.FromSeconds(10));
-        var envelope3 = await testProbe.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(5));
+        var envelope3 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
         Assert.Equal("third", envelope3.Message);
     }
 
@@ -190,7 +190,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"Before first advance - TestScheduler.Now: {testScheduler.Now}");
         testScheduler.Advance(TimeSpan.FromSeconds(6));
         Output?.WriteLine($"After first advance - TestScheduler.Now: {testScheduler.Now}");
-        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(5));
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
         Assert.Equal("recurring message", envelope1.Message);
         Output?.WriteLine($"Received first recurring message");
 
@@ -207,7 +207,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"Before second advance - TestScheduler.Now: {testScheduler.Now}");
         testScheduler.Advance(interval);
         Output?.WriteLine($"After second advance - TestScheduler.Now: {testScheduler.Now}");
-        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(5));
+        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
         Assert.Equal("recurring message", envelope2.Message);
 
         // Ack the second delivery
@@ -220,7 +220,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
 
         // Verify third occurrence
         testScheduler.Advance(interval);
-        var envelope3 = await testProbe.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(5));
+        var envelope3 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
         Assert.Equal("recurring message", envelope3.Message);
     }
 
@@ -282,7 +282,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         testScheduler.Advance(TimeSpan.FromSeconds(2));
 
         // Assert
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
         Assert.Equal("immediate message", envelope.Message);
     }
 }

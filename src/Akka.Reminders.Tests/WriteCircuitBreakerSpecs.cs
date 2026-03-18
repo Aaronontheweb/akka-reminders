@@ -50,12 +50,12 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
             $"reminder-scheduler-{Guid.NewGuid():N}");
     }
 
-    private async Task<List<ReminderEnvelope>> CollectMessages(TestProbe probe, int count, TimeSpan timeout)
+    private async Task<List<ReminderEnvelope<string>>> CollectMessages(TestProbe probe, int count, TimeSpan timeout)
     {
-        var messages = new List<ReminderEnvelope>();
+        var messages = new List<ReminderEnvelope<string>>();
         for (var i = 0; i < count; i++)
         {
-            messages.Add(await probe.ExpectMsgAsync<ReminderEnvelope>(timeout));
+            messages.Add(await probe.ExpectMsgAsync<ReminderEnvelope<string>>(timeout));
         }
         return messages;
     }
