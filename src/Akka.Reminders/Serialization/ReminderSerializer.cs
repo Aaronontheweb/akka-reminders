@@ -24,15 +24,21 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
 
     private static readonly Type ReminderEnvelopeOpenGenericType = typeof(ReminderEnvelope<>);
 
-    private readonly Akka.Serialization.Serialization _serialization;
+    private readonly ExtendedActorSystem _system;
+    private Akka.Serialization.Serialization? _serialization;
 
     /// <summary>
     /// Creates a new <see cref="ReminderSerializer"/> bound to the given actor system.
     /// </summary>
     public ReminderSerializer(ExtendedActorSystem system) : base(system)
     {
-        _serialization = new Akka.Serialization.Serialization(system);
+        _system = system;
+        // Lazy — we cannot create a new Serialization instance here because that would
+        // re-instantiate all registered serializers including this one, causing a stack overflow.
     }
+
+    private Akka.Serialization.Serialization SerializationSystem
+        => _serialization ??= Akka.Serialization.Serialization.For(_system);
 
     /// <inheritdoc />
     public override int Identifier => 22550;
@@ -77,7 +83,7 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         writer.Write(envelope.Key.Name);
 
         // Delegate inner message serialization to Akka's serialization infrastructure
-        var innerSerializer = _serialization.FindSerializerFor(envelope.Message);
+        var innerSerializer = SerializationSystem.FindSerializerFor(envelope.Message);
         var innerManifest = Akka.Serialization.Serialization.ManifestFor(innerSerializer, envelope.Message);
         var innerBytes = innerSerializer.ToBinary(envelope.Message);
 
@@ -107,7 +113,7 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         var innerLength = reader.ReadInt32();
         var innerBytes = reader.ReadBytes(innerLength);
 
-        var innerMessage = _serialization.Deserialize(innerBytes, innerSerializerId, innerManifest);
+        var innerMessage = SerializationSystem.Deserialize(innerBytes, innerSerializerId, innerManifest);
 
         // Construct ReminderEnvelope<T> using the runtime type of the deserialized message
         var messageType = innerMessage.GetType();
