@@ -38,7 +38,7 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
     }
 
     private Akka.Serialization.Serialization SerializationSystem
-        => _serialization ??= Akka.Serialization.Serialization.For(_system);
+        => _serialization ??= _system.Serialization;
 
     /// <inheritdoc />
     public override int Identifier => 22550;
