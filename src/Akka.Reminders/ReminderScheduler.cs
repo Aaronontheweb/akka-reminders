@@ -182,6 +182,19 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
+    /// <summary>
+    /// One-shot message sent during startup to reset any AwaitingAck reminders
+    /// left by a previous scheduler instance back to Pending.
+    /// </summary>
+    private sealed class RecoverAwaitingAck
+    {
+        public static readonly RecoverAwaitingAck Instance = new();
+
+        private RecoverAwaitingAck()
+        {
+        }
+    }
+
     private void TryScheduleFetchReminders()
     {
         if (PendingReminders?.TotalPendingReminders > 0)
@@ -213,27 +226,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 Timers.Cancel(RestartBackoffTimer.Instance); // if needed
 
                 // Recover reminders left in AwaitingAck by a previous scheduler instance.
-                // The in-memory _awaitingAck dict is always empty at startup, so any row
-                // still marked AwaitingAck in the DB would be permanently stuck without this reset.
-                // Non-fatal: if the reset fails those reminders will be recovered on next restart.
-                RunTask(async () =>
-                {
-                    try
-                    {
-                        using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-                        var resetCount = await Storage.ResetAwaitingAckToPendingAsync(cts.Token);
-                        if (resetCount > 0)
-                            _log.Warning(
-                                "Reset [{0}] AwaitingAck reminder(s) from previous scheduler instance back to Pending",
-                                resetCount);
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.Error(ex,
-                            "Failed to reset AwaitingAck reminders to Pending on startup — " +
-                            "they will be recovered on the next scheduler restart");
-                    }
-                });
+                // Scheduled as a message so it doesn't block the mailbox during startup.
+                Self.Tell(RecoverAwaitingAck.Instance);
                 break;
             case Status.Failure failure:
                 _log.Error(failure.Cause, "Failed to load reminder overview from storage - restarting...");
@@ -499,6 +493,37 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         ackSender.Tell(new ReminderProtocol.ReminderAckResponse(
                             ack.Entity, ack.Key, ReminderAckResponseCode.Error, ex.Message),
                             ActorRefs.NoSender);
+                    }
+                });
+                break;
+            }
+            case RecoverAwaitingAck:
+            {
+                // Reset any AwaitingAck reminders from a previous scheduler instance back to Pending.
+                // The in-memory _awaitingAck dict is always empty at startup, so any row still
+                // marked AwaitingAck in the DB would be permanently stuck without this reset.
+                RunTask(async () =>
+                {
+                    try
+                    {
+                        using var cts = new CancellationTokenSource(Settings.StorageTimeout);
+                        var resetCount = await Storage.ResetAwaitingAckToPendingAsync(cts.Token);
+                        if (resetCount > 0)
+                        {
+                            _log.Warning(
+                                "Reset [{0}] AwaitingAck reminder(s) from previous scheduler instance back to Pending",
+                                resetCount);
+                            // Refresh overview since we just made more reminders Pending
+                            using var overviewCts = new CancellationTokenSource(Settings.StorageTimeout);
+                            PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, overviewCts.Token);
+                            TryScheduleFetchReminders();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex,
+                            "Failed to reset AwaitingAck reminders to Pending on startup — " +
+                            "they will be recovered on the next scheduler restart");
                     }
                 });
                 break;
