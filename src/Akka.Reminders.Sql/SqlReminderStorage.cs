@@ -71,4 +71,22 @@ public sealed class SqlReminderStorage : IReminderStorage
         DateTimeOffset olderThan,
         CancellationToken cancellationToken = default)
         => _storage.CleanUpCompletedRemindersAsync(olderThan, cancellationToken);
+
+    public Task<bool> MarkRemindersAsAwaitingAckAsync(
+        IEnumerable<AwaitingAckReminder> reminders,
+        CancellationToken ct = default)
+        => _storage.MarkRemindersAsAwaitingAckAsync(reminders, ct);
+
+    public Task<IReadOnlyList<ScheduledReminder>> GetTimedOutAckRemindersAsync(
+        DateTimeOffset now,
+        ReminderBatchSize maxCount,
+        CancellationToken ct = default)
+        => _storage.GetTimedOutAckRemindersAsync(now, maxCount, ct);
+
+    public Task<AckResult> AcknowledgeReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset ackedAt,
+        CancellationToken ct = default)
+        => _storage.AcknowledgeReminderAsync(entity, key, ackedAt, ct);
 }
