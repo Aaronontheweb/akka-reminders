@@ -215,7 +215,7 @@ internal sealed class TestEntity : ReceiveActor
     {
         _entityId = entityId;
 
-        Receive<ReminderEnvelope>(envelope =>
+        ReceiveAsync<ReminderEnvelope>(async envelope =>
         {
             // Extract the EntityMessage payload from the reminder envelope
             if (envelope.Message is EntityMessage msg)
@@ -226,6 +226,10 @@ internal sealed class TestEntity : ReceiveActor
             {
                 Context.System.EventStream.Publish(new ReminderReceived(_entityId, envelope.Message.ToString() ?? ""));
             }
+
+            // Ack the reminder so recurring reminders schedule their next occurrence
+            var ext = Context.System.ReminderClient();
+            await ext.AckAsync(envelope);
         });
 
         Receive<EntityMessage>(msg =>
