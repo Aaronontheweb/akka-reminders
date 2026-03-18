@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS reminders.scheduled_reminders (
     is_completed BOOLEAN NOT NULL DEFAULT FALSE,
     completed_at_utc TIMESTAMP WITH TIME ZONE NULL,
     completion_status VARCHAR(20) NOT NULL DEFAULT 'Pending',
+    delivered_at_utc TIMESTAMP WITH TIME ZONE NULL,
+    ack_deadline_utc TIMESTAMP WITH TIME ZONE NULL,
 
     CONSTRAINT pk_scheduled_reminders PRIMARY KEY (shard_region_name, entity_id, reminder_key)
 );
@@ -39,6 +41,11 @@ WHERE is_completed = FALSE;
 CREATE INDEX IF NOT EXISTS ix_scheduled_reminders_cleanup
 ON reminders.scheduled_reminders (completed_at_utc)
 WHERE is_completed = TRUE;
+
+-- Create filtered index for efficient ack timeout scanning
+CREATE INDEX IF NOT EXISTS ix_scheduled_reminders_awaiting_ack
+ON reminders.scheduled_reminders (ack_deadline_utc)
+WHERE completion_status = 'AwaitingAck';
 
 -- Display confirmation
 DO $$

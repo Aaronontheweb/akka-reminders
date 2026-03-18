@@ -15,6 +15,9 @@ internal interface ISqlDialect
     string GetCancelReminderSql(string schemaName, string tableName);
     string GetCancelAllRemindersSql(string schemaName, string tableName);
     string GetFetchRemindersSql(string schemaName, string tableName);
+    string GetMarkAsAwaitingAckSql(string schemaName, string tableName);
+    string GetTimedOutAckRemindersSql(string schemaName, string tableName, int maxCount);
+    string GetAcknowledgeReminderSql(string schemaName, string tableName);
     DbConnection CreateConnection(string connectionString);
     void AddParameter(DbCommand command, string name, object value);
 }

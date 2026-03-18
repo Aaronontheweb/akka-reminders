@@ -87,6 +87,7 @@ public sealed class ReminderClientExtension : IExtension
     /// <summary>
     /// Schedules a single reminder for the specified entity without creating a client.
     /// </summary>
+    /// <typeparam name="T">The type of the message payload to deliver when the reminder fires.</typeparam>
     /// <param name="entity">The entity that will receive the reminder.</param>
     /// <param name="key">The unique key for this reminder.</param>
     /// <param name="when">When the reminder should fire.</param>
@@ -97,11 +98,11 @@ public sealed class ReminderClientExtension : IExtension
     /// This is a convenience method for scheduling reminders without creating a client first.
     /// Useful for bulk scheduling operations where you don't need to retain a client instance.
     /// </remarks>
-    public Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync(
+    public Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync<T>(
         ReminderEntity entity,
         ReminderKey key,
         DateTimeOffset when,
-        object message,
+        T message,
         CancellationToken ct = default)
     {
         var command = new ReminderProtocol.ScheduleReminder(entity, key, when, message, RepeatInterval: null);
@@ -117,6 +118,7 @@ public sealed class ReminderClientExtension : IExtension
     /// <summary>
     /// Schedules a single reminder for the specified shard region and entity ID without creating a client.
     /// </summary>
+    /// <typeparam name="T">The type of the message payload to deliver when the reminder fires.</typeparam>
     /// <param name="shardRegionName">The name of the shard region.</param>
     /// <param name="entityId">The entity identifier.</param>
     /// <param name="key">The unique key for this reminder.</param>
@@ -128,12 +130,12 @@ public sealed class ReminderClientExtension : IExtension
     /// This is a convenience method for scheduling reminders without creating a client first.
     /// Useful for bulk scheduling operations where you don't need to retain a client instance.
     /// </remarks>
-    public Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync(
+    public Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync<T>(
         string shardRegionName,
         string entityId,
         ReminderKey key,
         DateTimeOffset when,
-        object message,
+        T message,
         CancellationToken ct = default)
     {
         return ScheduleSingleReminderAsync(new ReminderEntity(shardRegionName, entityId), key, when, message, ct);
@@ -142,6 +144,7 @@ public sealed class ReminderClientExtension : IExtension
     /// <summary>
     /// Schedules a recurring reminder for the specified entity without creating a client.
     /// </summary>
+    /// <typeparam name="T">The type of the message payload to deliver when the reminder fires.</typeparam>
     /// <param name="entity">The entity that will receive the reminder.</param>
     /// <param name="key">The unique key for this reminder.</param>
     /// <param name="firstOccurrence">When the reminder should fire for the first time.</param>
@@ -153,12 +156,12 @@ public sealed class ReminderClientExtension : IExtension
     /// This is a convenience method for scheduling recurring reminders without creating a client first.
     /// Useful for bulk scheduling operations where you don't need to retain a client instance.
     /// </remarks>
-    public Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync(
+    public Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync<T>(
         ReminderEntity entity,
         ReminderKey key,
         DateTimeOffset firstOccurrence,
         TimeSpan interval,
-        object message,
+        T message,
         CancellationToken ct = default)
     {
         var command = new ReminderProtocol.ScheduleReminder(entity, key, firstOccurrence, message, RepeatInterval: interval);
@@ -174,6 +177,7 @@ public sealed class ReminderClientExtension : IExtension
     /// <summary>
     /// Schedules a recurring reminder for the specified shard region and entity ID without creating a client.
     /// </summary>
+    /// <typeparam name="T">The type of the message payload to deliver when the reminder fires.</typeparam>
     /// <param name="shardRegionName">The name of the shard region.</param>
     /// <param name="entityId">The entity identifier.</param>
     /// <param name="key">The unique key for this reminder.</param>
@@ -186,13 +190,13 @@ public sealed class ReminderClientExtension : IExtension
     /// This is a convenience method for scheduling recurring reminders without creating a client first.
     /// Useful for bulk scheduling operations where you don't need to retain a client instance.
     /// </remarks>
-    public Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync(
+    public Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync<T>(
         string shardRegionName,
         string entityId,
         ReminderKey key,
         DateTimeOffset firstOccurrence,
         TimeSpan interval,
-        object message,
+        T message,
         CancellationToken ct = default)
     {
         return ScheduleRecurringReminderAsync(
@@ -202,6 +206,31 @@ public sealed class ReminderClientExtension : IExtension
             interval,
             message,
             ct);
+    }
+
+    /// <summary>
+    /// Acknowledges receipt of a reminder without creating a client.
+    /// </summary>
+    /// <param name="envelope">The envelope received when the reminder fired.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>
+    /// A task containing the scheduler's acknowledgement response.
+    /// Check <see cref="ReminderProtocol.ReminderAckResponse.ResponseCode"/> to determine success.
+    /// If this Task faults or times out, a duplicate delivery may occur.
+    /// </returns>
+    public Task<ReminderProtocol.ReminderAckResponse> AckAsync(
+        ReminderEnvelope envelope,
+        CancellationToken ct = default)
+    {
+        var command = new ReminderProtocol.ReminderAck(envelope.Entity, envelope.Key);
+        return SendToSchedulerAsync<ReminderProtocol.ReminderAck, ReminderProtocol.ReminderAckResponse>(
+            command,
+            ct,
+            errorMessage => new ReminderProtocol.ReminderAckResponse(
+                envelope.Entity,
+                envelope.Key,
+                ReminderAckResponseCode.Error,
+                errorMessage));
     }
 
     /// <summary>

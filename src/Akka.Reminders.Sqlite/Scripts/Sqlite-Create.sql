@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS scheduled_reminders (
     is_completed INTEGER NOT NULL DEFAULT 0,
     completed_at_utc TEXT NULL,
     completion_status TEXT NOT NULL DEFAULT 'Pending',
+    delivered_at_utc TEXT NULL,
+    ack_deadline_utc TEXT NULL,
 
     PRIMARY KEY (shard_region_name, entity_id, reminder_key)
 );
@@ -32,3 +34,7 @@ WHERE is_completed = 0;
 CREATE INDEX IF NOT EXISTS ix_scheduled_reminders_cleanup
 ON scheduled_reminders (completed_at_utc)
 WHERE is_completed = 1;
+
+CREATE INDEX IF NOT EXISTS ix_scheduled_reminders_awaiting_ack
+ON scheduled_reminders (ack_deadline_utc)
+WHERE completion_status = 'AwaitingAck';

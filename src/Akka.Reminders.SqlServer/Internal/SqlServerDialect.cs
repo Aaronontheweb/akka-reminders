@@ -38,6 +38,8 @@ internal sealed class SqlServerDialect : ISqlDialect
                     IsCompleted BIT NOT NULL DEFAULT 0,
                     CompletedAtUtc DATETIME2 NULL,
                     CompletionStatus VARCHAR(20) NOT NULL DEFAULT 'Pending',
+                    DeliveredAtUtc DATETIME2 NULL,
+                    AckDeadlineUtc DATETIME2 NULL,
 
                     CONSTRAINT PK_{tableName} PRIMARY KEY (ShardRegionName, EntityId, ReminderKey)
                 );
@@ -49,6 +51,10 @@ internal sealed class SqlServerDialect : ISqlDialect
                 CREATE INDEX IX_{tableName}_Cleanup
                 ON {fullTableName} (CompletedAtUtc)
                 WHERE IsCompleted = 1;
+
+                CREATE INDEX IX_{tableName}_AwaitingAck
+                ON {fullTableName} (AckDeadlineUtc)
+                WHERE CompletionStatus = 'AwaitingAck';
             END
             """;
     }
@@ -108,6 +114,7 @@ internal sealed class SqlServerDialect : ISqlDialect
                    SerializerId, Manifest, Payload, AttemptCount, LastFailureReason
             FROM {fullTableName}
             WHERE IsCompleted = 0
+              AND CompletionStatus = 'Pending'
               AND WhenUtc <= @UntilDeadline
             ORDER BY WhenUtc ASC;
             """;
@@ -229,6 +236,64 @@ internal sealed class SqlServerDialect : ISqlDialect
               AND EntityId = @EntityId
               AND IsCompleted = 0
             ORDER BY WhenUtc ASC;
+            """;
+    }
+
+    public string GetMarkAsAwaitingAckSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+
+        return $"""
+            UPDATE {fullTableName}
+            SET CompletionStatus = 'AwaitingAck',
+                DeliveredAtUtc = @DeliveredAtUtc,
+                AckDeadlineUtc = @AckDeadlineUtc
+            WHERE ShardRegionName = @ShardRegionName
+              AND EntityId = @EntityId
+              AND ReminderKey = @ReminderKey
+              AND IsCompleted = 0;
+            """;
+    }
+
+    public string GetTimedOutAckRemindersSql(string schemaName, string tableName, int maxCount)
+    {
+        if (maxCount < 1)
+            throw new ArgumentOutOfRangeException(nameof(maxCount), "maxCount must be greater than or equal to 1.");
+
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+
+        return $"""
+            SELECT TOP ({maxCount}) ShardRegionName, EntityId, ReminderKey, WhenUtc, RepeatIntervalTicks,
+                   SerializerId, Manifest, Payload, AttemptCount, LastFailureReason
+            FROM {fullTableName}
+            WHERE CompletionStatus = 'AwaitingAck'
+              AND IsCompleted = 0
+              AND AckDeadlineUtc <= @Now
+            ORDER BY AckDeadlineUtc ASC;
+            """;
+    }
+
+    public string GetAcknowledgeReminderSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+
+        // SQL Server does not support a RETURNING / OUTPUT ... FROM UPDATE with a WHERE clause
+        // on the same table directly in older syntax, so we SELECT first then UPDATE.
+        // The storage layer will execute this as two statements within the same connection.
+        return $"""
+            UPDATE {fullTableName}
+            SET IsCompleted = 1,
+                CompletedAtUtc = @AckedAtUtc,
+                CompletionStatus = 'Delivered'
+            OUTPUT INSERTED.ShardRegionName, INSERTED.EntityId, INSERTED.ReminderKey,
+                   INSERTED.WhenUtc, INSERTED.RepeatIntervalTicks,
+                   INSERTED.SerializerId, INSERTED.Manifest, INSERTED.Payload,
+                   INSERTED.AttemptCount, INSERTED.LastFailureReason
+            WHERE ShardRegionName = @ShardRegionName
+              AND EntityId = @EntityId
+              AND ReminderKey = @ReminderKey
+              AND CompletionStatus = 'AwaitingAck'
+              AND IsCompleted = 0;
             """;
     }
 

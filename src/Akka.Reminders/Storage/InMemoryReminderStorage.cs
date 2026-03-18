@@ -13,6 +13,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
 {
     private readonly ConcurrentDictionary<(ReminderEntity, ReminderKey), ScheduledReminder> _pendingReminders = new();
     private readonly ConcurrentDictionary<(ReminderEntity, ReminderKey), CompletedReminder> _completedReminders = new();
+    private readonly ConcurrentDictionary<(ReminderEntity, ReminderKey), AwaitingAckReminder> _awaitingAckReminders = new();
 
     /// <inheritdoc />
     public Task<ReminderProtocol.ReminderScheduled> ScheduleReminderAsync(
@@ -104,7 +105,11 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     /// <inheritdoc />
     public Task<ReminderOverview> GetRemindersOverviewAsync(DateTimeOffset now, CancellationToken ct = default)
     {
-        var count = _pendingReminders.Count;
+        var pendingKeys = _pendingReminders.Keys
+            .Where(k => !_awaitingAckReminders.ContainsKey(k))
+            .ToList();
+
+        var count = pendingKeys.Count;
 
         if (count == 0)
         {
@@ -115,8 +120,10 @@ public sealed class InMemoryReminderStorage : IReminderStorage
             });
         }
 
-        var nextReminder = _pendingReminders.Values
-            .OrderBy(r => r.When)
+        var nextReminder = pendingKeys
+            .Select(k => _pendingReminders.TryGetValue(k, out var r) ? r : null)
+            .Where(r => r is not null)
+            .OrderBy(r => r!.When)
             .FirstOrDefault();
 
         var timeUntilNext = nextReminder != null
@@ -138,7 +145,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         CancellationToken ct = default)
     {
         var dueReminders = _pendingReminders
-            .Where(kvp => kvp.Value.When <= untilDeadline)
+            .Where(kvp => kvp.Value.When <= untilDeadline && !_awaitingAckReminders.ContainsKey(kvp.Key))
             .Select(kvp => kvp.Value)
             .OrderBy(r => r.When)
             .Take(maxCount.Value)
@@ -202,5 +209,67 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         }
 
         return Task.FromResult(true);
+    }
+
+    /// <inheritdoc />
+    public Task<bool> MarkRemindersAsAwaitingAckAsync(
+        IEnumerable<AwaitingAckReminder> reminders,
+        CancellationToken ct = default)
+    {
+        foreach (var reminder in reminders)
+        {
+            var key = (reminder.Entity, reminder.Key);
+            _awaitingAckReminders[key] = reminder;
+        }
+
+        return Task.FromResult(true);
+    }
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<ScheduledReminder>> GetTimedOutAckRemindersAsync(
+        DateTimeOffset now,
+        ReminderBatchSize maxCount,
+        CancellationToken ct = default)
+    {
+        var timedOut = _awaitingAckReminders
+            .Where(kvp => kvp.Value.AckDeadline <= now)
+            .OrderBy(kvp => kvp.Value.AckDeadline)
+            .Take(maxCount.Value)
+            .Select(kvp => _pendingReminders.TryGetValue(kvp.Key, out var reminder) ? reminder : null)
+            .Where(r => r is not null)
+            .Select(r => r!)
+            .ToList();
+
+        return Task.FromResult<IReadOnlyList<ScheduledReminder>>(timedOut);
+    }
+
+    /// <inheritdoc />
+    public Task<AckResult> AcknowledgeReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset ackedAt,
+        CancellationToken ct = default)
+    {
+        var reminderKey = (entity, key);
+
+        if (!_awaitingAckReminders.TryRemove(reminderKey, out _))
+        {
+            return Task.FromResult(new AckResult(Success: false, IsRecurring: false, OriginalReminder: null));
+        }
+
+        if (!_pendingReminders.TryRemove(reminderKey, out var original))
+        {
+            return Task.FromResult(new AckResult(Success: false, IsRecurring: false, OriginalReminder: null));
+        }
+
+        _completedReminders[reminderKey] = new CompletedReminder(
+            entity, key, ackedAt, ReminderCompletionStatus.Delivered);
+
+        var isRecurring = original.RepeatInterval.HasValue;
+
+        return Task.FromResult(new AckResult(
+            Success: true,
+            IsRecurring: isRecurring,
+            OriginalReminder: isRecurring ? original : null));
     }
 }

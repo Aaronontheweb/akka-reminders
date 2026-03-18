@@ -406,6 +406,118 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         return reminders.Skip(skip).Take(take).ToList();
     }
 
+    public async Task<bool> MarkRemindersAsAwaitingAckAsync(
+        IEnumerable<AwaitingAckReminder> reminders,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+
+        var remindersList = reminders.ToList();
+        if (remindersList.Count == 0)
+            return true;
+
+        try
+        {
+            await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+
+            foreach (var reminder in remindersList)
+            {
+                await using var command = connection.CreateCommand();
+                command.CommandText = _dialect.GetMarkAsAwaitingAckSql(_settings.SchemaName, _settings.TableName);
+                command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+
+                _dialect.AddParameter(command, "@ShardRegionName", reminder.Entity.ShardRegionName);
+                _dialect.AddParameter(command, "@EntityId", reminder.Entity.EntityId);
+                _dialect.AddParameter(command, "@ReminderKey", reminder.Key.Name);
+                _dialect.AddParameter(command, "@DeliveredAtUtc", reminder.DeliveredAt.UtcDateTime);
+                _dialect.AddParameter(command, "@AckDeadlineUtc", reminder.AckDeadline.UtcDateTime);
+
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    public async Task<IReadOnlyList<ScheduledReminder>> GetTimedOutAckRemindersAsync(
+        DateTimeOffset now,
+        ReminderBatchSize maxCount,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+
+        var reminders = new List<ScheduledReminder>();
+
+        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = _dialect.GetTimedOutAckRemindersSql(
+            _settings.SchemaName, _settings.TableName, maxCount.Value);
+        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+
+        _dialect.AddParameter(command, "@Now", now.UtcDateTime);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var reminder = ReadReminderFromReader(reader);
+            reminders.Add(reminder);
+        }
+
+        return reminders;
+    }
+
+    public async Task<AckResult> AcknowledgeReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset ackedAt,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+
+        try
+        {
+            await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+
+            await using var command = connection.CreateCommand();
+            command.CommandText = _dialect.GetAcknowledgeReminderSql(_settings.SchemaName, _settings.TableName);
+            command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+
+            _dialect.AddParameter(command, "@ShardRegionName", entity.ShardRegionName);
+            _dialect.AddParameter(command, "@EntityId", entity.EntityId);
+            _dialect.AddParameter(command, "@ReminderKey", key.Name);
+            _dialect.AddParameter(command, "@AckedAtUtc", ackedAt.UtcDateTime);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                // No row updated — reminder was not in AwaitingAck state
+                return new AckResult(Success: false, IsRecurring: false, OriginalReminder: null);
+            }
+
+            var original = ReadReminderFromReader(reader);
+            var isRecurring = original.RepeatInterval.HasValue;
+
+            return new AckResult(
+                Success: true,
+                IsRecurring: isRecurring,
+                OriginalReminder: isRecurring ? original : null);
+        }
+        catch (Exception)
+        {
+            return new AckResult(Success: false, IsRecurring: false, OriginalReminder: null);
+        }
+    }
+
     private Task EnsureInitializedAsync(CancellationToken cancellationToken)
     {
         if (_initialized || !_settings.AutoInitialize)

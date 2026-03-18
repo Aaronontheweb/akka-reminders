@@ -1,4 +1,65 @@
-﻿namespace Akka.Reminders;
+﻿using Akka.Actor;
+
+namespace Akka.Reminders;
+
+/// <summary>
+/// Wraps a reminder message with its originating entity and key, allowing recipients
+/// to acknowledge delivery via <see cref="IReminderClient.AckAsync"/>.
+/// </summary>
+public class ReminderEnvelope : IWrappedMessage
+{
+    /// <summary>
+    /// The entity that scheduled this reminder.
+    /// </summary>
+    public ReminderEntity Entity { get; }
+
+    /// <summary>
+    /// The unique key identifying this reminder for the entity.
+    /// </summary>
+    public ReminderKey Key { get; }
+
+    /// <summary>
+    /// The payload that was originally scheduled.
+    /// </summary>
+    public object Message { get; }
+
+    /// <summary>
+    /// Creates a new <see cref="ReminderEnvelope"/>.
+    /// </summary>
+    /// <param name="entity">The entity that scheduled this reminder.</param>
+    /// <param name="key">The unique key identifying this reminder.</param>
+    /// <param name="message">The payload to deliver.</param>
+    public ReminderEnvelope(ReminderEntity entity, ReminderKey key, object message)
+    {
+        Entity = entity;
+        Key = key;
+        Message = message;
+    }
+}
+
+/// <summary>
+/// Strongly-typed wrapper for a reminder message, providing compile-time access to the payload type.
+/// </summary>
+/// <typeparam name="T">The type of the reminder payload.</typeparam>
+public sealed class ReminderEnvelope<T> : ReminderEnvelope
+{
+    /// <summary>
+    /// The strongly-typed payload that was originally scheduled.
+    /// </summary>
+    public new T Message { get; }
+
+    /// <summary>
+    /// Creates a new <see cref="ReminderEnvelope{T}"/>.
+    /// </summary>
+    /// <param name="entity">The entity that scheduled this reminder.</param>
+    /// <param name="key">The unique key identifying this reminder.</param>
+    /// <param name="message">The strongly-typed payload to deliver.</param>
+    public ReminderEnvelope(ReminderEntity entity, ReminderKey key, T message)
+        : base(entity, key, message!)
+    {
+        Message = message;
+    }
+}
 
 public interface IReminderProtocol
 {
@@ -61,6 +122,27 @@ public enum FetchRemindersResponseCode
     NotFound = 2,
 }
 
+/// <summary>
+/// Response codes for a reminder acknowledgement operation.
+/// </summary>
+public enum ReminderAckResponseCode
+{
+    /// <summary>
+    /// The reminder was found and successfully acknowledged.
+    /// </summary>
+    Success = 0,
+
+    /// <summary>
+    /// No reminder was found matching the entity and key.
+    /// </summary>
+    NotFound = 1,
+
+    /// <summary>
+    /// An error occurred while attempting to acknowledge the reminder.
+    /// </summary>
+    Error = 2
+}
+
 public static class ReminderProtocol
 {
     public sealed record ScheduleReminder(
@@ -108,6 +190,21 @@ public static class ReminderProtocol
         ReminderEntity Entity,
         FetchRemindersResponseCode ResponseCode,
         IReadOnlyList<ScheduledReminder> Reminders,
+        string? Message = null) : IReminderResponse;
+
+    /// <summary>
+    /// Sent by a recipient to confirm that a reminder has been successfully processed.
+    /// Prevents duplicate delivery for at-least-once reminders.
+    /// </summary>
+    public sealed record ReminderAck(ReminderEntity Entity, ReminderKey Key) : IReminderCommand;
+
+    /// <summary>
+    /// Returned by the scheduler after processing a <see cref="ReminderAck"/>.
+    /// </summary>
+    public sealed record ReminderAckResponse(
+        ReminderEntity Entity,
+        ReminderKey Key,
+        ReminderAckResponseCode ResponseCode,
         string? Message = null) : IReminderResponse;
 }
 

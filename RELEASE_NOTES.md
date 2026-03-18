@@ -1,3 +1,42 @@
+#### 0.6.0 March 18th 2026 ####
+
+**Breaking Changes**
+
+- **Reminder delivery now uses `ReminderEnvelope<T>` instead of raw messages** - All reminders are delivered wrapped in a strongly-typed envelope that must be acknowledged. Actors receiving reminders must change from `Receive<MyMessage>` to `ReceiveAsync<ReminderEnvelope<MyMessage>>` and call `await client.AckAsync(envelope)` after processing.
+- **`IReminderClient` scheduling methods are now generic** - `ScheduleSingleReminderAsync<T>` and `ScheduleRecurringReminderAsync<T>` replace the `object message` parameter with `T message` for type safety.
+- **`IShardRegionResolver.DeliverReminder` signature changed** - Now accepts `ReminderEnvelope` and `IActorRef sender` instead of raw `object message`.
+
+**New Features**
+
+- **Reliable Delivery with Acknowledgement Protocol** - Reminders now require explicit acknowledgement from recipients via `IReminderClient.AckAsync(envelope)`. Unacknowledged reminders are automatically retried with exponential backoff. This ensures recipients actually process reminders, not just that `Tell()` didn't throw.
+  - `AckAsync` returns a `Task` backed by `Ask<T>` — recipients know whether the scheduler confirmed their ack (no duplicate coming) or if a duplicate may arrive
+  - Configurable via `ReminderSettings.AckTimeout` (default: 30s) and `ReminderSettings.AckTimeoutCheckInterval` (default: 10s)
+  - Existing `MaxDeliveryAttempts` and `RetryBackoffBase` now apply to ack-timeout retries
+  - New `AwaitingAck` delivery state in the state machine: `Pending → AwaitingAck → Delivered/Failed`
+
+- **Strongly-Typed `ReminderEnvelope<T>`** - Delivered reminders are wrapped in a generic envelope implementing `IWrappedMessage`. Use `ReminderEnvelope<T>` for compile-time type safety or `ReminderEnvelope` (non-generic base) for flexibility. Both have public constructors for easy testing.
+
+- **Custom Akka.Remote Serializer** - `ReminderEnvelope`, `ReminderAck`, and `ReminderAckResponse` are automatically serialized across cluster boundaries using a dedicated `SerializerWithStringManifest`. Inner message serialization is delegated to Akka's existing serialization system.
+
+**Migration from 0.5.x**
+
+- **Database schema**: Run the migration script for your storage provider:
+  - [SQLite](https://github.com/Aaronontheweb/akka-reminders/blob/dev/src/Akka.Reminders.Sqlite/Scripts/Migrations/V0_6_0__add_ack_columns.sql)
+  - [PostgreSQL](https://github.com/Aaronontheweb/akka-reminders/blob/dev/src/Akka.Reminders.PostgreSql/Scripts/Migrations/V0_6_0__add_ack_columns.sql)
+  - [SQL Server](https://github.com/Aaronontheweb/akka-reminders/blob/dev/src/Akka.Reminders.SqlServer/Scripts/Migrations/V0_6_0__add_ack_columns.sql)
+- **Code changes**: Update reminder handlers:
+  ```csharp
+  // Before (0.5.x):
+  Receive<MyMessage>(msg => { /* handle */ });
+
+  // After (0.6.0):
+  ReceiveAsync<ReminderEnvelope<MyMessage>>(async envelope => {
+      var msg = envelope.Message; // MyMessage, strongly typed
+      /* handle */
+      await _reminderClient.AckAsync(envelope);
+  });
+  ```
+
 #### 0.5.1 March 9th 2026 ####
 
 **Bug Fixes**

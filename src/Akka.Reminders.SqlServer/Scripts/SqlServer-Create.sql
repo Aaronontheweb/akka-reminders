@@ -47,6 +47,8 @@ BEGIN
         IsCompleted BIT NOT NULL DEFAULT 0,
         CompletedAtUtc DATETIME2 NULL,
         CompletionStatus VARCHAR(20) NOT NULL DEFAULT ''Pending'',
+        DeliveredAtUtc DATETIME2 NULL,
+        AckDeadlineUtc DATETIME2 NULL,
 
         CONSTRAINT PK_' + @TableName + ' PRIMARY KEY (ShardRegionName, EntityId, ReminderKey)
     );';
@@ -71,6 +73,15 @@ BEGIN
 
     EXEC(@CreateIndex2Sql);
     PRINT 'Created index: ' + @IndexName2
+
+    DECLARE @IndexName3 NVARCHAR(500) = 'IX_' + @TableName + '_AwaitingAck';
+    DECLARE @CreateIndex3Sql NVARCHAR(MAX) = '
+    CREATE INDEX ' + @IndexName3 + '
+    ON ' + @FullTableName + ' (AckDeadlineUtc)
+    WHERE CompletionStatus = ''AwaitingAck'';';
+
+    EXEC(@CreateIndex3Sql);
+    PRINT 'Created index: ' + @IndexName3
 END
 ELSE
 BEGIN

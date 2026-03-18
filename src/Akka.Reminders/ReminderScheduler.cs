@@ -54,6 +54,16 @@ public sealed record ReminderSettings
     public TimeSpan RetryBackoffBase { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// How long to wait for an acknowledgement after delivering a reminder before retrying.
+    /// </summary>
+    public TimeSpan AckTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How frequently to scan for reminders whose ack deadline has passed.
+    /// </summary>
+    public TimeSpan AckTimeoutCheckInterval { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// Validates reminder settings.
     /// </summary>
     public void Validate()
@@ -106,6 +116,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// </summary>
     private bool _writeCircuitOpen;
 
+    /// <summary>
+    /// Tracks reminders that have been delivered to their target shard region but have not yet
+    /// been acknowledged. Keyed by (Entity, Key). Each entry stores the original reminder and
+    /// the absolute deadline by which an ack must arrive before the reminder is retried or
+    /// permanently failed.
+    /// </summary>
+    private readonly Dictionary<(ReminderEntity Entity, ReminderKey Key), (ScheduledReminder Reminder, DateTimeOffset AckDeadline)> _awaitingAck = new();
+
     private readonly ILoggingAdapter _log = Context.GetLogger();
 
     public IStash Stash { get; set; } = null!;
@@ -139,6 +157,19 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         public static readonly PruneCompletedReminders Instance = new();
 
         private PruneCompletedReminders()
+        {
+        }
+    }
+
+    /// <summary>
+    /// Periodic timer message that triggers a scan of <see cref="_awaitingAck"/> to find
+    /// reminders whose ack deadline has elapsed and either retry or permanently fail them.
+    /// </summary>
+    private sealed class CheckAckTimeouts
+    {
+        public static readonly CheckAckTimeouts Instance = new();
+
+        private CheckAckTimeouts()
         {
         }
     }
@@ -352,6 +383,170 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 });
                 break;
             }
+            case ReminderProtocol.ReminderAck ack:
+            {
+                _log.Debug("Received ReminderAck for [{0}] / [{1}]", ack.Entity, ack.Key);
+                var ackSender = Sender;
+                var lookupKey = (ack.Entity, ack.Key);
+
+                if (!_awaitingAck.TryGetValue(lookupKey, out var entry))
+                {
+                    // Late or duplicate ack — harmless, nothing to do
+                    _log.Debug("ReminderAck for [{0}] / [{1}] not found in awaiting-ack set (late or duplicate)",
+                        ack.Entity, ack.Key);
+                    ackSender.Tell(new ReminderProtocol.ReminderAckResponse(
+                        ack.Entity, ack.Key, ReminderAckResponseCode.NotFound), ActorRefs.NoSender);
+                    break;
+                }
+
+                _awaitingAck.Remove(lookupKey);
+                var ackedReminder = entry.Reminder;
+
+                RunTask(async () =>
+                {
+                    try
+                    {
+                        if (ackedReminder.RepeatInterval.HasValue)
+                        {
+                            // Recurring reminder: schedule the next occurrence
+                            var nextOccurrence = ackedReminder with
+                            {
+                                When = TimeProvider.Now.Add(ackedReminder.RepeatInterval.Value),
+                                AttemptCount = 0,
+                                LastFailureReason = null
+                            };
+                            using var scheduleCts = new CancellationTokenSource(Settings.StorageTimeout);
+                            var result = await Storage.ScheduleReminderAsync(nextOccurrence, scheduleCts.Token);
+                            if (result.ResponseCode != ReminderScheduleResponseCode.Success)
+                            {
+                                _log.Error(
+                                    "Failed to schedule next occurrence of recurring reminder [{0}] / [{1}]: {2}",
+                                    ackedReminder.Entity, ackedReminder.Key, result.Message ?? "Unknown error");
+                            }
+                            else
+                            {
+                                _log.Info("Scheduled next occurrence of recurring reminder [{0}] / [{1}] at {2}",
+                                    ackedReminder.Entity, ackedReminder.Key, nextOccurrence.When);
+                                var (newOverview, hasNewerDate) =
+                                    PendingReminders.Apply(nextOccurrence, TimeProvider.Now);
+                                PendingReminders = newOverview;
+                                if (hasNewerDate)
+                                    TryScheduleFetchReminders();
+                            }
+                        }
+                        else
+                        {
+                            // One-time reminder: mark as delivered
+                            var completed = new CompletedReminder(
+                                ackedReminder.Entity, ackedReminder.Key,
+                                TimeProvider.Now, ReminderCompletionStatus.Delivered);
+                            using var markCts = new CancellationTokenSource(Settings.StorageTimeout);
+                            var markResult = await Storage.MarkRemindersAsCompletedAsync([completed], markCts.Token);
+                            if (!markResult)
+                            {
+                                _log.Error(
+                                    "MarkRemindersAsCompletedAsync returned false for acked reminder [{0}] / [{1}]",
+                                    ackedReminder.Entity, ackedReminder.Key);
+                            }
+                        }
+
+                        ackSender.Tell(new ReminderProtocol.ReminderAckResponse(
+                            ack.Entity, ack.Key, ReminderAckResponseCode.Success), ActorRefs.NoSender);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex, "Error processing ReminderAck for [{0}] / [{1}]",
+                            ack.Entity, ack.Key);
+                        ackSender.Tell(new ReminderProtocol.ReminderAckResponse(
+                            ack.Entity, ack.Key, ReminderAckResponseCode.Error, ex.Message),
+                            ActorRefs.NoSender);
+                    }
+                });
+                break;
+            }
+            case CheckAckTimeouts:
+            {
+                var now = TimeProvider.Now;
+                var timedOut = _awaitingAck
+                    .Where(kvp => kvp.Value.AckDeadline <= now)
+                    .ToList();
+
+                if (timedOut.Count == 0)
+                    break;
+
+                _log.Debug("Ack-timeout scan found [{0}] timed-out reminder(s)", timedOut.Count);
+
+                foreach (var kvp in timedOut)
+                {
+                    _awaitingAck.Remove(kvp.Key);
+                    var timedOutReminder = kvp.Value.Reminder;
+
+                    if (timedOutReminder.AttemptCount + 1 < Settings.MaxDeliveryAttempts)
+                    {
+                        // Schedule a retry with exponential backoff
+                        var backoffSeconds =
+                            Settings.RetryBackoffBase.TotalSeconds * Math.Pow(2, timedOutReminder.AttemptCount);
+                        var retryReminder = timedOutReminder with
+                        {
+                            When = now.Add(TimeSpan.FromSeconds(backoffSeconds)),
+                            AttemptCount = timedOutReminder.AttemptCount + 1,
+                            LastFailureReason = "Ack timeout"
+                        };
+
+                        _log.Warning(
+                            "Ack timeout for reminder [{0}] / [{1}] (attempt {2} of {3}). Retrying at {4}.",
+                            timedOutReminder.Entity, timedOutReminder.Key,
+                            retryReminder.AttemptCount, Settings.MaxDeliveryAttempts,
+                            retryReminder.When);
+
+                        RunTask(async () =>
+                        {
+                            try
+                            {
+                                using var retryCts = new CancellationTokenSource(Settings.StorageTimeout);
+                                await Storage.ScheduleReminderAsync(retryReminder, retryCts.Token);
+                                var (newOverview, hasNewerDate) =
+                                    PendingReminders.Apply(retryReminder, TimeProvider.Now);
+                                PendingReminders = newOverview;
+                                if (hasNewerDate)
+                                    TryScheduleFetchReminders();
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.Error(ex,
+                                    "Failed to schedule ack-timeout retry for reminder [{0}] / [{1}]",
+                                    retryReminder.Entity, retryReminder.Key);
+                            }
+                        });
+                    }
+                    else
+                    {
+                        _log.Error(
+                            "Reminder [{0}] / [{1}] exceeded max delivery attempts ({2}) after ack timeout. Marking as permanently failed.",
+                            timedOutReminder.Entity, timedOutReminder.Key, Settings.MaxDeliveryAttempts);
+
+                        RunTask(async () =>
+                        {
+                            try
+                            {
+                                var failed = new CompletedReminder(
+                                    timedOutReminder.Entity, timedOutReminder.Key,
+                                    TimeProvider.Now, ReminderCompletionStatus.Failed);
+                                using var failCts = new CancellationTokenSource(Settings.StorageTimeout);
+                                await Storage.MarkRemindersAsCompletedAsync([failed], failCts.Token);
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.Error(ex,
+                                    "Failed to mark ack-timeout reminder [{0}] / [{1}] as permanently failed",
+                                    timedOutReminder.Entity, timedOutReminder.Key);
+                            }
+                        });
+                    }
+                }
+
+                break;
+            }
             default:
                 Unhandled(message);
                 break;
@@ -370,6 +565,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             Settings.PruneInterval,
             Settings.PruneInterval);
         _log.Info("Scheduled periodic pruning every {0}", Settings.PruneInterval);
+
+        // Schedule periodic scan for reminders that have been delivered but not acknowledged
+        Timers.StartPeriodicTimer(
+            CheckAckTimeouts.Instance,
+            CheckAckTimeouts.Instance,
+            Settings.AckTimeoutCheckInterval,
+            Settings.AckTimeoutCheckInterval);
+        _log.Info("Scheduled ack-timeout check every {0}", Settings.AckTimeoutCheckInterval);
     }
 
     private Task LoadReminderOverview()
@@ -382,7 +585,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     private async Task ProcessReminders(DateTimeOffset untilDeadline)
     {
         var totalDelivered = 0;
-        var totalRecurring = 0;
         var totalRetried = 0;
         var totalFailed = 0;
 
@@ -435,9 +637,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 // by (Status, When) efficiently.
                 var completedAt = TimeProvider.Now;
 
-                // Phase 2: Deliver reminders and categorize results
-                var completedReminders = new List<CompletedReminder>();
-                var recurringRemindersToSchedule = new List<ScheduledReminder>();
+                // Phase 2: Deliver reminders and categorize results.
+                // Successfully delivered reminders are placed in _awaitingAck; completion
+                // and recurring rescheduling happen only after the target entity sends a
+                // ReminderAck back. Infrastructure failures (shard region missing) still
+                // go through the immediate retry / permanent-fail path.
                 var failedRemindersToRetry = new List<ScheduledReminder>();
                 var permanentlyFailedReminders = new List<CompletedReminder>();
 
@@ -474,56 +678,44 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     else
                     {
                         _log.Debug("Sending reminder {0} to {1}", reminder, shardRegion);
-                        ShardRegionResolver.DeliverReminder(reminder.Entity, reminder.Message);
+                        var envelope = new ReminderEnvelope(reminder.Entity, reminder.Key, reminder.Message);
+                        ShardRegionResolver.DeliverReminder(reminder.Entity, envelope, Self);
+
+                        var ackDeadline = TimeProvider.Now.Add(Settings.AckTimeout);
+                        _awaitingAck[(reminder.Entity, reminder.Key)] = (reminder, ackDeadline);
 
                         totalDelivered += 1;
-
-                        if (reminder.RepeatInterval.HasValue)
-                        {
-                            var nextOccurrence = reminder with
-                            {
-                                When = TimeProvider.Now.Add(reminder.RepeatInterval.Value),
-                                AttemptCount = 0,
-                                LastFailureReason = null
-                            };
-                            recurringRemindersToSchedule.Add(nextOccurrence);
-                            _log.Info("Scheduling next occurrence of recurring reminder {0} at {1}",
-                                reminder.Key, nextOccurrence.When);
-                        }
-                        else
-                        {
-                            completedReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, completedAt,
-                                ReminderCompletionStatus.Delivered));
-                        }
                     }
                 }
 
-                // Phase 3: Mark completed one-time reminders and permanently failed reminders
-                // Recurring reminders are not marked complete; their durability boundary is
-                // successful upsert of the next occurrence.
+                // Phase 3: Mark permanently failed reminders as complete in storage.
+                // Delivered reminders are NOT marked here — that happens in the ReminderAck handler.
                 var writeFailed = false;
-                try
+                if (permanentlyFailedReminders.Count > 0)
                 {
-                    var allCompleted = completedReminders.Concat(permanentlyFailedReminders);
-                    using var markCts = new CancellationTokenSource(Settings.StorageTimeout);
-                    var markResult = await Storage.MarkRemindersAsCompletedAsync(allCompleted, markCts.Token);
-                    if (!markResult)
+                    try
                     {
-                        _log.Error(
-                            "MarkRemindersAsCompletedAsync returned false for [{0}] reminders",
-                            completedReminders.Count + permanentlyFailedReminders.Count);
+                        using var markCts = new CancellationTokenSource(Settings.StorageTimeout);
+                        var markResult =
+                            await Storage.MarkRemindersAsCompletedAsync(permanentlyFailedReminders, markCts.Token);
+                        if (!markResult)
+                        {
+                            _log.Error(
+                                "MarkRemindersAsCompletedAsync returned false for [{0}] permanently-failed reminders",
+                                permanentlyFailedReminders.Count);
+                            writeFailed = true;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex,
+                            "Failed to mark [{0}] reminders as permanently failed",
+                            permanentlyFailedReminders.Count);
                         writeFailed = true;
                     }
                 }
-                catch (Exception ex)
-                {
-                    _log.Error(ex,
-                        "Failed to mark [{0}] reminders as completed",
-                        completedReminders.Count + permanentlyFailedReminders.Count);
-                    writeFailed = true;
-                }
 
-                // Phase 4: Schedule retries for failed reminders
+                // Phase 4: Schedule retries for infrastructure-failed reminders
                 if (!writeFailed)
                 {
                     try
@@ -541,33 +733,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     }
                 }
 
-                // Phase 5: Persist recurring next occurrences
-                if (!writeFailed)
-                {
-                    try
-                    {
-                        foreach (var recurringReminder in recurringRemindersToSchedule)
-                        {
-                            using var recurCts = new CancellationTokenSource(Settings.StorageTimeout);
-                            var result = await Storage.ScheduleReminderAsync(recurringReminder, recurCts.Token);
-                            if (result.ResponseCode != ReminderScheduleResponseCode.Success)
-                            {
-                                _log.Error("Failed to schedule recurring reminder {0}: {1}",
-                                    recurringReminder.Key, result.Message ?? "Unknown error");
-                                writeFailed = true;
-                                break;
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.Error(ex, "Failed to schedule [{0}] recurring reminders",
-                            recurringRemindersToSchedule.Count);
-                        writeFailed = true;
-                    }
-                }
-
-                totalRecurring += recurringRemindersToSchedule.Count;
                 totalRetried += failedRemindersToRetry.Count;
                 totalFailed += permanentlyFailedReminders.Count;
 
@@ -619,9 +784,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
 
         _log.Info(
-            "Successfully delivered [{0}] reminders; scheduled [{1}] recurring reminders; retrying [{2}] failed reminders; permanently failed [{3}] reminders. Next reminder due: {4}",
-            totalDelivered, totalRecurring, totalRetried,
-            totalFailed, PendingReminders.TimeUntilNext);
+            "Successfully delivered [{0}] reminders (awaiting ack); retrying [{1}] infrastructure-failed reminders; permanently failed [{2}] reminders. Awaiting ack: [{3}]. Next reminder due: {4}",
+            totalDelivered, totalRetried,
+            totalFailed, _awaitingAck.Count, PendingReminders.TimeUntilNext);
 
         TryScheduleFetchReminders();
     }

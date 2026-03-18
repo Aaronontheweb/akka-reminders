@@ -32,6 +32,8 @@ internal sealed class PostgreSqlDialect : ISqlDialect
                 is_completed BOOLEAN NOT NULL DEFAULT FALSE,
                 completed_at_utc TIMESTAMP WITH TIME ZONE NULL,
                 completion_status VARCHAR(20) NOT NULL DEFAULT 'Pending',
+                delivered_at_utc TIMESTAMP WITH TIME ZONE NULL,
+                ack_deadline_utc TIMESTAMP WITH TIME ZONE NULL,
 
                 CONSTRAINT pk_{tableName} PRIMARY KEY (shard_region_name, entity_id, reminder_key)
             );
@@ -43,6 +45,10 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             CREATE INDEX IF NOT EXISTS ix_{tableName}_cleanup
             ON {fullTableName} (completed_at_utc)
             WHERE is_completed = TRUE;
+
+            CREATE INDEX IF NOT EXISTS ix_{tableName}_awaiting_ack
+            ON {fullTableName} (ack_deadline_utc)
+            WHERE completion_status = 'AwaitingAck';
             """;
     }
 
@@ -86,6 +92,7 @@ internal sealed class PostgreSqlDialect : ISqlDialect
                    serializer_id, manifest, payload, attempt_count, last_failure_reason
             FROM {fullTableName}
             WHERE is_completed = FALSE
+              AND completion_status = 'Pending'
               AND when_utc <= @UntilDeadline
             ORDER BY when_utc ASC
             LIMIT {maxCount};
@@ -207,6 +214,62 @@ internal sealed class PostgreSqlDialect : ISqlDialect
               AND entity_id = @EntityId
               AND is_completed = FALSE
             ORDER BY when_utc ASC;
+            """;
+    }
+
+    public string GetMarkAsAwaitingAckSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+
+        return $"""
+            UPDATE {fullTableName}
+            SET completion_status = 'AwaitingAck',
+                delivered_at_utc = @DeliveredAtUtc,
+                ack_deadline_utc = @AckDeadlineUtc
+            WHERE shard_region_name = @ShardRegionName
+              AND entity_id = @EntityId
+              AND reminder_key = @ReminderKey
+              AND is_completed = FALSE;
+            """;
+    }
+
+    public string GetTimedOutAckRemindersSql(string schemaName, string tableName, int maxCount)
+    {
+        if (maxCount < 1)
+            throw new ArgumentOutOfRangeException(nameof(maxCount), "maxCount must be greater than or equal to 1.");
+
+        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+
+        return $"""
+            SELECT shard_region_name, entity_id, reminder_key, when_utc, repeat_interval_ticks,
+                   serializer_id, manifest, payload, attempt_count, last_failure_reason
+            FROM {fullTableName}
+            WHERE completion_status = 'AwaitingAck'
+              AND is_completed = FALSE
+              AND ack_deadline_utc <= @Now
+            ORDER BY ack_deadline_utc ASC
+            LIMIT {maxCount};
+            """;
+    }
+
+    public string GetAcknowledgeReminderSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+
+        // Returns the full reminder row so the caller can read repeat_interval_ticks and
+        // reconstruct the ScheduledReminder for rescheduling recurring reminders.
+        return $"""
+            UPDATE {fullTableName}
+            SET is_completed = TRUE,
+                completed_at_utc = @AckedAtUtc,
+                completion_status = 'Delivered'
+            WHERE shard_region_name = @ShardRegionName
+              AND entity_id = @EntityId
+              AND reminder_key = @ReminderKey
+              AND completion_status = 'AwaitingAck'
+              AND is_completed = FALSE
+            RETURNING shard_region_name, entity_id, reminder_key, when_utc, repeat_interval_ticks,
+                      serializer_id, manifest, payload, attempt_count, last_failure_reason;
             """;
     }
 

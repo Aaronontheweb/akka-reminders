@@ -11,6 +11,23 @@ namespace Akka.Reminders;
 public static class AkkaHostingExtensions
 {
     /// <summary>
+    /// HOCON configuration that registers the <see cref="Serialization.ReminderSerializer"/> and binds
+    /// it to all types that need to cross node boundaries in a cluster:
+    /// <see cref="ReminderEnvelope"/>, <see cref="ReminderProtocol.ReminderAck"/>, and
+    /// <see cref="ReminderProtocol.ReminderAckResponse"/>.
+    /// </summary>
+    internal const string SerializerHocon = """
+        akka.actor.serializers {
+            reminder-serializer = "Akka.Reminders.Serialization.ReminderSerializer, Akka.Reminders"
+        }
+        akka.actor.serialization-bindings {
+            "Akka.Reminders.ReminderEnvelope, Akka.Reminders" = reminder-serializer
+            "Akka.Reminders.ReminderProtocol+ReminderAck, Akka.Reminders" = reminder-serializer
+            "Akka.Reminders.ReminderProtocol+ReminderAckResponse, Akka.Reminders" = reminder-serializer
+        }
+        """;
+
+    /// <summary>
     /// Adds the Akka.Reminders system to the actor system.
     /// </summary>
     /// <param name="builder">The Akka configuration builder.</param>
@@ -36,6 +53,10 @@ public static class AkkaHostingExtensions
         reminderBuilder.WithRole(role);
         configure?.Invoke(reminderBuilder);
         var setup = reminderBuilder.Build();
+
+        // Register the reminder serializer so ReminderEnvelope, ReminderAck, and ReminderAckResponse
+        // are properly serialized across cluster boundaries.
+        builder.AddHocon(SerializerHocon, HoconAddMode.Prepend);
 
         // Add the setup to the actor system
         builder.AddSetup(setup);
@@ -135,6 +156,10 @@ public static class AkkaHostingExtensions
     {
         var localBuilder = new LocalReminderConfigurationBuilder();
         configure?.Invoke(localBuilder);
+
+        // Register the reminder serializer so ReminderEnvelope, ReminderAck, and ReminderAckResponse
+        // are properly serialized across cluster boundaries.
+        builder.AddHocon(SerializerHocon, HoconAddMode.Prepend);
 
         builder.WithActors((system, registry) =>
         {
