@@ -28,7 +28,7 @@ internal sealed class ReminderClient : IReminderClient
         T message,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleReminder(Entity, key, when, message, RepeatInterval: null);
+        var command = new ReminderProtocol.ScheduleReminder(Entity, key, when, message!, RepeatInterval: null);
 
         try
         {
@@ -65,7 +65,7 @@ internal sealed class ReminderClient : IReminderClient
         T message,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleReminder(Entity, key, firstOccurrence, message, RepeatInterval: interval);
+        var command = new ReminderProtocol.ScheduleReminder(Entity, key, firstOccurrence, message!, RepeatInterval: interval);
 
         try
         {

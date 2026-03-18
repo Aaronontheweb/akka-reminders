@@ -359,7 +359,8 @@ Configure reminder behavior and performance characteristics:
         PruneOlderThan = TimeSpan.FromDays(30),
 
         // Maximum delivery attempts before marking as permanently failed
-        MaxDeliveryAttempts = 3,
+        // Applies to both infrastructure failures and ack timeouts
+        MaxDeliveryAttempts = 10,
 
         // Maximum reminders fetched per batch (limits query size under load)
         MaxBatchSize = 1000,
@@ -369,8 +370,11 @@ Configure reminder behavior and performance characteristics:
         DeliveryCommitChunkSize = 100,
 
         // Base delay for exponential backoff on retries
-        // Actual delay = RetryBackoffBase * (2 ^ attemptCount)
-        RetryBackoffBase = TimeSpan.FromSeconds(30),
+        // Actual delay = min(RetryBackoffBase * 2^attempt, MaxRetryBackoff)
+        RetryBackoffBase = TimeSpan.FromSeconds(60),
+
+        // Cap on exponential backoff to prevent absurdly long intervals
+        MaxRetryBackoff = TimeSpan.FromMinutes(10),
 
         // How long to wait for a recipient ack before retrying delivery
         AckTimeout = TimeSpan.FromSeconds(30),

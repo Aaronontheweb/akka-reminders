@@ -105,7 +105,7 @@ public sealed class ReminderClientExtension : IExtension
         T message,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleReminder(entity, key, when, message, RepeatInterval: null);
+        var command = new ReminderProtocol.ScheduleReminder(entity, key, when, message!, RepeatInterval: null);
         return SendToSchedulerAsync<ReminderProtocol.ScheduleReminder, ReminderProtocol.ReminderScheduled>(
             command,
             ct,
@@ -164,7 +164,7 @@ public sealed class ReminderClientExtension : IExtension
         T message,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleReminder(entity, key, firstOccurrence, message, RepeatInterval: interval);
+        var command = new ReminderProtocol.ScheduleReminder(entity, key, firstOccurrence, message!, RepeatInterval: interval);
         return SendToSchedulerAsync<ReminderProtocol.ScheduleReminder, ReminderProtocol.ReminderScheduled>(
             command,
             ct,

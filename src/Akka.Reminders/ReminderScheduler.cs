@@ -44,14 +44,22 @@ public sealed record ReminderSettings
 
     /// <summary>
     /// Maximum number of delivery attempts before a reminder is marked as permanently failed.
+    /// Applies to both infrastructure failures (shard region not found) and ack timeouts.
     /// </summary>
-    public int MaxDeliveryAttempts { get; init; } = 3;
+    public int MaxDeliveryAttempts { get; init; } = 10;
 
     /// <summary>
     /// Base delay for exponential backoff when retrying failed reminders.
-    /// Actual delay = RetryBackoffBase * (2 ^ attemptCount)
+    /// Actual delay = min(RetryBackoffBase * (2 ^ attemptCount), MaxRetryBackoff)
+    /// Applies to both infrastructure failures (shard region not found) and ack timeouts.
     /// </summary>
-    public TimeSpan RetryBackoffBase { get; init; } = TimeSpan.FromSeconds(30);
+    public TimeSpan RetryBackoffBase { get; init; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// Maximum backoff delay between retry attempts. Prevents exponential backoff from
+    /// growing to absurdly long intervals at high attempt counts.
+    /// </summary>
+    public TimeSpan MaxRetryBackoff { get; init; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
     /// How long to wait for an acknowledgement after delivering a reminder before retrying.
@@ -485,12 +493,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                     if (timedOutReminder.AttemptCount + 1 < Settings.MaxDeliveryAttempts)
                     {
-                        // Schedule a retry with exponential backoff
-                        var backoffSeconds =
-                            Settings.RetryBackoffBase.TotalSeconds * Math.Pow(2, timedOutReminder.AttemptCount);
+                        // Schedule a retry with capped exponential backoff
+                        var backoff = TimeSpan.FromSeconds(
+                            Math.Min(
+                                Settings.RetryBackoffBase.TotalSeconds * Math.Pow(2, timedOutReminder.AttemptCount),
+                                Settings.MaxRetryBackoff.TotalSeconds));
                         var retryReminder = timedOutReminder with
                         {
-                            When = now.Add(TimeSpan.FromSeconds(backoffSeconds)),
+                            When = now.Add(backoff),
                             AttemptCount = timedOutReminder.AttemptCount + 1,
                             LastFailureReason = "Ack timeout"
                         };
@@ -658,11 +668,13 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                         if (reminder.AttemptCount + 1 < Settings.MaxDeliveryAttempts)
                         {
-                            var backoffSeconds =
-                                Settings.RetryBackoffBase.TotalSeconds * Math.Pow(2, reminder.AttemptCount);
+                            var backoff = TimeSpan.FromSeconds(
+                                Math.Min(
+                                    Settings.RetryBackoffBase.TotalSeconds * Math.Pow(2, reminder.AttemptCount),
+                                    Settings.MaxRetryBackoff.TotalSeconds));
                             var retryReminder = reminder with
                             {
-                                When = TimeProvider.Now.Add(TimeSpan.FromSeconds(backoffSeconds)),
+                                When = TimeProvider.Now.Add(backoff),
                                 AttemptCount = reminder.AttemptCount + 1,
                                 LastFailureReason = $"ShardRegion [{reminder.Entity.ShardRegionName}] not found"
                             };
