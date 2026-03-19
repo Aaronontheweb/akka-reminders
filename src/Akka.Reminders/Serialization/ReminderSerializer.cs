@@ -82,6 +82,10 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         // Write key field
         writer.Write(envelope.Key.Name);
 
+        // Write occurrence metadata
+        writer.Write(envelope.DueTimeUtc.UtcTicks);
+        writer.Write(envelope.Deadline.UtcDateTime.UtcTicks);
+
         // Delegate inner message serialization to Akka's serialization infrastructure
         var innerSerializer = SerializationSystem.FindSerializerFor(envelope.Message);
         var innerManifest = Akka.Serialization.Serialization.ManifestFor(innerSerializer, envelope.Message);
@@ -108,6 +112,9 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         var keyName = reader.ReadString();
         var key = new ReminderKey(keyName);
 
+        var dueTimeUtc = new DateTimeOffset(reader.ReadInt64(), TimeSpan.Zero);
+        var deadline = new ReminderDeadline(new DateTimeOffset(reader.ReadInt64(), TimeSpan.Zero));
+
         var innerSerializerId = reader.ReadInt32();
         var innerManifest = reader.ReadString();
         var innerLength = reader.ReadInt32();
@@ -118,7 +125,7 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         // Construct ReminderEnvelope<T> using the runtime type of the deserialized message
         var messageType = innerMessage.GetType();
         var closedGenericType = ReminderEnvelopeOpenGenericType.MakeGenericType(messageType);
-        var envelope = Activator.CreateInstance(closedGenericType, entity, key, innerMessage)
+        var envelope = Activator.CreateInstance(closedGenericType, entity, key, dueTimeUtc, deadline, innerMessage)
             ?? throw new InvalidOperationException(
                 $"Failed to create {closedGenericType.FullName} via Activator.CreateInstance.");
 
@@ -133,6 +140,7 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         writer.Write(ack.Entity.ShardRegionName);
         writer.Write(ack.Entity.EntityId);
         writer.Write(ack.Key.Name);
+        writer.Write(ack.DueTimeUtc.UtcTicks);
 
         writer.Flush();
         return stream.ToArray();
@@ -146,10 +154,12 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         var shardRegionName = reader.ReadString();
         var entityId = reader.ReadString();
         var keyName = reader.ReadString();
+        var dueTimeUtc = new DateTimeOffset(reader.ReadInt64(), TimeSpan.Zero);
 
         return new ReminderProtocol.ReminderAck(
             new ReminderEntity(shardRegionName, entityId),
-            new ReminderKey(keyName));
+            new ReminderKey(keyName),
+            dueTimeUtc);
     }
 
     private static byte[] SerializeReminderAckResponse(ReminderProtocol.ReminderAckResponse response)
@@ -160,6 +170,7 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         writer.Write(response.Entity.ShardRegionName);
         writer.Write(response.Entity.EntityId);
         writer.Write(response.Key.Name);
+        writer.Write(response.DueTimeUtc.UtcTicks);
         writer.Write((int)response.ResponseCode);
         writer.Write(response.Message ?? string.Empty);
 
@@ -175,12 +186,14 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         var shardRegionName = reader.ReadString();
         var entityId = reader.ReadString();
         var keyName = reader.ReadString();
+        var dueTimeUtc = new DateTimeOffset(reader.ReadInt64(), TimeSpan.Zero);
         var responseCode = (ReminderAckResponseCode)reader.ReadInt32();
         var message = reader.ReadString();
 
         return new ReminderProtocol.ReminderAckResponse(
             new ReminderEntity(shardRegionName, entityId),
             new ReminderKey(keyName),
+            dueTimeUtc,
             responseCode,
             string.IsNullOrEmpty(message) ? null : message);
     }

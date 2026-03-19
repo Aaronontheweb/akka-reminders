@@ -102,6 +102,7 @@ public sealed class ReminderClientExtension : IExtension
     /// <param name="key">The unique key for this reminder.</param>
     /// <param name="when">When the reminder should fire.</param>
     /// <param name="message">The message to deliver when the reminder fires.</param>
+    /// <param name="maxDeliveryWindow">Optional maximum amount of time the reminder occurrence remains actionable after its due time.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A task that completes when the reminder is scheduled.</returns>
     /// <remarks>
@@ -113,9 +114,16 @@ public sealed class ReminderClientExtension : IExtension
         ReminderKey key,
         DateTimeOffset when,
         T message,
+        TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleReminder(entity, key, when, message!, RepeatInterval: null);
+        var command = new ReminderProtocol.ScheduleReminder(
+            entity,
+            key,
+            when,
+            message!,
+            RepeatInterval: null,
+            MaxDeliveryWindow: maxDeliveryWindow);
         return SendToSchedulerAsync<ReminderProtocol.ScheduleReminder, ReminderProtocol.ReminderScheduled>(
             command,
             ct,
@@ -134,6 +142,7 @@ public sealed class ReminderClientExtension : IExtension
     /// <param name="key">The unique key for this reminder.</param>
     /// <param name="when">When the reminder should fire.</param>
     /// <param name="message">The message to deliver when the reminder fires.</param>
+    /// <param name="maxDeliveryWindow">Optional maximum amount of time the reminder occurrence remains actionable after its due time.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A task that completes when the reminder is scheduled.</returns>
     /// <remarks>
@@ -146,9 +155,16 @@ public sealed class ReminderClientExtension : IExtension
         ReminderKey key,
         DateTimeOffset when,
         T message,
+        TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
-        return ScheduleSingleReminderAsync(new ReminderEntity(shardRegionName, entityId), key, when, message, ct);
+        return ScheduleSingleReminderAsync(
+            new ReminderEntity(shardRegionName, entityId),
+            key,
+            when,
+            message,
+            maxDeliveryWindow,
+            ct);
     }
 
     /// <summary>
@@ -160,6 +176,7 @@ public sealed class ReminderClientExtension : IExtension
     /// <param name="firstOccurrence">When the reminder should fire for the first time.</param>
     /// <param name="interval">The interval between recurring reminders.</param>
     /// <param name="message">The message to deliver when the reminder fires.</param>
+    /// <param name="maxDeliveryWindow">Optional maximum amount of time each recurring occurrence remains actionable after its due time.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A task that completes when the reminder is scheduled.</returns>
     /// <remarks>
@@ -172,9 +189,16 @@ public sealed class ReminderClientExtension : IExtension
         DateTimeOffset firstOccurrence,
         TimeSpan interval,
         T message,
+        TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleReminder(entity, key, firstOccurrence, message!, RepeatInterval: interval);
+        var command = new ReminderProtocol.ScheduleReminder(
+            entity,
+            key,
+            firstOccurrence,
+            message!,
+            RepeatInterval: interval,
+            MaxDeliveryWindow: maxDeliveryWindow);
         return SendToSchedulerAsync<ReminderProtocol.ScheduleReminder, ReminderProtocol.ReminderScheduled>(
             command,
             ct,
@@ -194,6 +218,7 @@ public sealed class ReminderClientExtension : IExtension
     /// <param name="firstOccurrence">When the reminder should fire for the first time.</param>
     /// <param name="interval">The interval between recurring reminders.</param>
     /// <param name="message">The message to deliver when the reminder fires.</param>
+    /// <param name="maxDeliveryWindow">Optional maximum amount of time each recurring occurrence remains actionable after its due time.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A task that completes when the reminder is scheduled.</returns>
     /// <remarks>
@@ -207,6 +232,7 @@ public sealed class ReminderClientExtension : IExtension
         DateTimeOffset firstOccurrence,
         TimeSpan interval,
         T message,
+        TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
         return ScheduleRecurringReminderAsync(
@@ -215,6 +241,7 @@ public sealed class ReminderClientExtension : IExtension
             firstOccurrence,
             interval,
             message,
+            maxDeliveryWindow,
             ct);
     }
 
@@ -232,13 +259,14 @@ public sealed class ReminderClientExtension : IExtension
         ReminderEnvelope envelope,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ReminderAck(envelope.Entity, envelope.Key);
+        var command = new ReminderProtocol.ReminderAck(envelope.Entity, envelope.Key, envelope.DueTimeUtc);
         return SendToSchedulerAsync<ReminderProtocol.ReminderAck, ReminderProtocol.ReminderAckResponse>(
             command,
             ct,
             errorMessage => new ReminderProtocol.ReminderAckResponse(
                 envelope.Entity,
                 envelope.Key,
+                envelope.DueTimeUtc,
                 ReminderAckResponseCode.Error,
                 errorMessage),
             AckTimeout);

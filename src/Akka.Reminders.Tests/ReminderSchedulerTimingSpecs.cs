@@ -225,6 +225,94 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
     }
 
     [Fact]
+    public async Task ReminderEnvelope_ShouldExposeDueTimeAndDeadlineMetadata()
+    {
+        var testProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", testProbe);
+
+        var client = Sys.ReminderClient().CreateClient("test-region", "entity-1");
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var dueTime = testScheduler.Now.AddSeconds(5);
+
+        var result = await client.ScheduleSingleReminderAsync(
+            new ReminderKey("deadline-reminder"),
+            dueTime,
+            "deadline message",
+            maxDeliveryWindow: TimeSpan.FromSeconds(2));
+
+        Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
+
+        testScheduler.Advance(TimeSpan.FromSeconds(6));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(dueTime, envelope.DueTimeUtc);
+        Assert.False(envelope.Deadline.IsInfinite);
+        Assert.False(envelope.Deadline.IsExpired(dueTime.AddSeconds(1)));
+        Assert.True(envelope.Deadline.IsExpired(dueTime.AddSeconds(3)));
+    }
+
+    [Fact]
+    public async Task RecurringReminder_ShouldScheduleNextOccurrenceWithoutWaitingForAck()
+    {
+        var testProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", testProbe);
+
+        var client = Sys.ReminderClient().CreateClient("test-region", "entity-1");
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var now = testScheduler.Now;
+        var interval = TimeSpan.FromSeconds(5);
+
+        var result = await client.ScheduleRecurringReminderAsync(
+            new ReminderKey("latest-only-recurring"),
+            now.AddSeconds(5),
+            interval,
+            "recurring message");
+
+        Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
+
+        testScheduler.Advance(TimeSpan.FromSeconds(6));
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal(now.AddSeconds(5), envelope1.DueTimeUtc);
+
+        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
+        var reminders = await client.ListRemindersAsync();
+        Assert.Contains(reminders.Reminders, r => r.DueTimeUtc == now.AddSeconds(10));
+    }
+
+    [Fact]
+    public async Task LateAckForSupersededRecurringOccurrence_ShouldReturnNotFound()
+    {
+        var testProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", testProbe);
+
+        var client = Sys.ReminderClient().CreateClient("test-region", "entity-1");
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var now = testScheduler.Now;
+        var interval = TimeSpan.FromSeconds(5);
+
+        var result = await client.ScheduleRecurringReminderAsync(
+            new ReminderKey("superseded-recurring"),
+            now.AddSeconds(5),
+            interval,
+            "recurring message");
+
+        Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
+
+        testScheduler.Advance(TimeSpan.FromSeconds(6));
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+
+        testScheduler.Advance(interval);
+        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal(now.AddSeconds(10), envelope2.DueTimeUtc);
+
+        var staleAck = await client.AckAsync(envelope1);
+        Assert.Equal(ReminderAckResponseCode.NotFound, staleAck.ResponseCode);
+
+        var currentAck = await client.AckAsync(envelope2);
+        Assert.Equal(ReminderAckResponseCode.Success, currentAck.ResponseCode);
+    }
+
+    [Fact]
     public async Task CancelledReminder_ShouldNotFire()
     {
         // Arrange

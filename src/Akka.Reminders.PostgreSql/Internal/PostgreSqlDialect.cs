@@ -23,24 +23,27 @@ internal sealed class PostgreSqlDialect : ISqlDialect
                 entity_id VARCHAR(255) NOT NULL,
                 reminder_key VARCHAR(255) NOT NULL,
                 when_utc TIMESTAMP WITH TIME ZONE NOT NULL,
+                due_time_utc TIMESTAMP WITH TIME ZONE NOT NULL,
                 repeat_interval_ticks BIGINT NULL,
                 serializer_id INTEGER NOT NULL,
                 manifest VARCHAR(500) NULL,
                 payload BYTEA NOT NULL,
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 last_failure_reason TEXT NULL,
+                max_delivery_window_ticks BIGINT NULL,
+                delivery_deadline_utc TIMESTAMP WITH TIME ZONE NULL,
                 is_completed BOOLEAN NOT NULL DEFAULT FALSE,
                 completed_at_utc TIMESTAMP WITH TIME ZONE NULL,
                 completion_status VARCHAR(20) NOT NULL DEFAULT 'Pending',
                 delivered_at_utc TIMESTAMP WITH TIME ZONE NULL,
                 ack_deadline_utc TIMESTAMP WITH TIME ZONE NULL,
 
-                CONSTRAINT pk_{tableName} PRIMARY KEY (shard_region_name, entity_id, reminder_key)
+                CONSTRAINT pk_{tableName} PRIMARY KEY (shard_region_name, entity_id, reminder_key, due_time_utc)
             );
 
             CREATE INDEX IF NOT EXISTS ix_{tableName}_due_reminders
             ON {fullTableName} (when_utc, shard_region_name, entity_id)
-            WHERE is_completed = FALSE;
+            WHERE is_completed = FALSE AND completion_status = 'Pending';
 
             CREATE INDEX IF NOT EXISTS ix_{tableName}_cleanup
             ON {fullTableName} (completed_at_utc)
@@ -48,24 +51,26 @@ internal sealed class PostgreSqlDialect : ISqlDialect
 
             CREATE INDEX IF NOT EXISTS ix_{tableName}_awaiting_ack
             ON {fullTableName} (ack_deadline_utc)
-            WHERE completion_status = 'AwaitingAck';
+            WHERE completion_status = 'AwaitingAck' AND is_completed = FALSE;
             """;
     }
 
-    public string GetUpsertReminderSql(string schemaName, string tableName)
+    public string GetBatchUpsertRemindersSql(string schemaName, string tableName, int count)
     {
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+        var values = string.Join(",\n                ",
+            Enumerable.Range(0, count).Select(i =>
+                $"(@ShardRegionName{i}, @EntityId{i}, @ReminderKey{i}, @WhenUtc{i}, @DueTimeUtc{i}, @RepeatIntervalTicks{i}, @SerializerId{i}, @Manifest{i}, @Payload{i}, @AttemptCount{i}, @LastFailureReason{i}, @MaxDeliveryWindowTicks{i}, @DeliveryDeadlineUtc{i}, FALSE, NULL, 'Pending', NULL, NULL)"));
 
         return $"""
             INSERT INTO {fullTableName}
-                (shard_region_name, entity_id, reminder_key, when_utc, repeat_interval_ticks,
+                (shard_region_name, entity_id, reminder_key, when_utc, due_time_utc, repeat_interval_ticks,
                  serializer_id, manifest, payload, attempt_count, last_failure_reason,
-                 is_completed, completed_at_utc, completion_status)
+                 max_delivery_window_ticks, delivery_deadline_utc,
+                 is_completed, completed_at_utc, completion_status, delivered_at_utc, ack_deadline_utc)
             VALUES
-                (@ShardRegionName, @EntityId, @ReminderKey, @WhenUtc, @RepeatIntervalTicks,
-                 @SerializerId, @Manifest, @Payload, @AttemptCount, @LastFailureReason,
-                 FALSE, NULL, 'Pending')
-            ON CONFLICT (shard_region_name, entity_id, reminder_key)
+                {values}
+            ON CONFLICT (shard_region_name, entity_id, reminder_key, due_time_utc)
             DO UPDATE SET
                 when_utc = EXCLUDED.when_utc,
                 repeat_interval_ticks = EXCLUDED.repeat_interval_ticks,
@@ -74,9 +79,13 @@ internal sealed class PostgreSqlDialect : ISqlDialect
                 payload = EXCLUDED.payload,
                 attempt_count = EXCLUDED.attempt_count,
                 last_failure_reason = EXCLUDED.last_failure_reason,
+                max_delivery_window_ticks = EXCLUDED.max_delivery_window_ticks,
+                delivery_deadline_utc = EXCLUDED.delivery_deadline_utc,
                 is_completed = FALSE,
                 completed_at_utc = NULL,
-                completion_status = 'Pending';
+                completion_status = 'Pending',
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL;
             """;
     }
 
@@ -88,51 +97,57 @@ internal sealed class PostgreSqlDialect : ISqlDialect
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
 
         return $"""
-            SELECT shard_region_name, entity_id, reminder_key, when_utc, repeat_interval_ticks,
-                   serializer_id, manifest, payload, attempt_count, last_failure_reason
+            SELECT shard_region_name, entity_id, reminder_key, when_utc, due_time_utc, repeat_interval_ticks,
+                   serializer_id, manifest, payload, attempt_count, last_failure_reason,
+                   max_delivery_window_ticks, delivery_deadline_utc
             FROM {fullTableName}
             WHERE is_completed = FALSE
               AND completion_status = 'Pending'
               AND when_utc <= @UntilDeadline
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
             ORDER BY when_utc ASC
             LIMIT {maxCount};
-            """;
-    }
-
-    public string GetMarkCompletedSql(string schemaName, string tableName)
-    {
-        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
-
-        return $"""
-            UPDATE {fullTableName}
-            SET is_completed = TRUE,
-                completed_at_utc = @CompletedAtUtc,
-                completion_status = @CompletionStatus
-            WHERE shard_region_name = @ShardRegionName
-              AND entity_id = @EntityId
-              AND reminder_key = @ReminderKey;
             """;
     }
 
     public string GetBatchMarkCompletedSql(string schemaName, string tableName, int count)
     {
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
-
         var values = string.Join(",\n                ",
             Enumerable.Range(0, count).Select(i =>
-                $"(@sr{i}::varchar, @eid{i}::varchar, @rk{i}::varchar)"));
+                $"(@sr{i}::varchar, @eid{i}::varchar, @rk{i}::varchar, @due{i}::timestamptz)"));
 
         return $"""
             UPDATE {fullTableName} t
             SET is_completed = TRUE,
                 completed_at_utc = @CompletedAtUtc,
-                completion_status = @CompletionStatus
+                completion_status = @CompletionStatus,
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL
             FROM (VALUES
                 {values}
-            ) AS v(shard_region_name, entity_id, reminder_key)
+            ) AS v(shard_region_name, entity_id, reminder_key, due_time_utc)
             WHERE t.shard_region_name = v.shard_region_name
               AND t.entity_id = v.entity_id
-              AND t.reminder_key = v.reminder_key;
+              AND t.reminder_key = v.reminder_key
+              AND t.due_time_utc = v.due_time_utc;
+            """;
+    }
+
+    public string GetExpireRemindersSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+
+        return $"""
+            UPDATE {fullTableName}
+            SET is_completed = TRUE,
+                completed_at_utc = @Now,
+                completion_status = 'Expired',
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL
+            WHERE is_completed = FALSE
+              AND delivery_deadline_utc IS NOT NULL
+              AND delivery_deadline_utc <= @Now;
             """;
     }
 
@@ -154,7 +169,9 @@ internal sealed class PostgreSqlDialect : ISqlDialect
         return $"""
             SELECT COUNT(*) AS total_count, MIN(when_utc) AS next_when_utc
             FROM {fullTableName}
-            WHERE is_completed = FALSE;
+            WHERE is_completed = FALSE
+              AND completion_status = 'Pending'
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now);
             """;
     }
 
@@ -166,6 +183,8 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             SELECT when_utc
             FROM {fullTableName}
             WHERE is_completed = FALSE
+              AND completion_status = 'Pending'
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
             ORDER BY when_utc ASC
             LIMIT 1 OFFSET @Skip;
             """;
@@ -179,7 +198,9 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             UPDATE {fullTableName}
             SET is_completed = TRUE,
                 completed_at_utc = @CompletedAtUtc,
-                completion_status = 'Cancelled'
+                completion_status = 'Cancelled',
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL
             WHERE shard_region_name = @ShardRegionName
               AND entity_id = @EntityId
               AND reminder_key = @ReminderKey
@@ -195,7 +216,9 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             UPDATE {fullTableName}
             SET is_completed = TRUE,
                 completed_at_utc = @CompletedAtUtc,
-                completion_status = 'Cancelled'
+                completion_status = 'Cancelled',
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL
             WHERE shard_region_name = @ShardRegionName
               AND entity_id = @EntityId
               AND is_completed = FALSE;
@@ -207,29 +230,39 @@ internal sealed class PostgreSqlDialect : ISqlDialect
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
 
         return $"""
-            SELECT shard_region_name, entity_id, reminder_key, when_utc, repeat_interval_ticks,
-                   serializer_id, manifest, payload, attempt_count, last_failure_reason, is_completed
+            SELECT shard_region_name, entity_id, reminder_key, when_utc, due_time_utc, repeat_interval_ticks,
+                   serializer_id, manifest, payload, attempt_count, last_failure_reason,
+                   max_delivery_window_ticks, delivery_deadline_utc
             FROM {fullTableName}
             WHERE shard_region_name = @ShardRegionName
               AND entity_id = @EntityId
               AND is_completed = FALSE
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
             ORDER BY when_utc ASC;
             """;
     }
 
-    public string GetMarkAsAwaitingAckSql(string schemaName, string tableName)
+    public string GetBatchMarkAsAwaitingAckSql(string schemaName, string tableName, int count)
     {
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+        var values = string.Join(",\n                ",
+            Enumerable.Range(0, count).Select(i =>
+                $"(@sr{i}::varchar, @eid{i}::varchar, @rk{i}::varchar, @due{i}::timestamptz, @del{i}::timestamptz, @ack{i}::timestamptz)"));
 
         return $"""
-            UPDATE {fullTableName}
+            UPDATE {fullTableName} t
             SET completion_status = 'AwaitingAck',
-                delivered_at_utc = @DeliveredAtUtc,
-                ack_deadline_utc = @AckDeadlineUtc
-            WHERE shard_region_name = @ShardRegionName
-              AND entity_id = @EntityId
-              AND reminder_key = @ReminderKey
-              AND is_completed = FALSE;
+                delivered_at_utc = v.delivered_at_utc,
+                ack_deadline_utc = v.ack_deadline_utc
+            FROM (VALUES
+                {values}
+            ) AS v(shard_region_name, entity_id, reminder_key, due_time_utc, delivered_at_utc, ack_deadline_utc)
+            WHERE t.shard_region_name = v.shard_region_name
+              AND t.entity_id = v.entity_id
+              AND t.reminder_key = v.reminder_key
+              AND t.due_time_utc = v.due_time_utc
+              AND t.is_completed = FALSE
+              AND t.completion_status = 'Pending';
             """;
     }
 
@@ -241,8 +274,9 @@ internal sealed class PostgreSqlDialect : ISqlDialect
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
 
         return $"""
-            SELECT shard_region_name, entity_id, reminder_key, when_utc, repeat_interval_ticks,
-                   serializer_id, manifest, payload, attempt_count, last_failure_reason
+            SELECT shard_region_name, entity_id, reminder_key, when_utc, due_time_utc, repeat_interval_ticks,
+                   serializer_id, manifest, payload, attempt_count, last_failure_reason,
+                   max_delivery_window_ticks, delivery_deadline_utc
             FROM {fullTableName}
             WHERE completion_status = 'AwaitingAck'
               AND is_completed = FALSE
@@ -256,34 +290,20 @@ internal sealed class PostgreSqlDialect : ISqlDialect
     {
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
 
-        // Returns the full reminder row so the caller can read repeat_interval_ticks and
-        // reconstruct the ScheduledReminder for rescheduling recurring reminders.
         return $"""
             UPDATE {fullTableName}
             SET is_completed = TRUE,
                 completed_at_utc = @AckedAtUtc,
-                completion_status = 'Delivered'
+                completion_status = 'Delivered',
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL
             WHERE shard_region_name = @ShardRegionName
               AND entity_id = @EntityId
               AND reminder_key = @ReminderKey
+              AND due_time_utc = @DueTimeUtc
               AND completion_status = 'AwaitingAck'
               AND is_completed = FALSE
-            RETURNING shard_region_name, entity_id, reminder_key, when_utc, repeat_interval_ticks,
-                      serializer_id, manifest, payload, attempt_count, last_failure_reason;
-            """;
-    }
-
-    public string GetResetAwaitingAckSql(string schemaName, string tableName)
-    {
-        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
-
-        return $"""
-            UPDATE {fullTableName}
-            SET completion_status = 'Pending',
-                delivered_at_utc = NULL,
-                ack_deadline_utc = NULL
-            WHERE completion_status = 'AwaitingAck'
-              AND is_completed = FALSE;
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @AckedAtUtc);
             """;
     }
 

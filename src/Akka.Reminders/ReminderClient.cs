@@ -34,9 +34,16 @@ internal sealed class ReminderClient : IReminderClient
         ReminderKey key,
         DateTimeOffset when,
         T message,
+        TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleReminder(Entity, key, when, message!, RepeatInterval: null);
+        var command = new ReminderProtocol.ScheduleReminder(
+            Entity,
+            key,
+            when,
+            message!,
+            RepeatInterval: null,
+            MaxDeliveryWindow: maxDeliveryWindow);
 
         try
         {
@@ -71,9 +78,16 @@ internal sealed class ReminderClient : IReminderClient
         DateTimeOffset firstOccurrence,
         TimeSpan interval,
         T message,
+        TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleReminder(Entity, key, firstOccurrence, message!, RepeatInterval: interval);
+        var command = new ReminderProtocol.ScheduleReminder(
+            Entity,
+            key,
+            firstOccurrence,
+            message!,
+            RepeatInterval: interval,
+            MaxDeliveryWindow: maxDeliveryWindow);
 
         try
         {
@@ -205,7 +219,7 @@ internal sealed class ReminderClient : IReminderClient
         ReminderEnvelope envelope,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ReminderAck(envelope.Entity, envelope.Key);
+        var command = new ReminderProtocol.ReminderAck(envelope.Entity, envelope.Key, envelope.DueTimeUtc);
 
         try
         {
@@ -219,6 +233,7 @@ internal sealed class ReminderClient : IReminderClient
             return new ReminderProtocol.ReminderAckResponse(
                 envelope.Entity,
                 envelope.Key,
+                envelope.DueTimeUtc,
                 ReminderAckResponseCode.Error,
                 "Request timed out while acknowledging reminder");
         }
@@ -227,6 +242,7 @@ internal sealed class ReminderClient : IReminderClient
             return new ReminderProtocol.ReminderAckResponse(
                 envelope.Entity,
                 envelope.Key,
+                envelope.DueTimeUtc,
                 ReminderAckResponseCode.Error,
                 $"Error acknowledging reminder: {ex.Message}");
         }

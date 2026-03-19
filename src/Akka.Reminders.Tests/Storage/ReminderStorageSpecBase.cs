@@ -530,6 +530,89 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
 
     #endregion
 
+    #region Awaiting Ack / Deadline Tests
+
+    [Fact]
+    public async Task MarkRemindersAsAwaitingAck_ShouldRemoveReminderFromPendingOverview()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(5));
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        var awaitingAck = new AwaitingAckReminder(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc,
+            now,
+            now.AddMinutes(1));
+
+        var result = await Storage.MarkRemindersAsAwaitingAckAsync([awaitingAck]);
+        Assert.True(result);
+
+        var overview = await Storage.GetRemindersOverviewAsync(now);
+        Assert.Equal(0, overview.TotalPendingReminders);
+    }
+
+    [Fact]
+    public async Task AcknowledgeReminderAsync_ShouldRequireMatchingDueTime()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(5));
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        var awaitingAck = new AwaitingAckReminder(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc,
+            now,
+            now.AddMinutes(1));
+        await Storage.MarkRemindersAsAwaitingAckAsync([awaitingAck]);
+
+        var wrongAck = await Storage.AcknowledgeReminderAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc.AddSeconds(1),
+            now.AddSeconds(10));
+
+        Assert.False(wrongAck.Success);
+
+        var correctAck = await Storage.AcknowledgeReminderAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc,
+            now.AddSeconds(10));
+
+        Assert.True(correctAck.Success);
+    }
+
+    [Fact]
+    public async Task ExpireRemindersAsync_ShouldCompleteExpiredPendingReminder()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var dueTime = now.AddMinutes(-2);
+        var reminder = new ScheduledReminder(
+            CreateTestEntity(),
+            CreateTestKey("expiring-reminder"),
+            dueTime,
+            "stale",
+            MaxDeliveryWindow: TimeSpan.FromMinutes(1),
+            DeliveryDeadlineUtc: dueTime.AddMinutes(1),
+            OccurrenceDueTimeUtc: dueTime);
+
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        var expiredCount = await Storage.ExpireRemindersAsync(now);
+        Assert.True(expiredCount >= 1);
+
+        var overview = await Storage.GetRemindersOverviewAsync(now);
+        Assert.Equal(0, overview.TotalPendingReminders);
+
+        var reminders = await Storage.GetRemindersForEntityAsync(reminder.Entity);
+        Assert.Empty(reminders);
+    }
+
+    #endregion
+
     #region Mark Completed Tests
 
     [Fact]
@@ -539,7 +622,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var reminder = CreateTestReminder();
         await Storage!.ScheduleReminderAsync(reminder);
 
-        var completed = new CompletedReminder(reminder.Entity, reminder.Key, DateTimeOffset.UtcNow);
+        var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, DateTimeOffset.UtcNow);
 
         // Act
         var result = await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
@@ -555,7 +638,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var reminder = CreateTestReminder();
         await Storage!.ScheduleReminderAsync(reminder);
 
-        var completed = new CompletedReminder(reminder.Entity, reminder.Key, DateTimeOffset.UtcNow);
+        var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, DateTimeOffset.UtcNow);
         await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
 
         // Act
@@ -576,8 +659,8 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage!.ScheduleReminderAsync(reminder1);
         await Storage.ScheduleReminderAsync(reminder2);
 
-        var completed1 = new CompletedReminder(reminder1.Entity, reminder1.Key, DateTimeOffset.UtcNow);
-        var completed2 = new CompletedReminder(reminder2.Entity, reminder2.Key, DateTimeOffset.UtcNow);
+        var completed1 = new CompletedReminder(reminder1.Entity, reminder1.Key, reminder1.DueTimeUtc, DateTimeOffset.UtcNow);
+        var completed2 = new CompletedReminder(reminder2.Entity, reminder2.Key, reminder2.DueTimeUtc, DateTimeOffset.UtcNow);
 
         // Act
         var result = await Storage.MarkRemindersAsCompletedAsync(new[] { completed1, completed2 });
@@ -600,7 +683,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage!.ScheduleReminderAsync(reminder);
 
         var completedTime = DateTimeOffset.UtcNow.AddDays(-10);
-        var completed = new CompletedReminder(reminder.Entity, reminder.Key, completedTime);
+        var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, completedTime);
         await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
 
         // Act
@@ -618,7 +701,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage!.ScheduleReminderAsync(reminder);
 
         var recentCompletedTime = DateTimeOffset.UtcNow.AddDays(-3);
-        var completed = new CompletedReminder(reminder.Entity, reminder.Key, recentCompletedTime);
+        var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, recentCompletedTime);
         await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
 
         // Act - cleanup reminders older than 5 days

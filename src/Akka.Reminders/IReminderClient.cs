@@ -15,14 +15,25 @@ public interface IReminderClient
     /// If a reminder with the same key already exists, it will be overwritten.
     /// </summary>
     /// <typeparam name="T">The type of the message payload to deliver when the reminder fires.</typeparam>
-    Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync<T>(ReminderKey key, DateTimeOffset when, T message, CancellationToken ct = default);
+    Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync<T>(
+        ReminderKey key,
+        DateTimeOffset when,
+        T message,
+        TimeSpan? maxDeliveryWindow = null,
+        CancellationToken ct = default);
 
     /// <summary>
     /// Schedule a recurring reminder that fires at regular intervals.
     /// If a reminder with the same key already exists, it will be overwritten.
     /// </summary>
     /// <typeparam name="T">The type of the message payload to deliver when the reminder fires.</typeparam>
-    Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync<T>(ReminderKey key, DateTimeOffset firstOccurrence, TimeSpan interval, T message, CancellationToken ct = default);
+    Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync<T>(
+        ReminderKey key,
+        DateTimeOffset firstOccurrence,
+        TimeSpan interval,
+        T message,
+        TimeSpan? maxDeliveryWindow = null,
+        CancellationToken ct = default);
 
     Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(ReminderKey key, CancellationToken ct = default);
 

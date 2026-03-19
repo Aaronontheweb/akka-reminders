@@ -53,6 +53,13 @@ internal sealed class FailableReminderStorage : IReminderStorage
         return _inner.ScheduleReminderAsync(reminder, ct);
     }
 
+    public Task<bool> UpsertReminderOccurrencesAsync(IEnumerable<ScheduledReminder> reminders, CancellationToken ct = default)
+    {
+        if (FailWrites || FailScheduleWrites)
+            throw new TimeoutException("Simulated database write timeout");
+        return _inner.UpsertReminderOccurrencesAsync(reminders, ct);
+    }
+
     public Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(ReminderEntity entity, ReminderKey key, CancellationToken ct = default)
     {
         if (FailWrites)
@@ -72,6 +79,13 @@ internal sealed class FailableReminderStorage : IReminderStorage
         if (FailWrites)
             throw new TimeoutException("Simulated database write timeout");
         return _inner.CleanUpCompletedRemindersAsync(olderThan, ct);
+    }
+
+    public Task<int> ExpireRemindersAsync(DateTimeOffset now, CancellationToken ct = default)
+    {
+        if (FailWrites)
+            throw new TimeoutException("Simulated database write timeout");
+        return _inner.ExpireRemindersAsync(now, ct);
     }
 
     // --- Read operations: always work ---
@@ -106,17 +120,10 @@ internal sealed class FailableReminderStorage : IReminderStorage
         return _inner.GetTimedOutAckRemindersAsync(now, maxCount, ct);
     }
 
-    public Task<AckResult> AcknowledgeReminderAsync(ReminderEntity entity, ReminderKey key, DateTimeOffset ackedAt, CancellationToken ct = default)
+    public Task<AckResult> AcknowledgeReminderAsync(ReminderEntity entity, ReminderKey key, DateTimeOffset dueTimeUtc, DateTimeOffset ackedAt, CancellationToken ct = default)
     {
         if (FailWrites)
             throw new TimeoutException("Simulated database write timeout");
-        return _inner.AcknowledgeReminderAsync(entity, key, ackedAt, ct);
-    }
-
-    public Task<int> ResetAwaitingAckToPendingAsync(CancellationToken ct = default)
-    {
-        if (FailWrites)
-            throw new TimeoutException("Simulated database write timeout");
-        return _inner.ResetAwaitingAckToPendingAsync(ct);
+        return _inner.AcknowledgeReminderAsync(entity, key, dueTimeUtc, ackedAt, ct);
     }
 }

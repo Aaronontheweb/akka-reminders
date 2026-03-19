@@ -1,4 +1,9 @@
-﻿namespace Akka.Reminders.Storage;
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Akka.Reminders.Storage;
 
 public sealed record ReminderOverview
 {
@@ -80,7 +85,12 @@ public enum ReminderCompletionStatus
     /// Reminder has been delivered but the recipient has not yet acknowledged it.
     /// The reminder will be redelivered if the ack deadline passes without acknowledgement.
     /// </summary>
-    AwaitingAck = 4
+    AwaitingAck = 4,
+
+    /// <summary>
+    /// Reminder exceeded its delivery deadline and is no longer actionable.
+    /// </summary>
+    Expired = 5
 }
 
 /// <summary>
@@ -89,7 +99,8 @@ public enum ReminderCompletionStatus
 public sealed record CompletedReminder(
     ReminderEntity Entity,
     ReminderKey Key,
-    DateTimeOffset When,
+    DateTimeOffset DueTimeUtc,
+    DateTimeOffset CompletedAt,
     ReminderCompletionStatus Status = ReminderCompletionStatus.Delivered);
 
 /// <summary>
@@ -97,12 +108,14 @@ public sealed record CompletedReminder(
 /// </summary>
 /// <param name="Entity">The entity that owns this reminder.</param>
 /// <param name="Key">The unique reminder key.</param>
+/// <param name="DueTimeUtc">The original due time that identifies this reminder occurrence.</param>
 /// <param name="DeliveredAt">When the reminder was delivered to the recipient.</param>
 /// <param name="AckDeadline">The deadline by which the recipient must acknowledge the reminder.
 /// If this deadline passes without an ack, the reminder will be redelivered.</param>
 public sealed record AwaitingAckReminder(
     ReminderEntity Entity,
     ReminderKey Key,
+    DateTimeOffset DueTimeUtc,
     DateTimeOffset DeliveredAt,
     DateTimeOffset AckDeadline);
 
@@ -110,15 +123,8 @@ public sealed record AwaitingAckReminder(
 /// The result of acknowledging a reminder.
 /// </summary>
 /// <param name="Success">Whether the acknowledgement was successfully recorded.</param>
-/// <param name="IsRecurring">Whether the acknowledged reminder was a recurring reminder.</param>
-/// <param name="OriginalReminder">
-/// For recurring reminders, the original reminder record so the caller can schedule the next occurrence.
-/// <c>null</c> for one-time reminders or when <paramref name="Success"/> is <c>false</c>.
-/// </param>
 public sealed record AckResult(
-    bool Success,
-    bool IsRecurring,
-    ScheduledReminder? OriginalReminder);
+    bool Success);
 
 /// <summary>
 /// Storage implementation for reminders.
@@ -126,6 +132,7 @@ public sealed record AckResult(
 public interface IReminderStorage
 {
     Task<ReminderProtocol.ReminderScheduled> ScheduleReminderAsync(ScheduledReminder reminder, CancellationToken ct = default);
+    Task<bool> UpsertReminderOccurrencesAsync(IEnumerable<ScheduledReminder> reminders, CancellationToken ct = default);
     Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(ReminderEntity entity, ReminderKey key, CancellationToken ct = default);
     
     Task<IReadOnlyList<ScheduledReminder>> GetRemindersForEntityAsync(ReminderEntity entity, int take = 10, int skip = 0, CancellationToken ct = default);
@@ -171,6 +178,14 @@ public interface IReminderStorage
     Task<bool> CleanUpCompletedRemindersAsync(DateTimeOffset olderThan, CancellationToken ct = default);
 
     /// <summary>
+    /// Marks all active reminders whose delivery deadline has passed as expired.
+    /// </summary>
+    /// <param name="now">Current time used as the expiration cutoff.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The number of reminders transitioned to <see cref="ReminderCompletionStatus.Expired"/>.</returns>
+    Task<int> ExpireRemindersAsync(DateTimeOffset now, CancellationToken ct = default);
+
+    /// <summary>
     /// Marks reminders as delivered but awaiting acknowledgement from the recipient.
     /// Sets <c>completion_status = 'AwaitingAck'</c> and records the delivery and ack-deadline timestamps.
     /// The reminder remains visible to due-reminder queries until it is either acknowledged or its
@@ -198,10 +213,10 @@ public interface IReminderStorage
 
     /// <summary>
     /// Acknowledges a reminder, marking it as fully delivered.
-    /// For recurring reminders the original reminder record is returned so the caller can schedule the next occurrence.
     /// </summary>
     /// <param name="entity">The entity that owns the reminder.</param>
     /// <param name="key">The unique reminder key.</param>
+    /// <param name="dueTimeUtc">The due time that identifies the delivered reminder occurrence.</param>
     /// <param name="ackedAt">The time at which the ack was received.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>
@@ -211,20 +226,7 @@ public interface IReminderStorage
     Task<AckResult> AcknowledgeReminderAsync(
         ReminderEntity entity,
         ReminderKey key,
+        DateTimeOffset dueTimeUtc,
         DateTimeOffset ackedAt,
         CancellationToken ct = default);
-
-    /// <summary>
-    /// Resets all reminders stuck in <c>AwaitingAck</c> state back to <c>Pending</c> so they will
-    /// be re-delivered on the next fetch cycle.
-    /// </summary>
-    /// <remarks>
-    /// Called once during scheduler startup to recover reminders that were left in <c>AwaitingAck</c>
-    /// by a previous scheduler instance that crashed or was relocated before the ack arrived.
-    /// The in-memory <c>_awaitingAck</c> dictionary is always empty at startup, so without this
-    /// call those reminders would be permanently stuck.
-    /// </remarks>
-    /// <param name="ct">Cancellation token.</param>
-    /// <returns>The number of reminders that were reset to <c>Pending</c>.</returns>
-    Task<int> ResetAwaitingAckToPendingAsync(CancellationToken ct = default);
 }

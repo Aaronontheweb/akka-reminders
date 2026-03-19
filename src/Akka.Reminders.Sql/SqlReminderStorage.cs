@@ -32,6 +32,11 @@ public sealed class SqlReminderStorage : IReminderStorage
         CancellationToken cancellationToken = default)
         => _storage.ScheduleReminderAsync(reminder, cancellationToken);
 
+    public Task<bool> UpsertReminderOccurrencesAsync(
+        IEnumerable<ScheduledReminder> reminders,
+        CancellationToken cancellationToken = default)
+        => _storage.UpsertReminderOccurrencesAsync(reminders, cancellationToken);
+
     public Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(
         ReminderEntity entity,
         ReminderKey key,
@@ -72,6 +77,11 @@ public sealed class SqlReminderStorage : IReminderStorage
         CancellationToken cancellationToken = default)
         => _storage.CleanUpCompletedRemindersAsync(olderThan, cancellationToken);
 
+    public Task<int> ExpireRemindersAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+        => _storage.ExpireRemindersAsync(now, cancellationToken);
+
     public Task<bool> MarkRemindersAsAwaitingAckAsync(
         IEnumerable<AwaitingAckReminder> reminders,
         CancellationToken ct = default)
@@ -86,10 +96,8 @@ public sealed class SqlReminderStorage : IReminderStorage
     public Task<AckResult> AcknowledgeReminderAsync(
         ReminderEntity entity,
         ReminderKey key,
+        DateTimeOffset dueTimeUtc,
         DateTimeOffset ackedAt,
         CancellationToken ct = default)
-        => _storage.AcknowledgeReminderAsync(entity, key, ackedAt, ct);
-
-    public Task<int> ResetAwaitingAckToPendingAsync(CancellationToken ct = default)
-        => _storage.ResetAwaitingAckToPendingAsync(ct);
+        => _storage.AcknowledgeReminderAsync(entity, key, dueTimeUtc, ackedAt, ct);
 }

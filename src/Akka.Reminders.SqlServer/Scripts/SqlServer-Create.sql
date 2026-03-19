@@ -38,19 +38,22 @@ BEGIN
         EntityId NVARCHAR(255) NOT NULL,
         ReminderKey NVARCHAR(255) NOT NULL,
         WhenUtc DATETIME2 NOT NULL,
+        DueTimeUtc DATETIME2 NOT NULL,
         RepeatIntervalTicks BIGINT NULL,
         SerializerId INT NOT NULL,
         Manifest NVARCHAR(500) NULL,
         Payload VARBINARY(MAX) NOT NULL,
         AttemptCount INT NOT NULL DEFAULT 0,
         LastFailureReason NVARCHAR(MAX) NULL,
+        MaxDeliveryWindowTicks BIGINT NULL,
+        DeliveryDeadlineUtc DATETIME2 NULL,
         IsCompleted BIT NOT NULL DEFAULT 0,
         CompletedAtUtc DATETIME2 NULL,
         CompletionStatus VARCHAR(20) NOT NULL DEFAULT ''Pending'',
         DeliveredAtUtc DATETIME2 NULL,
         AckDeadlineUtc DATETIME2 NULL,
 
-        CONSTRAINT PK_' + @TableName + ' PRIMARY KEY (ShardRegionName, EntityId, ReminderKey)
+        CONSTRAINT PK_' + @TableName + ' PRIMARY KEY (ShardRegionName, EntityId, ReminderKey, DueTimeUtc)
     );';
 
     EXEC(@CreateTableSql);
@@ -60,7 +63,7 @@ BEGIN
     DECLARE @CreateIndex1Sql NVARCHAR(MAX) = '
     CREATE INDEX ' + @IndexName1 + '
     ON ' + @FullTableName + ' (WhenUtc, ShardRegionName, EntityId)
-    WHERE IsCompleted = 0;';
+    WHERE IsCompleted = 0 AND CompletionStatus = ''Pending'';';
 
     EXEC(@CreateIndex1Sql);
     PRINT 'Created index: ' + @IndexName1
@@ -78,7 +81,7 @@ BEGIN
     DECLARE @CreateIndex3Sql NVARCHAR(MAX) = '
     CREATE INDEX ' + @IndexName3 + '
     ON ' + @FullTableName + ' (AckDeadlineUtc)
-    WHERE CompletionStatus = ''AwaitingAck'';';
+    WHERE CompletionStatus = ''AwaitingAck'' AND IsCompleted = 0;';
 
     EXEC(@CreateIndex3Sql);
     PRINT 'Created index: ' + @IndexName3

@@ -88,7 +88,7 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal("message 1", envelope1.Message);
 
         // Ack "message 1" so it is removed from storage and won't be re-delivered on the next fetch
-        scheduler.Tell(new ReminderProtocol.ReminderAck(envelope1.Entity, envelope1.Key));
+        scheduler.Tell(new ReminderProtocol.ReminderAck(envelope1.Entity, envelope1.Key, envelope1.DueTimeUtc));
         await Task.Delay(50); // Allow ack to be processed
 
         testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
@@ -185,7 +185,7 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal("recurring message", envelope1.Message);
 
         // Ack the first delivery so the scheduler reschedulesthe next occurrence
-        scheduler.Tell(new ReminderProtocol.ReminderAck(envelope1.Entity, envelope1.Key));
+        scheduler.Tell(new ReminderProtocol.ReminderAck(envelope1.Entity, envelope1.Key, envelope1.DueTimeUtc));
         await Task.Delay(100); // Allow ack to be processed and next occurrence to be scheduled
 
         // Second occurrence
@@ -194,7 +194,7 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal("recurring message", envelope2.Message);
 
         // Ack the second delivery
-        scheduler.Tell(new ReminderProtocol.ReminderAck(envelope2.Entity, envelope2.Key));
+        scheduler.Tell(new ReminderProtocol.ReminderAck(envelope2.Entity, envelope2.Key, envelope2.DueTimeUtc));
         await Task.Delay(100); // Allow ack to be processed and next occurrence to be scheduled
 
         // Third occurrence
@@ -362,7 +362,7 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal("overdue message", envelope1.Message);
 
         // Ack the overdue reminder so it is removed from storage and won't be re-delivered
-        scheduler.Tell(new ReminderProtocol.ReminderAck(envelope1.Entity, envelope1.Key));
+        scheduler.Tell(new ReminderProtocol.ReminderAck(envelope1.Entity, envelope1.Key, envelope1.DueTimeUtc));
         await Task.Delay(50); // Allow ack to be processed
 
         // Future reminder hasn't fired yet
