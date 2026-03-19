@@ -44,7 +44,7 @@ public class ReminderStorageBenchmarks : SqlReminderBenchmarkBase
                 break;
 
             var completed = batch.Reminders
-                .Select(r => new CompletedReminder(r.Entity, r.Key, now))
+                .Select(r => new CompletedReminder(r.Entity, r.Key, r.DueTimeUtc, now))
                 .ToList();
 
             await Storage.MarkRemindersAsCompletedAsync(completed);
