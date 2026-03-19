@@ -39,8 +39,9 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         {
             await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
             await connection.OpenAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-            await using (var cancelCommand = connection.CreateCommand())
+            await using (var cancelCommand = CreateCommand(connection, transaction))
             {
                 cancelCommand.CommandText = _dialect.GetCancelReminderSql(_settings.SchemaName, _settings.TableName);
                 cancelCommand.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
@@ -51,13 +52,16 @@ public sealed class SqlServerReminderStorage : IReminderStorage
                 await cancelCommand.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            if (!await UpsertReminderOccurrencesAsync(connection, [reminder], cancellationToken))
+            if (!await UpsertReminderOccurrencesAsync(connection, transaction, [reminder], cancellationToken))
             {
+                await transaction.RollbackAsync(cancellationToken);
                 return new ReminderProtocol.ReminderScheduled(
                     reminder.ToScheduleReminder(),
                     ReminderScheduleResponseCode.Error,
                     "Failed to persist reminder occurrence");
             }
+
+            await transaction.CommitAsync(cancellationToken);
 
             return new ReminderProtocol.ReminderScheduled(reminder.ToScheduleReminder(), ReminderScheduleResponseCode.Success);
         }
@@ -75,11 +79,52 @@ public sealed class SqlServerReminderStorage : IReminderStorage
 
         await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
         await connection.OpenAsync(cancellationToken);
-        return await UpsertReminderOccurrencesAsync(connection, reminders, cancellationToken);
+        return await UpsertReminderOccurrencesAsync(connection, null, reminders, cancellationToken);
+    }
+
+    public async Task<bool> CommitReminderMutationsAsync(ReminderMutationBatch mutationBatch, CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        if (mutationBatch.IsEmpty)
+            return true;
+
+        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            if (!await UpsertReminderOccurrencesAsync(connection, transaction, mutationBatch.PendingUpserts, cancellationToken))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+
+            if (!await MarkRemindersAsCompletedAsync(connection, transaction, mutationBatch.CompletedReminders, cancellationToken))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+
+            if (!await MarkRemindersAsAwaitingAckAsync(connection, transaction, mutationBatch.AwaitingAckReminders, cancellationToken))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return true;
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return false;
+        }
     }
 
     private async Task<bool> UpsertReminderOccurrencesAsync(
         System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction? transaction,
         IEnumerable<ScheduledReminder> reminders,
         CancellationToken cancellationToken)
     {
@@ -92,7 +137,7 @@ public sealed class SqlServerReminderStorage : IReminderStorage
             for (var offset = 0; offset < remindersList.Count; offset += MaxUpsertedRemindersPerStatement)
             {
                 var chunk = remindersList.Skip(offset).Take(MaxUpsertedRemindersPerStatement).ToList();
-                await using var command = connection.CreateCommand();
+                await using var command = CreateCommand(connection, transaction);
                 command.CommandText = _dialect.GetBatchUpsertRemindersSql(_settings.SchemaName, _settings.TableName, chunk.Count);
                 command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
 
@@ -190,33 +235,7 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         {
             await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-
-            var groups = remindersList.GroupBy(r => (r.Status, r.CompletedAt));
-            foreach (var group in groups)
-            {
-                var items = group.ToList();
-                for (var offset = 0; offset < items.Count; offset += MaxRemindersPerStatusUpdate)
-                {
-                    var chunk = items.Skip(offset).Take(MaxRemindersPerStatusUpdate).ToList();
-                    await using var command = connection.CreateCommand();
-                    command.CommandText = _dialect.GetBatchMarkCompletedSql(_settings.SchemaName, _settings.TableName, chunk.Count);
-                    command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
-                    _dialect.AddParameter(command, "@CompletedAtUtc", group.Key.CompletedAt.UtcDateTime);
-                    _dialect.AddParameter(command, "@CompletionStatus", group.Key.Status.ToString());
-
-                    for (var i = 0; i < chunk.Count; i++)
-                    {
-                        _dialect.AddParameter(command, $"@sr{i}", chunk[i].Entity.ShardRegionName);
-                        _dialect.AddParameter(command, $"@eid{i}", chunk[i].Entity.EntityId);
-                        _dialect.AddParameter(command, $"@rk{i}", chunk[i].Key.Name);
-                        _dialect.AddParameter(command, $"@due{i}", chunk[i].DueTimeUtc.UtcDateTime);
-                    }
-
-                    await command.ExecuteNonQueryAsync(cancellationToken);
-                }
-            }
-
-            return true;
+            return await MarkRemindersAsCompletedAsync(connection, null, completedReminders, cancellationToken);
         }
         catch
         {
@@ -391,28 +410,7 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         {
             await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-
-            for (var offset = 0; offset < remindersList.Count; offset += MaxRemindersPerStatusUpdate)
-            {
-                var chunk = remindersList.Skip(offset).Take(MaxRemindersPerStatusUpdate).ToList();
-                await using var command = connection.CreateCommand();
-                command.CommandText = _dialect.GetBatchMarkAsAwaitingAckSql(_settings.SchemaName, _settings.TableName, chunk.Count);
-                command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
-
-                for (var i = 0; i < chunk.Count; i++)
-                {
-                    _dialect.AddParameter(command, $"@sr{i}", chunk[i].Entity.ShardRegionName);
-                    _dialect.AddParameter(command, $"@eid{i}", chunk[i].Entity.EntityId);
-                    _dialect.AddParameter(command, $"@rk{i}", chunk[i].Key.Name);
-                    _dialect.AddParameter(command, $"@due{i}", chunk[i].DueTimeUtc.UtcDateTime);
-                    _dialect.AddParameter(command, $"@del{i}", chunk[i].DeliveredAt.UtcDateTime);
-                    _dialect.AddParameter(command, $"@ack{i}", chunk[i].AckDeadline.UtcDateTime);
-                }
-
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            return true;
+            return await MarkRemindersAsAwaitingAckAsync(connection, null, reminders, cancellationToken);
         }
         catch
         {
@@ -442,27 +440,50 @@ public sealed class SqlServerReminderStorage : IReminderStorage
     }
 
     public async Task<AckResult> AcknowledgeReminderAsync(ReminderEntity entity, ReminderKey key, DateTimeOffset dueTimeUtc, DateTimeOffset ackedAt, CancellationToken cancellationToken = default)
+        => (await AcknowledgeRemindersAsync([new ReminderAcknowledgement(entity, key, dueTimeUtc, ackedAt)], cancellationToken))[0];
+
+    public async Task<IReadOnlyList<AckResult>> AcknowledgeRemindersAsync(
+        IEnumerable<ReminderAcknowledgement> acknowledgements,
+        CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
-        try
+        var results = new List<AckResult>();
+
+        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        foreach (var acknowledgement in acknowledgements)
         {
-            await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
-            await connection.OpenAsync(cancellationToken);
-            await using var command = connection.CreateCommand();
-            command.CommandText = _dialect.GetAcknowledgeReminderSql(_settings.SchemaName, _settings.TableName);
-            command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
-            _dialect.AddParameter(command, "@ShardRegionName", entity.ShardRegionName);
-            _dialect.AddParameter(command, "@EntityId", entity.EntityId);
-            _dialect.AddParameter(command, "@ReminderKey", key.Name);
-            _dialect.AddParameter(command, "@DueTimeUtc", dueTimeUtc.UtcDateTime);
-            _dialect.AddParameter(command, "@AckedAtUtc", ackedAt.UtcDateTime);
-            var count = await command.ExecuteNonQueryAsync(cancellationToken);
-            return new AckResult(count > 0);
+            try
+            {
+                await using var command = CreateCommand(connection, null);
+                command.CommandText = _dialect.GetAcknowledgeReminderSql(_settings.SchemaName, _settings.TableName);
+                command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+                _dialect.AddParameter(command, "@ShardRegionName", acknowledgement.Entity.ShardRegionName);
+                _dialect.AddParameter(command, "@EntityId", acknowledgement.Entity.EntityId);
+                _dialect.AddParameter(command, "@ReminderKey", acknowledgement.Key.Name);
+                _dialect.AddParameter(command, "@DueTimeUtc", acknowledgement.DueTimeUtc.UtcDateTime);
+                _dialect.AddParameter(command, "@AckedAtUtc", acknowledgement.AckedAt.UtcDateTime);
+                var count = await command.ExecuteNonQueryAsync(cancellationToken);
+                results.Add(new AckResult(
+                    acknowledgement.Entity,
+                    acknowledgement.Key,
+                    acknowledgement.DueTimeUtc,
+                    count > 0 ? ReminderAckStorageStatus.Success : ReminderAckStorageStatus.NotFound,
+                    count > 0 ? null : "Reminder occurrence was not awaiting acknowledgement or was already stale."));
+            }
+            catch (Exception ex)
+            {
+                results.Add(new AckResult(
+                    acknowledgement.Entity,
+                    acknowledgement.Key,
+                    acknowledgement.DueTimeUtc,
+                    ReminderAckStorageStatus.Error,
+                    ex.Message));
+            }
         }
-        catch
-        {
-            return new AckResult(false);
-        }
+
+        return results;
     }
 
     private Task EnsureInitializedAsync(CancellationToken cancellationToken)
@@ -508,6 +529,91 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         _dialect.AddParameter(command, $"@LastFailureReason{index}", reminder.LastFailureReason ?? (object)DBNull.Value);
         _dialect.AddParameter(command, $"@MaxDeliveryWindowTicks{index}", reminder.MaxDeliveryWindow?.Ticks ?? (object)DBNull.Value);
         _dialect.AddParameter(command, $"@DeliveryDeadlineUtc{index}", reminder.DeliveryDeadlineUtc?.UtcDateTime ?? (object)DBNull.Value);
+    }
+
+    private async Task<bool> MarkRemindersAsCompletedAsync(
+        System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction? transaction,
+        IEnumerable<CompletedReminder> completedReminders,
+        CancellationToken cancellationToken)
+    {
+        var remindersList = completedReminders.ToList();
+        if (remindersList.Count == 0)
+            return true;
+
+        var groups = remindersList.GroupBy(r => (r.Status, r.CompletedAt));
+        foreach (var group in groups)
+        {
+            var items = group.ToList();
+            for (var offset = 0; offset < items.Count; offset += MaxRemindersPerStatusUpdate)
+            {
+                var chunk = items.Skip(offset).Take(MaxRemindersPerStatusUpdate).ToList();
+                await using var command = CreateCommand(connection, transaction);
+                command.CommandText = _dialect.GetBatchMarkCompletedSql(_settings.SchemaName, _settings.TableName, chunk.Count);
+                command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+                _dialect.AddParameter(command, "@CompletedAtUtc", group.Key.CompletedAt.UtcDateTime);
+                _dialect.AddParameter(command, "@CompletionStatus", group.Key.Status.ToString());
+
+                for (var i = 0; i < chunk.Count; i++)
+                {
+                    _dialect.AddParameter(command, $"@sr{i}", chunk[i].Entity.ShardRegionName);
+                    _dialect.AddParameter(command, $"@eid{i}", chunk[i].Entity.EntityId);
+                    _dialect.AddParameter(command, $"@rk{i}", chunk[i].Key.Name);
+                    _dialect.AddParameter(command, $"@due{i}", chunk[i].DueTimeUtc.UtcDateTime);
+                }
+
+                var updated = await command.ExecuteNonQueryAsync(cancellationToken);
+                if (updated != chunk.Count)
+                    return false;
+            }
+        }
+
+        return true;
+    }
+
+    private async Task<bool> MarkRemindersAsAwaitingAckAsync(
+        System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction? transaction,
+        IEnumerable<AwaitingAckReminder> reminders,
+        CancellationToken cancellationToken)
+    {
+        var remindersList = reminders.ToList();
+        if (remindersList.Count == 0)
+            return true;
+
+        for (var offset = 0; offset < remindersList.Count; offset += MaxRemindersPerStatusUpdate)
+        {
+            var chunk = remindersList.Skip(offset).Take(MaxRemindersPerStatusUpdate).ToList();
+            await using var command = CreateCommand(connection, transaction);
+            command.CommandText = _dialect.GetBatchMarkAsAwaitingAckSql(_settings.SchemaName, _settings.TableName, chunk.Count);
+            command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+
+            for (var i = 0; i < chunk.Count; i++)
+            {
+                _dialect.AddParameter(command, $"@sr{i}", chunk[i].Entity.ShardRegionName);
+                _dialect.AddParameter(command, $"@eid{i}", chunk[i].Entity.EntityId);
+                _dialect.AddParameter(command, $"@rk{i}", chunk[i].Key.Name);
+                _dialect.AddParameter(command, $"@due{i}", chunk[i].DueTimeUtc.UtcDateTime);
+                _dialect.AddParameter(command, $"@del{i}", chunk[i].DeliveredAt.UtcDateTime);
+                _dialect.AddParameter(command, $"@ack{i}", chunk[i].AckDeadline.UtcDateTime);
+            }
+
+            var updated = await command.ExecuteNonQueryAsync(cancellationToken);
+            if (updated != chunk.Count)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static System.Data.Common.DbCommand CreateCommand(
+        System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction? transaction)
+    {
+        var command = connection.CreateCommand();
+        if (transaction is not null)
+            command.Transaction = transaction;
+        return command;
     }
 
     private (int serializerId, string? manifest, byte[] payload) SerializeMessage(object message)

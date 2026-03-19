@@ -120,11 +120,54 @@ public sealed record AwaitingAckReminder(
     DateTimeOffset AckDeadline);
 
 /// <summary>
+/// Batched mutation set applied by the scheduler inside a single storage commit.
+/// </summary>
+public sealed record ReminderMutationBatch(
+    IReadOnlyList<ScheduledReminder> PendingUpserts,
+    IReadOnlyList<CompletedReminder> CompletedReminders,
+    IReadOnlyList<AwaitingAckReminder> AwaitingAckReminders)
+{
+    public static ReminderMutationBatch Empty { get; } = new([], [], []);
+
+    public bool IsEmpty => PendingUpserts.Count == 0 && CompletedReminders.Count == 0 && AwaitingAckReminders.Count == 0;
+}
+
+/// <summary>
+/// Buffered acknowledgement write issued by the scheduler.
+/// </summary>
+public sealed record ReminderAcknowledgement(
+    ReminderEntity Entity,
+    ReminderKey Key,
+    DateTimeOffset DueTimeUtc,
+    DateTimeOffset AckedAt);
+
+/// <summary>
+/// Result status for a reminder acknowledgement write.
+/// </summary>
+public enum ReminderAckStorageStatus
+{
+    Success = 0,
+    NotFound = 1,
+    Error = 2
+}
+
+/// <summary>
 /// The result of acknowledging a reminder.
 /// </summary>
-/// <param name="Success">Whether the acknowledgement was successfully recorded.</param>
+/// <param name="Entity">Entity that owns the reminder occurrence.</param>
+/// <param name="Key">Reminder key.</param>
+/// <param name="DueTimeUtc">Occurrence identity.</param>
+/// <param name="Status">Ack write outcome.</param>
+/// <param name="ErrorMessage">Optional storage error details.</param>
 public sealed record AckResult(
-    bool Success);
+    ReminderEntity Entity,
+    ReminderKey Key,
+    DateTimeOffset DueTimeUtc,
+    ReminderAckStorageStatus Status,
+    string? ErrorMessage = null)
+{
+    public bool Success => Status == ReminderAckStorageStatus.Success;
+}
 
 /// <summary>
 /// Storage implementation for reminders.
@@ -133,6 +176,7 @@ public interface IReminderStorage
 {
     Task<ReminderProtocol.ReminderScheduled> ScheduleReminderAsync(ScheduledReminder reminder, CancellationToken ct = default);
     Task<bool> UpsertReminderOccurrencesAsync(IEnumerable<ScheduledReminder> reminders, CancellationToken ct = default);
+    Task<bool> CommitReminderMutationsAsync(ReminderMutationBatch mutationBatch, CancellationToken ct = default);
     Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(ReminderEntity entity, ReminderKey key, CancellationToken ct = default);
     
     Task<IReadOnlyList<ScheduledReminder>> GetRemindersForEntityAsync(ReminderEntity entity, int take = 10, int skip = 0, CancellationToken ct = default);
@@ -228,5 +272,9 @@ public interface IReminderStorage
         ReminderKey key,
         DateTimeOffset dueTimeUtc,
         DateTimeOffset ackedAt,
+        CancellationToken ct = default);
+
+    Task<IReadOnlyList<AckResult>> AcknowledgeRemindersAsync(
+        IEnumerable<ReminderAcknowledgement> acknowledgements,
         CancellationToken ct = default);
 }

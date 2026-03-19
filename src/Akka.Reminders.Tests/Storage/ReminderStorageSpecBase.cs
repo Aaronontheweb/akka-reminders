@@ -575,6 +575,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             now.AddSeconds(10));
 
         Assert.False(wrongAck.Success);
+        Assert.Equal(ReminderAckStorageStatus.NotFound, wrongAck.Status);
 
         var correctAck = await Storage.AcknowledgeReminderAsync(
             reminder.Entity,
@@ -583,6 +584,76 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             now.AddSeconds(10));
 
         Assert.True(correctAck.Success);
+        Assert.Equal(ReminderAckStorageStatus.Success, correctAck.Status);
+    }
+
+    [Fact]
+    public async Task CommitReminderMutationsAsync_ShouldAtomicallyMovePendingToAwaitingAckAndUpsertNextOccurrence()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = new ScheduledReminder(
+            CreateTestEntity(),
+            CreateTestKey("atomic-recurring"),
+            now.AddMinutes(1),
+            "payload",
+            RepeatInterval: TimeSpan.FromMinutes(1),
+            OccurrenceDueTimeUtc: now.AddMinutes(1));
+
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        var nextOccurrence = reminder with
+        {
+            When = reminder.DueTimeUtc.AddMinutes(1),
+            OccurrenceDueTimeUtc = reminder.DueTimeUtc.AddMinutes(1)
+        };
+
+        var awaiting = new AwaitingAckReminder(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc,
+            now,
+            now.AddMinutes(1));
+
+        var result = await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
+            [nextOccurrence],
+            [],
+            [awaiting]));
+
+        Assert.True(result);
+
+        var overview = await Storage.GetRemindersOverviewAsync(now);
+        Assert.Equal(1, overview.TotalPendingReminders);
+
+        var reminders = await Storage.GetRemindersForEntityAsync(reminder.Entity);
+        Assert.Equal(2, reminders.Count);
+        Assert.Contains(reminders, r => Math.Abs((r.DueTimeUtc - reminder.DueTimeUtc).TotalMilliseconds) < 0.001);
+        Assert.Contains(reminders, r => Math.Abs((r.DueTimeUtc - nextOccurrence.DueTimeUtc).TotalMilliseconds) < 0.001);
+
+        var ack = await Storage.AcknowledgeReminderAsync(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now.AddSeconds(5));
+        Assert.True(ack.Success);
+    }
+
+    [Fact]
+    public async Task AcknowledgeRemindersAsync_ShouldReturnPerOccurrenceResults()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(5));
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
+            [],
+            [],
+            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+
+        var missingDueTime = reminder.DueTimeUtc.AddMinutes(1);
+        var results = await Storage.AcknowledgeRemindersAsync([
+            new ReminderAcknowledgement(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now.AddSeconds(5)),
+            new ReminderAcknowledgement(reminder.Entity, reminder.Key, missingDueTime, now.AddSeconds(5))
+        ]);
+
+        Assert.Equal(2, results.Count);
+        Assert.Equal(ReminderAckStorageStatus.Success, results[0].Status);
+        Assert.Equal(ReminderAckStorageStatus.NotFound, results[1].Status);
     }
 
     [Fact]

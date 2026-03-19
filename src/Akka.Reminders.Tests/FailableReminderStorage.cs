@@ -60,6 +60,13 @@ internal sealed class FailableReminderStorage : IReminderStorage
         return _inner.UpsertReminderOccurrencesAsync(reminders, ct);
     }
 
+    public Task<bool> CommitReminderMutationsAsync(ReminderMutationBatch mutationBatch, CancellationToken ct = default)
+    {
+        if (FailWrites || FailScheduleWrites || FailMarkCompletedWrites)
+            throw new TimeoutException("Simulated database write timeout");
+        return _inner.CommitReminderMutationsAsync(mutationBatch, ct);
+    }
+
     public Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(ReminderEntity entity, ReminderKey key, CancellationToken ct = default)
     {
         if (FailWrites)
@@ -125,5 +132,12 @@ internal sealed class FailableReminderStorage : IReminderStorage
         if (FailWrites)
             throw new TimeoutException("Simulated database write timeout");
         return _inner.AcknowledgeReminderAsync(entity, key, dueTimeUtc, ackedAt, ct);
+    }
+
+    public Task<IReadOnlyList<AckResult>> AcknowledgeRemindersAsync(IEnumerable<ReminderAcknowledgement> acknowledgements, CancellationToken ct = default)
+    {
+        if (FailWrites)
+            throw new TimeoutException("Simulated database write timeout");
+        return _inner.AcknowledgeRemindersAsync(acknowledgements, ct);
     }
 }

@@ -37,6 +37,11 @@ public sealed class SqlReminderStorage : IReminderStorage
         CancellationToken cancellationToken = default)
         => _storage.UpsertReminderOccurrencesAsync(reminders, cancellationToken);
 
+    public Task<bool> CommitReminderMutationsAsync(
+        ReminderMutationBatch mutationBatch,
+        CancellationToken cancellationToken = default)
+        => _storage.CommitReminderMutationsAsync(mutationBatch, cancellationToken);
+
     public Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(
         ReminderEntity entity,
         ReminderKey key,
@@ -100,4 +105,9 @@ public sealed class SqlReminderStorage : IReminderStorage
         DateTimeOffset ackedAt,
         CancellationToken ct = default)
         => _storage.AcknowledgeReminderAsync(entity, key, dueTimeUtc, ackedAt, ct);
+
+    public Task<IReadOnlyList<AckResult>> AcknowledgeRemindersAsync(
+        IEnumerable<ReminderAcknowledgement> acknowledgements,
+        CancellationToken ct = default)
+        => _storage.AcknowledgeRemindersAsync(acknowledgements, ct);
 }

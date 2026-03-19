@@ -11,6 +11,7 @@ namespace Akka.Reminders.Storage;
 /// </remarks>
 public sealed class InMemoryReminderStorage : IReminderStorage
 {
+    private readonly object _sync = new();
     private readonly ConcurrentDictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder> _pendingReminders = new();
     private readonly ConcurrentDictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), (ScheduledReminder Reminder, AwaitingAckReminder State)> _awaitingAckReminders = new();
     private readonly ConcurrentDictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), CompletedReminder> _completedReminders = new();
@@ -29,35 +30,38 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         ScheduledReminder reminder,
         CancellationToken ct = default)
     {
-        var matchingPending = _pendingReminders.Keys
-            .Where(k => k.Entity.Equals(reminder.Entity) && k.Key.Equals(reminder.Key))
-            .ToList();
-        foreach (var key in matchingPending)
+        lock (_sync)
         {
-            _pendingReminders.TryRemove(key, out _);
-            _completedReminders[key] = new CompletedReminder(
-                key.Entity,
-                key.Key,
-                key.DueTimeUtc,
-                DateTimeOffset.UtcNow,
-                ReminderCompletionStatus.Cancelled);
-        }
+            var matchingPending = _pendingReminders.Keys
+                .Where(k => k.Entity.Equals(reminder.Entity) && k.Key.Equals(reminder.Key))
+                .ToList();
+            foreach (var key in matchingPending)
+            {
+                _pendingReminders.TryRemove(key, out _);
+                _completedReminders[key] = new CompletedReminder(
+                    key.Entity,
+                    key.Key,
+                    key.DueTimeUtc,
+                    DateTimeOffset.UtcNow,
+                    ReminderCompletionStatus.Cancelled);
+            }
 
-        var matchingAwaiting = _awaitingAckReminders.Keys
-            .Where(k => k.Entity.Equals(reminder.Entity) && k.Key.Equals(reminder.Key))
-            .ToList();
-        foreach (var key in matchingAwaiting)
-        {
-            _awaitingAckReminders.TryRemove(key, out _);
-            _completedReminders[key] = new CompletedReminder(
-                key.Entity,
-                key.Key,
-                key.DueTimeUtc,
-                DateTimeOffset.UtcNow,
-                ReminderCompletionStatus.Cancelled);
-        }
+            var matchingAwaiting = _awaitingAckReminders.Keys
+                .Where(k => k.Entity.Equals(reminder.Entity) && k.Key.Equals(reminder.Key))
+                .ToList();
+            foreach (var key in matchingAwaiting)
+            {
+                _awaitingAckReminders.TryRemove(key, out _);
+                _completedReminders[key] = new CompletedReminder(
+                    key.Entity,
+                    key.Key,
+                    key.DueTimeUtc,
+                    DateTimeOffset.UtcNow,
+                    ReminderCompletionStatus.Cancelled);
+            }
 
-        _pendingReminders[ToKey(reminder)] = reminder;
+            _pendingReminders[ToKey(reminder)] = reminder;
+        }
 
         return Task.FromResult(new ReminderProtocol.ReminderScheduled(
             reminder.ToScheduleReminder(),
@@ -69,11 +73,60 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         IEnumerable<ScheduledReminder> reminders,
         CancellationToken ct = default)
     {
-        foreach (var reminder in reminders)
+        lock (_sync)
         {
-            var key = ToKey(reminder);
-            _pendingReminders[key] = reminder;
-            _awaitingAckReminders.TryRemove(key, out _);
+            foreach (var reminder in reminders)
+            {
+                var key = ToKey(reminder);
+                _pendingReminders[key] = reminder;
+                _awaitingAckReminders.TryRemove(key, out _);
+            }
+        }
+
+        return Task.FromResult(true);
+    }
+
+    /// <inheritdoc />
+    public Task<bool> CommitReminderMutationsAsync(ReminderMutationBatch mutationBatch, CancellationToken ct = default)
+    {
+        if (mutationBatch.IsEmpty)
+            return Task.FromResult(true);
+
+        lock (_sync)
+        {
+            var pending = new Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder>(_pendingReminders);
+            var awaiting = new Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), (ScheduledReminder Reminder, AwaitingAckReminder State)>(_awaitingAckReminders);
+            var completed = new Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), CompletedReminder>(_completedReminders);
+
+            foreach (var reminder in mutationBatch.PendingUpserts)
+            {
+                var key = ToKey(reminder);
+                pending[key] = reminder;
+                awaiting.Remove(key);
+                completed.Remove(key);
+            }
+
+            foreach (var reminder in mutationBatch.CompletedReminders)
+            {
+                var key = ToKey(reminder);
+                pending.Remove(key);
+                awaiting.Remove(key);
+                completed[key] = reminder;
+            }
+
+            foreach (var reminder in mutationBatch.AwaitingAckReminders)
+            {
+                var key = ToKey(reminder);
+                if (!pending.TryGetValue(key, out var pendingReminder))
+                    return Task.FromResult(false);
+
+                pending.Remove(key);
+                awaiting[key] = (pendingReminder, reminder);
+            }
+
+            ReplaceContents(_pendingReminders, pending);
+            ReplaceContents(_awaitingAckReminders, awaiting);
+            ReplaceContents(_completedReminders, completed);
         }
 
         return Task.FromResult(true);
@@ -87,37 +140,40 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     {
         var cancelledKeys = new List<ReminderKey>();
 
-        var pendingKeys = _pendingReminders.Keys
-            .Where(k => k.Entity.Equals(entity) && k.Key.Equals(key))
-            .ToList();
-        foreach (var activeKey in pendingKeys)
+        lock (_sync)
         {
-            if (_pendingReminders.TryRemove(activeKey, out _))
+            var pendingKeys = _pendingReminders.Keys
+                .Where(k => k.Entity.Equals(entity) && k.Key.Equals(key))
+                .ToList();
+            foreach (var activeKey in pendingKeys)
             {
-                _completedReminders[activeKey] = new CompletedReminder(
-                    entity,
-                    key,
-                    activeKey.DueTimeUtc,
-                    DateTimeOffset.UtcNow,
-                    ReminderCompletionStatus.Cancelled);
-                cancelledKeys.Add(key);
+                if (_pendingReminders.TryRemove(activeKey, out _))
+                {
+                    _completedReminders[activeKey] = new CompletedReminder(
+                        entity,
+                        key,
+                        activeKey.DueTimeUtc,
+                        DateTimeOffset.UtcNow,
+                        ReminderCompletionStatus.Cancelled);
+                    cancelledKeys.Add(key);
+                }
             }
-        }
 
-        var awaitingKeys = _awaitingAckReminders.Keys
-            .Where(k => k.Entity.Equals(entity) && k.Key.Equals(key))
-            .ToList();
-        foreach (var activeKey in awaitingKeys)
-        {
-            if (_awaitingAckReminders.TryRemove(activeKey, out _))
+            var awaitingKeys = _awaitingAckReminders.Keys
+                .Where(k => k.Entity.Equals(entity) && k.Key.Equals(key))
+                .ToList();
+            foreach (var activeKey in awaitingKeys)
             {
-                _completedReminders[activeKey] = new CompletedReminder(
-                    entity,
-                    key,
-                    activeKey.DueTimeUtc,
-                    DateTimeOffset.UtcNow,
-                    ReminderCompletionStatus.Cancelled);
-                cancelledKeys.Add(key);
+                if (_awaitingAckReminders.TryRemove(activeKey, out _))
+                {
+                    _completedReminders[activeKey] = new CompletedReminder(
+                        entity,
+                        key,
+                        activeKey.DueTimeUtc,
+                        DateTimeOffset.UtcNow,
+                        ReminderCompletionStatus.Cancelled);
+                    cancelledKeys.Add(key);
+                }
             }
         }
 
@@ -142,37 +198,40 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     {
         var cancelledKeys = new HashSet<ReminderKey>();
 
-        var pendingKeys = _pendingReminders.Keys
-            .Where(k => k.Entity.Equals(entity))
-            .ToList();
-        foreach (var activeKey in pendingKeys)
+        lock (_sync)
         {
-            if (_pendingReminders.TryRemove(activeKey, out _))
+            var pendingKeys = _pendingReminders.Keys
+                .Where(k => k.Entity.Equals(entity))
+                .ToList();
+            foreach (var activeKey in pendingKeys)
             {
-                _completedReminders[activeKey] = new CompletedReminder(
-                    activeKey.Entity,
-                    activeKey.Key,
-                    activeKey.DueTimeUtc,
-                    DateTimeOffset.UtcNow,
-                    ReminderCompletionStatus.Cancelled);
-                cancelledKeys.Add(activeKey.Key);
+                if (_pendingReminders.TryRemove(activeKey, out _))
+                {
+                    _completedReminders[activeKey] = new CompletedReminder(
+                        activeKey.Entity,
+                        activeKey.Key,
+                        activeKey.DueTimeUtc,
+                        DateTimeOffset.UtcNow,
+                        ReminderCompletionStatus.Cancelled);
+                    cancelledKeys.Add(activeKey.Key);
+                }
             }
-        }
 
-        var awaitingKeys = _awaitingAckReminders.Keys
-            .Where(k => k.Entity.Equals(entity))
-            .ToList();
-        foreach (var activeKey in awaitingKeys)
-        {
-            if (_awaitingAckReminders.TryRemove(activeKey, out _))
+            var awaitingKeys = _awaitingAckReminders.Keys
+                .Where(k => k.Entity.Equals(entity))
+                .ToList();
+            foreach (var activeKey in awaitingKeys)
             {
-                _completedReminders[activeKey] = new CompletedReminder(
-                    activeKey.Entity,
-                    activeKey.Key,
-                    activeKey.DueTimeUtc,
-                    DateTimeOffset.UtcNow,
-                    ReminderCompletionStatus.Cancelled);
-                cancelledKeys.Add(activeKey.Key);
+                if (_awaitingAckReminders.TryRemove(activeKey, out _))
+                {
+                    _completedReminders[activeKey] = new CompletedReminder(
+                        activeKey.Entity,
+                        activeKey.Key,
+                        activeKey.DueTimeUtc,
+                        DateTimeOffset.UtcNow,
+                        ReminderCompletionStatus.Cancelled);
+                    cancelledKeys.Add(activeKey.Key);
+                }
             }
         }
 
@@ -267,12 +326,15 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         IEnumerable<CompletedReminder> completedReminders,
         CancellationToken ct = default)
     {
-        foreach (var completed in completedReminders)
+        lock (_sync)
         {
-            var key = ToKey(completed);
-            _pendingReminders.TryRemove(key, out _);
-            _awaitingAckReminders.TryRemove(key, out _);
-            _completedReminders[key] = completed;
+            foreach (var completed in completedReminders)
+            {
+                var key = ToKey(completed);
+                _pendingReminders.TryRemove(key, out _);
+                _awaitingAckReminders.TryRemove(key, out _);
+                _completedReminders[key] = completed;
+            }
         }
 
         return Task.FromResult(true);
@@ -345,16 +407,19 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     {
         var success = true;
 
-        foreach (var reminder in reminders)
+        lock (_sync)
         {
-            var key = ToKey(reminder);
-            if (!_pendingReminders.TryRemove(key, out var pending))
+            foreach (var reminder in reminders)
             {
-                success = false;
-                continue;
-            }
+                var key = ToKey(reminder);
+                if (!_pendingReminders.TryRemove(key, out var pending))
+                {
+                    success = false;
+                    continue;
+                }
 
-            _awaitingAckReminders[key] = (pending, reminder);
+                _awaitingAckReminders[key] = (pending, reminder);
+            }
         }
 
         return Task.FromResult(success);
@@ -377,38 +442,79 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     }
 
     /// <inheritdoc />
-    public Task<AckResult> AcknowledgeReminderAsync(
+    public async Task<AckResult> AcknowledgeReminderAsync(
         ReminderEntity entity,
         ReminderKey key,
         DateTimeOffset dueTimeUtc,
         DateTimeOffset ackedAt,
         CancellationToken ct = default)
+        => (await AcknowledgeRemindersAsync([new ReminderAcknowledgement(entity, key, dueTimeUtc, ackedAt)], ct))[0];
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<AckResult>> AcknowledgeRemindersAsync(
+        IEnumerable<ReminderAcknowledgement> acknowledgements,
+        CancellationToken ct = default)
     {
-        var reminderKey = (entity, key, dueTimeUtc.ToUniversalTime());
+        var results = new List<AckResult>();
 
-        if (!_awaitingAckReminders.TryRemove(reminderKey, out var awaiting))
+        lock (_sync)
         {
-            return Task.FromResult(new AckResult(false));
+            foreach (var acknowledgement in acknowledgements)
+            {
+                var reminderKey = (acknowledgement.Entity, acknowledgement.Key, acknowledgement.DueTimeUtc.ToUniversalTime());
+
+                if (!_awaitingAckReminders.TryRemove(reminderKey, out var awaiting))
+                {
+                    results.Add(new AckResult(
+                        acknowledgement.Entity,
+                        acknowledgement.Key,
+                        acknowledgement.DueTimeUtc,
+                        ReminderAckStorageStatus.NotFound,
+                        "Reminder occurrence was not awaiting acknowledgement or was already stale."));
+                    continue;
+                }
+
+                if (awaiting.Reminder.Deadline.IsExpired(acknowledgement.AckedAt))
+                {
+                    _completedReminders[reminderKey] = new CompletedReminder(
+                        acknowledgement.Entity,
+                        acknowledgement.Key,
+                        acknowledgement.DueTimeUtc,
+                        acknowledgement.AckedAt,
+                        ReminderCompletionStatus.Expired);
+                    results.Add(new AckResult(
+                        acknowledgement.Entity,
+                        acknowledgement.Key,
+                        acknowledgement.DueTimeUtc,
+                        ReminderAckStorageStatus.NotFound,
+                        "Reminder occurrence was not awaiting acknowledgement or was already stale."));
+                    continue;
+                }
+
+                _completedReminders[reminderKey] = new CompletedReminder(
+                    acknowledgement.Entity,
+                    acknowledgement.Key,
+                    acknowledgement.DueTimeUtc,
+                    acknowledgement.AckedAt,
+                    ReminderCompletionStatus.Delivered);
+
+                results.Add(new AckResult(
+                    acknowledgement.Entity,
+                    acknowledgement.Key,
+                    acknowledgement.DueTimeUtc,
+                    ReminderAckStorageStatus.Success));
+            }
         }
 
-        if (awaiting.Reminder.Deadline.IsExpired(ackedAt))
-        {
-            _completedReminders[reminderKey] = new CompletedReminder(
-                entity,
-                key,
-                dueTimeUtc,
-                ackedAt,
-                ReminderCompletionStatus.Expired);
-            return Task.FromResult(new AckResult(false));
-        }
+        return Task.FromResult<IReadOnlyList<AckResult>>(results);
+    }
 
-        _completedReminders[reminderKey] = new CompletedReminder(
-            entity,
-            key,
-            dueTimeUtc,
-            ackedAt,
-            ReminderCompletionStatus.Delivered);
-
-        return Task.FromResult(new AckResult(true));
+    private static void ReplaceContents<TValue>(
+        ConcurrentDictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), TValue> target,
+        Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), TValue> source)
+    {
+        target.Clear();
+        foreach (var pair in source)
+            target[pair.Key] = pair.Value;
     }
 }

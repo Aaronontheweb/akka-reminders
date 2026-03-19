@@ -75,6 +75,11 @@ public sealed record ReminderSettings
     public TimeSpan AckTimeoutCheckInterval { get; init; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// Maximum number of acknowledgements to flush in a single storage batch.
+    /// </summary>
+    public int AckFlushBatchSize { get; init; } = 256;
+
+    /// <summary>
     /// Validates reminder settings.
     /// </summary>
     public void Validate()
@@ -86,6 +91,9 @@ public sealed record ReminderSettings
         if (DeliveryCommitChunkSize < 1)
             throw new ArgumentOutOfRangeException(nameof(DeliveryCommitChunkSize),
                 "DeliveryCommitChunkSize must be greater than or equal to 1.");
+        if (AckFlushBatchSize < 1)
+            throw new ArgumentOutOfRangeException(nameof(AckFlushBatchSize),
+                "AckFlushBatchSize must be greater than or equal to 1.");
     }
 }
 
@@ -129,6 +137,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
     private bool _processingReminders;
     private bool _processingAckTimeouts;
+    private bool _ackFlushScheduled;
+
+    private readonly Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), BufferedAckWrite>
+        _bufferedAcknowledgements = new();
 
     private readonly ILoggingAdapter _log = Context.GetLogger();
 
@@ -198,6 +210,33 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
+    private sealed class FlushBufferedAcks
+    {
+        public static readonly FlushBufferedAcks Instance = new();
+
+        private FlushBufferedAcks()
+        {
+        }
+    }
+
+    private sealed class BufferedAckWrite
+    {
+        public BufferedAckWrite(ReminderAcknowledgement acknowledgement, IActorRef replyTo)
+        {
+            Acknowledgement = acknowledgement;
+            ReplyTo = [replyTo];
+        }
+
+        public ReminderAcknowledgement Acknowledgement { get; }
+
+        public List<IActorRef> ReplyTo { get; }
+
+        public void AddReplyTo(IActorRef replyTo)
+        {
+            ReplyTo.Add(replyTo);
+        }
+    }
+
     private void TryScheduleFetchReminders()
     {
         if (PendingReminders?.TotalPendingReminders > 0)
@@ -213,6 +252,95 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 delay = TimeSpan.Zero;
             Timers.StartSingleTimer(FetchReminders.Instance, FetchReminders.Instance, delay);
         }
+    }
+
+    private static (ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc) ToOccurrenceKey(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc)
+        => (entity, key, dueTimeUtc.ToUniversalTime());
+
+    private void ScheduleBufferedAckFlush()
+    {
+        if (_ackFlushScheduled || _bufferedAcknowledgements.Count == 0)
+            return;
+
+        _ackFlushScheduled = true;
+        Self.Tell(FlushBufferedAcks.Instance);
+    }
+
+    private static ReminderAckResponseCode MapAckStatus(ReminderAckStorageStatus status)
+        => status switch
+        {
+            ReminderAckStorageStatus.Success => ReminderAckResponseCode.Success,
+            ReminderAckStorageStatus.NotFound => ReminderAckResponseCode.NotFound,
+            _ => ReminderAckResponseCode.Error
+        };
+
+    private async Task FlushBufferedAcksAsync()
+    {
+        while (_bufferedAcknowledgements.Count > 0)
+        {
+            var batch = _bufferedAcknowledgements
+                .Take(Settings.AckFlushBatchSize)
+                .ToList();
+
+            foreach (var entry in batch)
+                _bufferedAcknowledgements.Remove(entry.Key);
+
+            IReadOnlyList<AckResult> results;
+            try
+            {
+                using var cts = new CancellationTokenSource(Settings.StorageTimeout);
+                results = await Storage.AcknowledgeRemindersAsync(
+                    batch.Select(b => b.Value.Acknowledgement),
+                    cts.Token);
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Failed to flush [{0}] buffered reminder acknowledgements", batch.Count);
+                results = batch
+                    .Select(b => new AckResult(
+                        b.Value.Acknowledgement.Entity,
+                        b.Value.Acknowledgement.Key,
+                        b.Value.Acknowledgement.DueTimeUtc,
+                        ReminderAckStorageStatus.Error,
+                        ex.Message))
+                    .ToList();
+            }
+
+            for (var i = 0; i < batch.Count; i++)
+            {
+                var buffered = batch[i].Value;
+                var result = i < results.Count
+                    ? results[i]
+                    : new AckResult(
+                        buffered.Acknowledgement.Entity,
+                        buffered.Acknowledgement.Key,
+                        buffered.Acknowledgement.DueTimeUtc,
+                        ReminderAckStorageStatus.Error,
+                        "Storage returned an incomplete acknowledgement batch result.");
+
+                var response = new ReminderProtocol.ReminderAckResponse(
+                    result.Entity,
+                    result.Key,
+                    result.DueTimeUtc,
+                    MapAckStatus(result.Status),
+                    result.ErrorMessage);
+
+                foreach (var replyTo in buffered.ReplyTo)
+                    replyTo.Tell(response, ActorRefs.NoSender);
+            }
+        }
+    }
+
+    private async Task FlushBufferedAcksIfAnyAsync()
+    {
+        if (_bufferedAcknowledgements.Count == 0)
+            return;
+
+        _ackFlushScheduled = false;
+        await FlushBufferedAcksAsync();
     }
 
     // Initial behavior: recover our schedule
@@ -259,6 +387,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 {
                     try
                     {
+                        await FlushBufferedAcksIfAnyAsync();
                         await ExpireRemindersAsync(TimeProvider.Now);
                         await ProcessReminders(TimeProvider.Now + Settings.MaxSlippage);
                     }
@@ -275,6 +404,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             case ReminderProtocol.ScheduleReminder scheduleSingle:
             {
                 _log.Debug("Scheduling reminder {0}", scheduleSingle);
+                var replyTo = Sender;
                 RunTask(async () =>
                 {
                     using var cts = new CancellationTokenSource(Settings.StorageTimeout);
@@ -285,7 +415,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         var shardRegion = ShardRegionResolver.TryResolve(reminder.Entity);
                         if (shardRegion is null)
                         {
-                            Sender.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle,
+                            replyTo.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle,
                                 ReminderScheduleResponseCode.ShardRegionNotFound,
                                 $"ShardRegion [{reminder.Entity.ShardRegionName}] not found"), ActorRefs.NoSender);
                             return;
@@ -293,7 +423,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                         // persist the reminder
                         var r = await Storage.ScheduleReminderAsync(reminder, cts.Token);
-                        Sender.Tell(r, ActorRefs.NoSender);
+                        replyTo.Tell(r, ActorRefs.NoSender);
 
                         // bail out early if we couldn't schedule or if it was a no-op
                         if (r.ResponseCode != ReminderScheduleResponseCode.Success)
@@ -305,7 +435,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     catch (Exception ex)
                     {
                         _log.Error(ex, "Failed to schedule reminder {0}", scheduleSingle);
-                        Sender.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle,
+                        replyTo.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle,
                             ReminderScheduleResponseCode.Error, ex.Message), ActorRefs.NoSender);
                     }
                 });
@@ -314,6 +444,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             case ReminderProtocol.CancelReminder cancel:
             {
                 _log.Debug("Cancelling reminder {0}", cancel);
+                var replyTo = Sender;
                 RunTask(async () =>
                 {
                     try
@@ -321,7 +452,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
                         var cancellationResult =
                             await Storage.CancelReminderAsync(cancel.Entity, cancel.Key, cts.Token);
-                        Sender.Tell(cancellationResult, ActorRefs.NoSender);
+                        replyTo.Tell(cancellationResult, ActorRefs.NoSender);
 
                         await ReloadPendingOverviewAsync();
                         TryScheduleFetchReminders();
@@ -329,7 +460,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     catch (Exception ex)
                     {
                         _log.Error(ex, "Failed to cancel reminder {0}", cancel);
-                        Sender.Tell(new ReminderProtocol.RemindersCancelled(cancel.Entity,
+                        replyTo.Tell(new ReminderProtocol.RemindersCancelled(cancel.Entity,
                             ReminderCancelResponseCode.Error,
                             [cancel.Key], ex.Message), ActorRefs.NoSender);
                     }
@@ -339,6 +470,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             case ReminderProtocol.CancelAllReminders cancelAll:
             {
                 _log.Debug("Cancelling all reminders for {0}", cancelAll.Entity);
+                var replyTo = Sender;
                 RunTask(async () =>
                 {
                     try
@@ -346,7 +478,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
                         var cancellationResult =
                             await Storage.CancelAllRemindersForEntityAsync(cancelAll.Entity, cts.Token);
-                        Sender.Tell(cancellationResult, ActorRefs.NoSender);
+                        replyTo.Tell(cancellationResult, ActorRefs.NoSender);
 
                         await ReloadPendingOverviewAsync();
                         TryScheduleFetchReminders();
@@ -354,7 +486,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     catch (Exception ex)
                     {
                         _log.Error(ex, "Failed to cancel all reminders for {0}", cancelAll);
-                        Sender.Tell(new ReminderProtocol.RemindersCancelled(cancelAll.Entity,
+                        replyTo.Tell(new ReminderProtocol.RemindersCancelled(cancelAll.Entity,
                             ReminderCancelResponseCode.Error,
                             [], ex.Message), ActorRefs.NoSender);
                     }
@@ -363,6 +495,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             }
             case ReminderProtocol.GetReminders getReminders:
             {
+                var replyTo = Sender;
                 RunTask(async () =>
                 {
                     try
@@ -371,7 +504,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         // TODO: add skip / take support
                         var queryResult = Storage.GetRemindersForEntityAsync(getReminders.Entity, ct:cts.Token);
                         var reminders = await queryResult;
-                        Sender.Tell(new ReminderProtocol.RemindersForEntity(
+                        replyTo.Tell(new ReminderProtocol.RemindersForEntity(
                             getReminders.Entity,
                             FetchRemindersResponseCode.Success,
                             reminders), ActorRefs.NoSender);
@@ -379,7 +512,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     catch (Exception ex)
                     {
                         _log.Error(ex, "Failed to get reminders for {0}", getReminders);
-                        Sender.Tell(new ReminderProtocol.RemindersForEntity(getReminders.Entity,
+                        replyTo.Tell(new ReminderProtocol.RemindersForEntity(getReminders.Entity,
                             FetchRemindersResponseCode.Error,
                             [], ex.Message), ActorRefs.NoSender);
                     }
@@ -416,50 +549,28 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             {
                 _log.Debug("Received ReminderAck for [{0}] / [{1}] due at [{2}]", ack.Entity, ack.Key, ack.DueTimeUtc);
                 var ackSender = Sender;
-
-                RunTask(async () =>
+                var occurrenceKey = ToOccurrenceKey(ack.Entity, ack.Key, ack.DueTimeUtc);
+                if (_bufferedAcknowledgements.TryGetValue(occurrenceKey, out var bufferedAck))
                 {
-                    try
-                    {
-                        using var ackCts = new CancellationTokenSource(Settings.StorageTimeout);
-                        var ackResult = await Storage.AcknowledgeReminderAsync(
-                            ack.Entity,
-                            ack.Key,
-                            ack.DueTimeUtc,
-                            TimeProvider.Now,
-                            ackCts.Token);
+                    bufferedAck.AddReplyTo(ackSender);
+                }
+                else
+                {
+                    _bufferedAcknowledgements[occurrenceKey] = new BufferedAckWrite(
+                        new ReminderAcknowledgement(ack.Entity, ack.Key, ack.DueTimeUtc, TimeProvider.Now),
+                        ackSender);
+                }
 
-                        if (ackResult.Success)
-                        {
-                            ackSender.Tell(new ReminderProtocol.ReminderAckResponse(
-                                ack.Entity,
-                                ack.Key,
-                                ack.DueTimeUtc,
-                                ReminderAckResponseCode.Success), ActorRefs.NoSender);
-                        }
-                        else
-                        {
-                            ackSender.Tell(new ReminderProtocol.ReminderAckResponse(
-                                ack.Entity,
-                                ack.Key,
-                                ack.DueTimeUtc,
-                                ReminderAckResponseCode.NotFound), ActorRefs.NoSender);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.Error(ex,
-                            "Error processing ReminderAck for [{0}] / [{1}] / [{2}]",
-                            ack.Entity, ack.Key, ack.DueTimeUtc);
-                        ackSender.Tell(new ReminderProtocol.ReminderAckResponse(
-                            ack.Entity,
-                            ack.Key,
-                            ack.DueTimeUtc,
-                            ReminderAckResponseCode.Error,
-                            ex.Message),
-                            ActorRefs.NoSender);
-                    }
-                });
+                ScheduleBufferedAckFlush();
+                break;
+            }
+            case FlushBufferedAcks:
+            {
+                _ackFlushScheduled = false;
+                if (_bufferedAcknowledgements.Count == 0)
+                    break;
+
+                RunTask(FlushBufferedAcksAsync);
                 break;
             }
             case CheckAckTimeouts:
@@ -472,6 +583,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 {
                     try
                     {
+                        await FlushBufferedAcksIfAnyAsync();
                         await ExpireRemindersAsync(TimeProvider.Now);
                         await ProcessAckTimeouts();
                     }
@@ -721,34 +833,27 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
             var writeFailed = false;
 
-            if (occurrencesToUpsert.Count > 0)
-            {
-                try
-                {
-                    using var upsertCts = new CancellationTokenSource(Settings.StorageTimeout);
-                    var upsertResult = await Storage.UpsertReminderOccurrencesAsync(occurrencesToUpsert, upsertCts.Token);
-                    if (!upsertResult)
-                        writeFailed = true;
-                }
-                catch (Exception ex)
-                {
-                    _log.Error(ex, "Failed to upsert [{0}] ack-timeout retry reminder(s)", occurrencesToUpsert.Count);
-                    writeFailed = true;
-                }
-            }
+            var mutationBatch = new ReminderMutationBatch(
+                occurrencesToUpsert,
+                terminalReminders,
+                []);
 
-            if (!writeFailed && terminalReminders.Count > 0)
+            if (!mutationBatch.IsEmpty)
             {
                 try
                 {
-                    using var markCts = new CancellationTokenSource(Settings.StorageTimeout);
-                    var markResult = await Storage.MarkRemindersAsCompletedAsync(terminalReminders, markCts.Token);
-                    if (!markResult)
+                    using var mutationCts = new CancellationTokenSource(Settings.StorageTimeout);
+                    var mutationResult = await Storage.CommitReminderMutationsAsync(mutationBatch, mutationCts.Token);
+                    if (!mutationResult)
                         writeFailed = true;
                 }
                 catch (Exception ex)
                 {
-                    _log.Error(ex, "Failed to mark [{0}] timed-out reminder(s) as terminal", terminalReminders.Count);
+                    _log.Error(ex,
+                        "Failed to commit [{0}] ack-timeout mutation(s) with [{1}] retry upsert(s) and [{2}] terminal completion(s)",
+                        occurrencesToUpsert.Count + terminalReminders.Count,
+                        occurrencesToUpsert.Count,
+                        terminalReminders.Count);
                     writeFailed = true;
                 }
             }
@@ -907,65 +1012,27 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 }
 
                 var writeFailed = false;
+                var mutationBatch = new ReminderMutationBatch(
+                    occurrencesToUpsert,
+                    terminalReminders,
+                    remindersToAwaitAck);
 
-                if (occurrencesToUpsert.Count > 0)
+                if (!mutationBatch.IsEmpty)
                 {
                     try
                     {
-                        using var upsertCts = new CancellationTokenSource(Settings.StorageTimeout);
-                        var upsertResult = await Storage.UpsertReminderOccurrencesAsync(occurrencesToUpsert, upsertCts.Token);
-                        if (!upsertResult)
-                        {
-                            _log.Error(
-                                "UpsertReminderOccurrencesAsync returned false for [{0}] reminder occurrence(s)",
-                                occurrencesToUpsert.Count);
+                        using var mutationCts = new CancellationTokenSource(Settings.StorageTimeout);
+                        var mutationResult = await Storage.CommitReminderMutationsAsync(mutationBatch, mutationCts.Token);
+                        if (!mutationResult)
                             writeFailed = true;
-                        }
                     }
                     catch (Exception ex)
                     {
                         _log.Error(ex,
-                            "Failed to upsert [{0}] reminder occurrence(s)",
-                            occurrencesToUpsert.Count);
-                        writeFailed = true;
-                    }
-                }
-
-                if (!writeFailed && terminalReminders.Count > 0)
-                {
-                    try
-                    {
-                        using var markCts = new CancellationTokenSource(Settings.StorageTimeout);
-                        var markResult = await Storage.MarkRemindersAsCompletedAsync(terminalReminders, markCts.Token);
-                        if (!markResult)
-                        {
-                            _log.Error(
-                                "MarkRemindersAsCompletedAsync returned false for [{0}] terminal reminder occurrence(s)",
-                                terminalReminders.Count);
-                            writeFailed = true;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.Error(ex,
-                            "Failed to mark [{0}] reminder occurrence(s) as terminal",
-                            terminalReminders.Count);
-                        writeFailed = true;
-                    }
-                }
-
-                if (!writeFailed && remindersToAwaitAck.Count > 0)
-                {
-                    try
-                    {
-                        using var awaitAckCts = new CancellationTokenSource(Settings.StorageTimeout);
-                        var awaitAckResult = await Storage.MarkRemindersAsAwaitingAckAsync(remindersToAwaitAck, awaitAckCts.Token);
-                        if (!awaitAckResult)
-                            writeFailed = true;
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.Error(ex, "Failed to mark [{0}] reminder occurrence(s) as awaiting ack", remindersToAwaitAck.Count);
+                            "Failed to commit reminder mutation chunk with [{0}] upsert(s), [{1}] completion(s), and [{2}] awaiting-ack transition(s)",
+                            occurrencesToUpsert.Count,
+                            terminalReminders.Count,
+                            remindersToAwaitAck.Count);
                         writeFailed = true;
                     }
                 }
