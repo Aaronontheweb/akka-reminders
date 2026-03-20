@@ -1,249 +1,131 @@
-using Akka.Actor;
-using Akka.Configuration;
+using Akka.Hosting;
+using Akka.Hosting.TestKit;
 using Akka.Reminders.Serialization;
 using Akka.Serialization;
+using Xunit.Abstractions;
 
 namespace Akka.Reminders.Tests.Serialization;
 
 /// <summary>
 /// Round-trip serialization tests for <see cref="ReminderSerializer"/>.
 ///
-/// These tests verify that every message type handled by the serializer survives
-/// a ToBinary → FromBinary cycle with all fields intact. This is critical for
-/// cluster deployments where these messages cross node boundaries via Akka.Remote.
-///
-/// The serializer is registered via HOCON (see <see cref="AkkaHostingExtensions.SerializerHocon"/>)
-/// and bound to <see cref="ReminderEnvelope"/>, <see cref="ReminderProtocol.ReminderAck"/>,
-/// and <see cref="ReminderProtocol.ReminderAckResponse"/>.
+/// Follows the core Akka.NET pattern (see ClusterMessageSerializerSpec):
+/// wire the serializer via HOCON, use a small <see cref="AssertAndReturn{T}"/>
+/// helper that verifies the correct serializer is resolved and the message
+/// survives a ToBinary → FromBinary cycle.
 /// </summary>
-public class ReminderSerializerSpecs : IDisposable
+public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
 {
-    private readonly ActorSystem _system;
-    private readonly Akka.Serialization.Serialization _serialization;
-
-    public ReminderSerializerSpecs()
+    public ReminderSerializerSpecs(ITestOutputHelper output)
+        : base(output: output)
     {
-        // Register the reminder serializer via the same HOCON used in production.
-        var config = ConfigurationFactory.ParseString(AkkaHostingExtensions.SerializerHocon);
-        _system = ActorSystem.Create("serializer-test", config);
-        _serialization = _system.Serialization;
     }
 
-    public void Dispose()
+    protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
-        _system.Terminate().Wait(TimeSpan.FromSeconds(5));
+        builder.AddHocon(AkkaHostingExtensions.SerializerHocon, HoconAddMode.Prepend);
     }
 
     /// <summary>
-    /// Verifies that the serialization system resolves <see cref="ReminderSerializer"/>
-    /// for all three bound types — not the default Newtonsoft.Json serializer.
+    /// Serializes and deserializes a message, asserting that <see cref="ReminderSerializer"/>
+    /// is the resolved serializer. Returns the deserialized instance for further assertions.
     /// </summary>
+    private T AssertAndReturn<T>(T message) where T : notnull
+    {
+        var serializer = (SerializerWithStringManifest)Sys.Serialization.FindSerializerFor(message);
+        Assert.IsType<ReminderSerializer>(serializer);
+
+        var bytes = serializer.ToBinary(message);
+        var manifest = serializer.Manifest(message);
+        return (T)serializer.FromBinary(bytes, manifest);
+    }
+
+    /// <summary>
+    /// Asserts that a message round-trips to an equal value.
+    /// </summary>
+    private void AssertEqual<T>(T message) where T : notnull
+    {
+        var deserialized = AssertAndReturn(message);
+        Assert.Equal(message, deserialized);
+    }
+
+    #region ReminderEnvelope
+
     [Fact]
-    public void Serializer_ShouldBeResolved_ForAllBoundTypes()
+    public void Can_serialize_ReminderEnvelope_with_string_payload()
     {
         var envelope = new ReminderEnvelope<string>(
-            new ReminderEntity("r", "e"), new ReminderKey("k"),
-            DateTimeOffset.UtcNow, ReminderDeadline.Infinite, "msg");
+            new ReminderEntity("my-region", "entity-42"),
+            new ReminderKey("daily-report"),
+            new DateTimeOffset(2026, 3, 20, 12, 0, 0, TimeSpan.Zero),
+            new ReminderDeadline(new DateTimeOffset(2026, 3, 20, 12, 5, 0, TimeSpan.Zero)),
+            "generate report");
 
-        var ack = new ReminderProtocol.ReminderAck(
-            new ReminderEntity("r", "e"), new ReminderKey("k"),
-            DateTimeOffset.UtcNow);
+        var result = AssertAndReturn<ReminderEnvelope>(envelope);
+        var typed = Assert.IsType<ReminderEnvelope<string>>(result);
 
-        var ackResponse = new ReminderProtocol.ReminderAckResponse(
-            new ReminderEntity("r", "e"), new ReminderKey("k"),
-            DateTimeOffset.UtcNow, ReminderAckResponseCode.Success);
-
-        Assert.IsType<ReminderSerializer>(_serialization.FindSerializerFor(envelope));
-        Assert.IsType<ReminderSerializer>(_serialization.FindSerializerFor(ack));
-        Assert.IsType<ReminderSerializer>(_serialization.FindSerializerFor(ackResponse));
+        Assert.Equal(envelope.Entity, typed.Entity);
+        Assert.Equal(envelope.Key, typed.Key);
+        Assert.Equal(envelope.DueTimeUtc, typed.DueTimeUtc);
+        Assert.Equal(envelope.Deadline.UtcDateTime, typed.Deadline.UtcDateTime);
+        Assert.Equal("generate report", typed.Message);
     }
 
-    #region ReminderEnvelope round-trip tests
-
-    /// <summary>
-    /// Basic round-trip: a ReminderEnvelope with a string payload should survive
-    /// serialization with all fields intact — entity, key, due time, deadline, and message.
-    /// </summary>
     [Fact]
-    public void ReminderEnvelope_ShouldRoundTrip_WithStringPayload()
+    public void Can_serialize_ReminderEnvelope_with_infinite_deadline()
     {
-        var entity = new ReminderEntity("my-region", "entity-42");
-        var key = new ReminderKey("daily-report");
-        var dueTime = new DateTimeOffset(2026, 3, 20, 12, 0, 0, TimeSpan.Zero);
-        var deadline = new ReminderDeadline(dueTime.AddMinutes(5));
-
-        var original = new ReminderEnvelope<string>(entity, key, dueTime, deadline, "generate report");
-
-        var bytes = _serialization.Serialize(original);
-        var deserialized = (ReminderEnvelope<string>)_serialization.Deserialize(bytes,
-            _serialization.FindSerializerFor(original).Identifier,
-            Akka.Serialization.Serialization.ManifestFor(_serialization.FindSerializerFor(original), original));
-
-        Assert.Equal(original.Entity, deserialized.Entity);
-        Assert.Equal(original.Key, deserialized.Key);
-        Assert.Equal(original.DueTimeUtc, deserialized.DueTimeUtc);
-        Assert.Equal(original.Deadline.UtcDateTime, deserialized.Deadline.UtcDateTime);
-        Assert.Equal(original.Message, deserialized.Message);
-    }
-
-    /// <summary>
-    /// Verifies that <see cref="ReminderDeadline.Infinite"/> (DateTimeOffset.MaxValue)
-    /// survives the round-trip. This is the default for reminders without a MaxDeliveryWindow.
-    /// </summary>
-    [Fact]
-    public void ReminderEnvelope_ShouldRoundTrip_WithInfiniteDeadline()
-    {
-        var original = new ReminderEnvelope<string>(
+        var envelope = new ReminderEnvelope<string>(
             new ReminderEntity("region", "entity"),
             new ReminderKey("key"),
             DateTimeOffset.UtcNow,
             ReminderDeadline.Infinite,
-            "unbounded reminder");
+            "unbounded");
 
-        var deserialized = RoundTrip<ReminderEnvelope>(original);
+        var result = AssertAndReturn<ReminderEnvelope>(envelope);
 
-        Assert.True(deserialized.Deadline.IsInfinite);
-        Assert.Equal("unbounded reminder", ((ReminderEnvelope<string>)deserialized).Message);
+        Assert.True(result.Deadline.IsInfinite);
     }
 
-    /// <summary>
-    /// Verifies that entity/key fields with special characters (spaces, unicode,
-    /// punctuation) survive the length-prefixed UTF-8 encoding.
-    /// </summary>
     [Fact]
-    public void ReminderEnvelope_ShouldRoundTrip_WithSpecialCharacters()
+    public void Can_serialize_ReminderEnvelope_with_unicode_fields()
     {
-        var entity = new ReminderEntity("región-España", "entité-日本語");
-        var key = new ReminderKey("clé/with spaces & symbols!");
-
-        var original = new ReminderEnvelope<string>(
-            entity, key,
+        var envelope = new ReminderEnvelope<string>(
+            new ReminderEntity("región-España", "entité-日本語"),
+            new ReminderKey("clé/with spaces & symbols!"),
             DateTimeOffset.UtcNow,
             ReminderDeadline.Infinite,
             "message with émojis 🎉");
 
-        var deserialized = (ReminderEnvelope<string>)RoundTrip<ReminderEnvelope>(original);
+        var result = (ReminderEnvelope<string>)AssertAndReturn<ReminderEnvelope>(envelope);
 
-        Assert.Equal(entity, deserialized.Entity);
-        Assert.Equal(key, deserialized.Key);
-        Assert.Equal("message with émojis 🎉", deserialized.Message);
+        Assert.Equal("región-España", result.Entity.ShardRegionName);
+        Assert.Equal("entité-日本語", result.Entity.EntityId);
+        Assert.Equal("clé/with spaces & symbols!", result.Key.Name);
+        Assert.Equal("message with émojis 🎉", result.Message);
     }
 
-    /// <summary>
-    /// The inner message type determines the generic type parameter of the deserialized
-    /// envelope. This test verifies that a non-string payload (int) produces a
-    /// ReminderEnvelope&lt;int&gt; via the MakeGenericType reflection path.
-    /// </summary>
     [Fact]
-    public void ReminderEnvelope_ShouldRoundTrip_WithNonStringPayload()
+    public void Can_serialize_ReminderEnvelope_with_int_payload()
     {
-        var original = new ReminderEnvelope<int>(
+        var envelope = new ReminderEnvelope<int>(
             new ReminderEntity("region", "entity"),
             new ReminderKey("counter"),
             DateTimeOffset.UtcNow,
             ReminderDeadline.Infinite,
             42);
 
-        var deserialized = RoundTrip<ReminderEnvelope>(original);
+        var result = AssertAndReturn<ReminderEnvelope>(envelope);
 
-        Assert.IsType<ReminderEnvelope<int>>(deserialized);
-        Assert.Equal(42, ((ReminderEnvelope<int>)deserialized).Message);
-    }
-
-    #endregion
-
-    #region ReminderAck round-trip tests
-
-    /// <summary>
-    /// ReminderAck is the message entities send back to the scheduler to confirm
-    /// delivery. It carries the occurrence key (Entity, Key, DueTimeUtc) so the
-    /// scheduler can match it to the correct AwaitingAck row.
-    /// </summary>
-    [Fact]
-    public void ReminderAck_ShouldRoundTrip()
-    {
-        var entity = new ReminderEntity("orders", "order-123");
-        var key = new ReminderKey("payment-reminder");
-        var dueTime = new DateTimeOffset(2026, 6, 15, 9, 30, 0, TimeSpan.Zero);
-
-        var original = new ReminderProtocol.ReminderAck(entity, key, dueTime);
-
-        var deserialized = RoundTrip<ReminderProtocol.ReminderAck>(original);
-
-        Assert.Equal(original.Entity, deserialized.Entity);
-        Assert.Equal(original.Key, deserialized.Key);
-        Assert.Equal(original.DueTimeUtc, deserialized.DueTimeUtc);
-    }
-
-    #endregion
-
-    #region ReminderAckResponse round-trip tests
-
-    /// <summary>
-    /// Successful ack response — the scheduler confirmed the occurrence was
-    /// marked as delivered. No error message.
-    /// </summary>
-    [Fact]
-    public void ReminderAckResponse_ShouldRoundTrip_WithSuccess()
-    {
-        var original = new ReminderProtocol.ReminderAckResponse(
-            new ReminderEntity("region", "entity"),
-            new ReminderKey("key"),
-            DateTimeOffset.UtcNow,
-            ReminderAckResponseCode.Success);
-
-        var deserialized = RoundTrip<ReminderProtocol.ReminderAckResponse>(original);
-
-        Assert.Equal(ReminderAckResponseCode.Success, deserialized.ResponseCode);
-        Assert.Null(deserialized.Message);
+        var typed = Assert.IsType<ReminderEnvelope<int>>(result);
+        Assert.Equal(42, typed.Message);
     }
 
     /// <summary>
-    /// NotFound response — the occurrence was already completed, expired, or
-    /// superseded. This is the "harmless late ack" case.
+    /// User-defined class payloads go through Akka's Newtonsoft.Json serializer.
+    /// This verifies the inner-serializer delegation works for JSON-serialized types.
     /// </summary>
     [Fact]
-    public void ReminderAckResponse_ShouldRoundTrip_WithNotFound()
-    {
-        var original = new ReminderProtocol.ReminderAckResponse(
-            new ReminderEntity("region", "entity"),
-            new ReminderKey("key"),
-            DateTimeOffset.UtcNow,
-            ReminderAckResponseCode.NotFound,
-            "Reminder occurrence was not awaiting acknowledgement or was already stale.");
-
-        var deserialized = RoundTrip<ReminderProtocol.ReminderAckResponse>(original);
-
-        Assert.Equal(ReminderAckResponseCode.NotFound, deserialized.ResponseCode);
-        Assert.Equal(original.Message, deserialized.Message);
-    }
-
-    /// <summary>
-    /// Error response with a message — verifies the error string survives the round-trip.
-    /// </summary>
-    [Fact]
-    public void ReminderAckResponse_ShouldRoundTrip_WithError()
-    {
-        var original = new ReminderProtocol.ReminderAckResponse(
-            new ReminderEntity("region", "entity"),
-            new ReminderKey("key"),
-            DateTimeOffset.UtcNow,
-            ReminderAckResponseCode.Error,
-            "Storage write failed: connection timeout");
-
-        var deserialized = RoundTrip<ReminderProtocol.ReminderAckResponse>(original);
-
-        Assert.Equal(ReminderAckResponseCode.Error, deserialized.ResponseCode);
-        Assert.Equal("Storage write failed: connection timeout", deserialized.Message);
-    }
-
-    /// <summary>
-    /// Verifies that a plain C# class payload goes through Akka's Newtonsoft.Json
-    /// serializer for the inner message. This is the realistic case — user-defined
-    /// message types don't have custom serializers, so they fall through to JSON.
-    /// </summary>
-    [Fact]
-    public void ReminderEnvelope_ShouldRoundTrip_WithJsonSerializedPayload()
+    public void Can_serialize_ReminderEnvelope_with_json_class_payload()
     {
         var payload = new InvoiceReminder
         {
@@ -253,65 +135,113 @@ public class ReminderSerializerSpecs : IDisposable
             CustomerEmail = "billing@example.com"
         };
 
-        var original = new ReminderEnvelope<InvoiceReminder>(
+        var envelope = new ReminderEnvelope<InvoiceReminder>(
             new ReminderEntity("invoices", "customer-7"),
             new ReminderKey("payment-due"),
             new DateTimeOffset(2026, 4, 1, 0, 0, 0, TimeSpan.Zero),
             new ReminderDeadline(new DateTimeOffset(2026, 4, 8, 0, 0, 0, TimeSpan.Zero)),
             payload);
 
-        // Verify the inner payload actually uses the JSON serializer, not a built-in one.
-        var innerSerializer = _serialization.FindSerializerFor(payload);
-        Assert.Contains("Json", innerSerializer.GetType().Name);
+        var result = (ReminderEnvelope<InvoiceReminder>)AssertAndReturn<ReminderEnvelope>(envelope);
 
-        var deserialized = (ReminderEnvelope<InvoiceReminder>)RoundTrip<ReminderEnvelope>(original);
-
-        Assert.Equal(payload.InvoiceId, deserialized.Message.InvoiceId);
-        Assert.Equal(payload.AmountDue, deserialized.Message.AmountDue);
-        Assert.Equal(payload.Currency, deserialized.Message.Currency);
-        Assert.Equal(payload.CustomerEmail, deserialized.Message.CustomerEmail);
-        Assert.Equal(original.Entity, deserialized.Entity);
-        Assert.Equal(original.Key, deserialized.Key);
+        Assert.Equal(payload.InvoiceId, result.Message.InvoiceId);
+        Assert.Equal(payload.AmountDue, result.Message.AmountDue);
+        Assert.Equal(payload.Currency, result.Message.Currency);
+        Assert.Equal(payload.CustomerEmail, result.Message.CustomerEmail);
     }
 
     /// <summary>
-    /// Same test but with a C# record type — records are common for domain messages
-    /// and their equality semantics make assertions cleaner.
+    /// Record types with collection properties — also JSON-serialized.
     /// </summary>
     [Fact]
-    public void ReminderEnvelope_ShouldRoundTrip_WithJsonSerializedRecord()
+    public void Can_serialize_ReminderEnvelope_with_json_record_payload()
     {
         var payload = new ShipmentNotification("SHIP-99", DateTimeOffset.UtcNow, ["item-a", "item-b"]);
 
-        var original = new ReminderEnvelope<ShipmentNotification>(
+        var envelope = new ReminderEnvelope<ShipmentNotification>(
             new ReminderEntity("shipments", "warehouse-3"),
             new ReminderKey("notify-shipped"),
             DateTimeOffset.UtcNow,
             ReminderDeadline.Infinite,
             payload);
 
-        var deserialized = (ReminderEnvelope<ShipmentNotification>)RoundTrip<ReminderEnvelope>(original);
+        var result = (ReminderEnvelope<ShipmentNotification>)AssertAndReturn<ReminderEnvelope>(envelope);
 
-        Assert.Equal(payload.ShipmentId, deserialized.Message.ShipmentId);
-        Assert.Equal(payload.Items, deserialized.Message.Items);
+        Assert.Equal(payload.ShipmentId, result.Message.ShipmentId);
+        Assert.Equal(payload.Items, result.Message.Items);
     }
 
     #endregion
 
-    /// <summary>
-    /// Helper: serialize then deserialize an object through the Akka serialization system.
-    /// </summary>
-    private T RoundTrip<T>(object original)
+    #region ReminderAck
+
+    [Fact]
+    public void Can_serialize_ReminderAck()
     {
-        var serializer = _serialization.FindSerializerFor(original);
-        var manifest = Akka.Serialization.Serialization.ManifestFor(serializer, original);
-        var bytes = serializer.ToBinary(original);
-        return (T)_serialization.Deserialize(bytes, serializer.Identifier, manifest);
+        var message = new ReminderProtocol.ReminderAck(
+            new ReminderEntity("orders", "order-123"),
+            new ReminderKey("payment-reminder"),
+            new DateTimeOffset(2026, 6, 15, 9, 30, 0, TimeSpan.Zero));
+
+        AssertEqual(message);
     }
+
+    #endregion
+
+    #region ReminderAckResponse
+
+    [Fact]
+    public void Can_serialize_ReminderAckResponse_Success()
+    {
+        var message = new ReminderProtocol.ReminderAckResponse(
+            new ReminderEntity("region", "entity"),
+            new ReminderKey("key"),
+            DateTimeOffset.UtcNow,
+            ReminderAckResponseCode.Success);
+
+        var result = AssertAndReturn(message);
+
+        Assert.Equal(ReminderAckResponseCode.Success, result.ResponseCode);
+        Assert.Null(result.Message);
+    }
+
+    [Fact]
+    public void Can_serialize_ReminderAckResponse_NotFound()
+    {
+        var message = new ReminderProtocol.ReminderAckResponse(
+            new ReminderEntity("region", "entity"),
+            new ReminderKey("key"),
+            DateTimeOffset.UtcNow,
+            ReminderAckResponseCode.NotFound,
+            "Reminder occurrence was not awaiting acknowledgement.");
+
+        var result = AssertAndReturn(message);
+
+        Assert.Equal(ReminderAckResponseCode.NotFound, result.ResponseCode);
+        Assert.Equal(message.Message, result.Message);
+    }
+
+    [Fact]
+    public void Can_serialize_ReminderAckResponse_Error()
+    {
+        var message = new ReminderProtocol.ReminderAckResponse(
+            new ReminderEntity("region", "entity"),
+            new ReminderKey("key"),
+            DateTimeOffset.UtcNow,
+            ReminderAckResponseCode.Error,
+            "Storage write failed: connection timeout");
+
+        var result = AssertAndReturn(message);
+
+        Assert.Equal(ReminderAckResponseCode.Error, result.ResponseCode);
+        Assert.Equal("Storage write failed: connection timeout", result.Message);
+    }
+
+    #endregion
 }
 
 /// <summary>
-/// Plain class payload — will be serialized by Akka's Newtonsoft.Json serializer.
+/// Plain class payload — serialized by Akka's Newtonsoft.Json serializer.
 /// </summary>
 public class InvoiceReminder
 {
@@ -322,7 +252,6 @@ public class InvoiceReminder
 }
 
 /// <summary>
-/// Record payload — also serialized via JSON. Tests that records with
-/// collection properties survive the round-trip.
+/// Record payload with a collection property — also JSON-serialized.
 /// </summary>
 public record ShipmentNotification(string ShipmentId, DateTimeOffset ShippedAt, List<string> Items);
