@@ -70,11 +70,6 @@ public sealed record ReminderSettings
     public TimeSpan AckTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// How frequently to scan for reminders whose ack deadline has passed.
-    /// </summary>
-    public TimeSpan AckTimeoutCheckInterval { get; init; } = TimeSpan.FromSeconds(10);
-
-    /// <summary>
     /// Maximum number of acknowledgements to flush in a single storage batch.
     /// </summary>
     public int AckFlushBatchSize { get; init; } = 256;

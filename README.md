@@ -384,10 +384,7 @@ Configure reminder behavior and performance characteristics:
         MaxRetryBackoff = TimeSpan.FromMinutes(10),
 
         // How long to wait for a recipient ack before retrying delivery
-        AckTimeout = TimeSpan.FromSeconds(30),
-
-        // How frequently to scan for reminders whose ack deadline has passed
-        AckTimeoutCheckInterval = TimeSpan.FromSeconds(10)
+        AckTimeout = TimeSpan.FromSeconds(30)
     }))
 ```
 
