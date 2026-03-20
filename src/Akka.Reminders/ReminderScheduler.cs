@@ -1166,7 +1166,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         delivery.Reminder.DueTimeUtc,
                         delivery.Reminder.Deadline,
                         delivery.Reminder.Message);
-                    ShardRegionResolver.DeliverReminder(delivery.Reminder.Entity, envelope, Self);
+                    ShardRegionResolver.DeliverReminder(delivery.Reminder.Entity, envelope);
                     totalDelivered += 1;
                 }
             }
