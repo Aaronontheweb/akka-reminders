@@ -10,11 +10,56 @@ namespace Akka.Reminders.Serialization;
 /// Akka.Remote and Akka.Cluster deployments.
 /// </summary>
 /// <remarks>
-/// The binary format for <see cref="ReminderEnvelope"/> writes the entity and key fields using
-/// length-prefixed UTF-8 strings, then delegates the inner message to Akka's existing serialization
-/// infrastructure (serializer id + manifest + payload). Deserialization reconstructs the strongly-typed
-/// <see cref="ReminderEnvelope{T}"/> by using the runtime type of the deserialized inner message via
-/// reflection to call <see cref="Type.MakeGenericType"/>.
+/// <para>
+/// Uses a hand-rolled binary format via <see cref="BinaryWriter"/>/<see cref="BinaryReader"/>.
+/// Strings are length-prefixed UTF-8 (BinaryWriter's default string encoding). Timestamps are
+/// stored as <c>Int64</c> UTC ticks. The inner message payload is delegated to Akka's own
+/// serialization infrastructure, so whatever serializer the user has configured for their
+/// message type handles that part.
+/// </para>
+///
+/// <para><b>Wire format: ReminderEnvelope (manifest "re")</b></para>
+/// <code>
+/// ┌──────────────────────────────────────────────────────────────┐
+/// │ ShardRegionName    : length-prefixed UTF-8 string           │
+/// │ EntityId           : length-prefixed UTF-8 string           │
+/// │ Key.Name           : length-prefixed UTF-8 string           │
+/// │ DueTimeUtc         : Int64 (UTC ticks)                      │
+/// │ Deadline           : Int64 (UTC ticks)                      │
+/// │ InnerSerializerId  : Int32 (Akka serializer identifier)     │
+/// │ InnerManifest      : length-prefixed UTF-8 string           │
+/// │ InnerPayloadLength : Int32                                  │
+/// │ InnerPayload       : byte[] (serialized by Akka)            │
+/// └──────────────────────────────────────────────────────────────┘
+/// </code>
+///
+/// <para><b>Wire format: ReminderAck (manifest "ra")</b></para>
+/// <code>
+/// ┌──────────────────────────────────────────────────────────────┐
+/// │ ShardRegionName    : length-prefixed UTF-8 string           │
+/// │ EntityId           : length-prefixed UTF-8 string           │
+/// │ Key.Name           : length-prefixed UTF-8 string           │
+/// │ DueTimeUtc         : Int64 (UTC ticks)                      │
+/// └──────────────────────────────────────────────────────────────┘
+/// </code>
+///
+/// <para><b>Wire format: ReminderAckResponse (manifest "rar")</b></para>
+/// <code>
+/// ┌──────────────────────────────────────────────────────────────┐
+/// │ ShardRegionName    : length-prefixed UTF-8 string           │
+/// │ EntityId           : length-prefixed UTF-8 string           │
+/// │ Key.Name           : length-prefixed UTF-8 string           │
+/// │ DueTimeUtc         : Int64 (UTC ticks)                      │
+/// │ ResponseCode       : Int32 (enum)                           │
+/// │ Message            : length-prefixed UTF-8 string (or "")   │
+/// └──────────────────────────────────────────────────────────────┘
+/// </code>
+///
+/// <para>
+/// Deserialization of <see cref="ReminderEnvelope"/> reconstructs the strongly-typed
+/// <see cref="ReminderEnvelope{T}"/> by using the runtime type of the deserialized inner
+/// message via reflection (<see cref="Type.MakeGenericType"/>).
+/// </para>
 /// </remarks>
 public sealed class ReminderSerializer : SerializerWithStringManifest
 {
