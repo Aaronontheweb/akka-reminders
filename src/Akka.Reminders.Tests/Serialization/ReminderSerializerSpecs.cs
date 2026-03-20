@@ -237,6 +237,65 @@ public class ReminderSerializerSpecs : IDisposable
         Assert.Equal("Storage write failed: connection timeout", deserialized.Message);
     }
 
+    /// <summary>
+    /// Verifies that a plain C# class payload goes through Akka's Newtonsoft.Json
+    /// serializer for the inner message. This is the realistic case — user-defined
+    /// message types don't have custom serializers, so they fall through to JSON.
+    /// </summary>
+    [Fact]
+    public void ReminderEnvelope_ShouldRoundTrip_WithJsonSerializedPayload()
+    {
+        var payload = new InvoiceReminder
+        {
+            InvoiceId = "INV-2026-0042",
+            AmountDue = 1299.99m,
+            Currency = "USD",
+            CustomerEmail = "billing@example.com"
+        };
+
+        var original = new ReminderEnvelope<InvoiceReminder>(
+            new ReminderEntity("invoices", "customer-7"),
+            new ReminderKey("payment-due"),
+            new DateTimeOffset(2026, 4, 1, 0, 0, 0, TimeSpan.Zero),
+            new ReminderDeadline(new DateTimeOffset(2026, 4, 8, 0, 0, 0, TimeSpan.Zero)),
+            payload);
+
+        // Verify the inner payload actually uses the JSON serializer, not a built-in one.
+        var innerSerializer = _serialization.FindSerializerFor(payload);
+        Assert.Contains("Json", innerSerializer.GetType().Name);
+
+        var deserialized = (ReminderEnvelope<InvoiceReminder>)RoundTrip<ReminderEnvelope>(original);
+
+        Assert.Equal(payload.InvoiceId, deserialized.Message.InvoiceId);
+        Assert.Equal(payload.AmountDue, deserialized.Message.AmountDue);
+        Assert.Equal(payload.Currency, deserialized.Message.Currency);
+        Assert.Equal(payload.CustomerEmail, deserialized.Message.CustomerEmail);
+        Assert.Equal(original.Entity, deserialized.Entity);
+        Assert.Equal(original.Key, deserialized.Key);
+    }
+
+    /// <summary>
+    /// Same test but with a C# record type — records are common for domain messages
+    /// and their equality semantics make assertions cleaner.
+    /// </summary>
+    [Fact]
+    public void ReminderEnvelope_ShouldRoundTrip_WithJsonSerializedRecord()
+    {
+        var payload = new ShipmentNotification("SHIP-99", DateTimeOffset.UtcNow, ["item-a", "item-b"]);
+
+        var original = new ReminderEnvelope<ShipmentNotification>(
+            new ReminderEntity("shipments", "warehouse-3"),
+            new ReminderKey("notify-shipped"),
+            DateTimeOffset.UtcNow,
+            ReminderDeadline.Infinite,
+            payload);
+
+        var deserialized = (ReminderEnvelope<ShipmentNotification>)RoundTrip<ReminderEnvelope>(original);
+
+        Assert.Equal(payload.ShipmentId, deserialized.Message.ShipmentId);
+        Assert.Equal(payload.Items, deserialized.Message.Items);
+    }
+
     #endregion
 
     /// <summary>
@@ -250,3 +309,20 @@ public class ReminderSerializerSpecs : IDisposable
         return (T)_serialization.Deserialize(bytes, serializer.Identifier, manifest);
     }
 }
+
+/// <summary>
+/// Plain class payload — will be serialized by Akka's Newtonsoft.Json serializer.
+/// </summary>
+public class InvoiceReminder
+{
+    public string InvoiceId { get; set; } = "";
+    public decimal AmountDue { get; set; }
+    public string Currency { get; set; } = "";
+    public string CustomerEmail { get; set; } = "";
+}
+
+/// <summary>
+/// Record payload — also serialized via JSON. Tests that records with
+/// collection properties survive the round-trip.
+/// </summary>
+public record ShipmentNotification(string ShipmentId, DateTimeOffset ShippedAt, List<string> Items);
