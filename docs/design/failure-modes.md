@@ -24,11 +24,19 @@ Recurring reminders are modeled as a stream of occurrences.
 
 On startup, the scheduler actor is in an initial behavior that stashes all client messages until initialization completes.
 
-1. `PreStart` calls `LoadReminderOverview`, which fetches both the `ReminderOverview` and the next awaiting-ack deadline from storage in a single async pipeline, bundled into an `InitResult` record.
+1. `PreStart` calls `LoadReminderOverview`, which fetches the `ReminderOverview` (an efficient `COUNT`/`MIN` aggregate — not a full table scan) and the next awaiting-ack deadline from storage in a single async pipeline, bundled into an `InitResult` record.
 2. The result is delivered to `Self` via `PipeTo`.
 3. On receipt, the scheduler schedules the ack-timeout check synchronously, transitions to the `Scheduling` behavior, then calls `UnstashAll` to replay buffered client messages.
 
 This ensures the scheduler is fully initialized — with ack-timeout tracking active — before any client messages are processed. There is no intermediate `RunTask` between the behavior transition and client message replay.
+
+### Recovery of AwaitingAck state after restart
+
+There is no explicit recovery step that resets `AwaitingAck` rows back to `Pending` on startup. Instead, `InitResult.NextAckDeadline` schedules the first ack-timeout check, which naturally discovers any `AwaitingAck` rows whose deadline has elapsed and retries or expires them through the normal `CheckAckTimeouts` path.
+
+### Reply ordering
+
+Schedule and cancel handlers reply to the caller **after** `ReloadPendingOverviewAsync` and `TryScheduleFetchReminders` complete. This guarantees the Ask response is a reliable signal that the fetch timer is registered — callers can depend on the scheduler being ready to process the reminder on the next tick.
 
 ## Processing Pipeline
 
