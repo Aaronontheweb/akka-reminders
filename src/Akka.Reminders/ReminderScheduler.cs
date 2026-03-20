@@ -212,15 +212,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
-    private sealed class RefreshAckTimeoutSchedule
-    {
-        public static readonly RefreshAckTimeoutSchedule Instance = new();
-
-        private RefreshAckTimeoutSchedule()
-        {
-        }
-    }
-
     private sealed class FlushBufferedAcks
     {
         public static readonly FlushBufferedAcks Instance = new();
@@ -417,13 +408,19 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     {
         switch (message)
         {
-            case ReminderOverview overview:
-                _log.Info("Loaded reminder overview from storage: {0}", overview);
-                PendingReminders = overview;
+            case InitResult init:
+                _log.Info("Loaded reminder overview from storage: {0}", init.Overview);
+                PendingReminders = init.Overview;
+
+                // Schedule ack timeout check BEFORE unstashing so the mailbox is
+                // fully ready when client messages are replayed — no RunTask gap.
+                if (init.NextAckDeadline.HasValue)
+                    ScheduleAckTimeoutCheck(init.NextAckDeadline.Value);
+
                 Become(Scheduling);
-                Stash.UnstashAll(); // Process any messages that arrived during initialization
+                Stash.UnstashAll();
                 TryScheduleFetchReminders();
-                Timers.Cancel(RestartBackoffTimer.Instance); // if needed
+                Timers.Cancel(RestartBackoffTimer.Instance);
                 break;
             case Status.Failure failure:
                 _log.Error(failure.Cause, "Failed to load reminder overview from storage - restarting...");
@@ -666,21 +663,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 });
                 break;
             }
-            case RefreshAckTimeoutSchedule:
-            {
-                RunTask(async () =>
-                {
-                    try
-                    {
-                        await RefreshAckTimeoutScheduleFromStorageAsync();
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.Warning(ex, "Failed to refresh next ack-timeout schedule from storage");
-                    }
-                });
-                break;
-            }
             case CheckAckTimeoutsCompleted:
                 _processingAckTimeouts = false;
                 break;
@@ -702,8 +684,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             Settings.PruneInterval,
             Settings.PruneInterval);
         _log.Info("Scheduled periodic pruning every {0}", Settings.PruneInterval);
-
-        Self.Tell(RefreshAckTimeoutSchedule.Instance);
     }
 
     protected override void PostStop()
@@ -735,17 +715,26 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
+    /// <summary>
+    /// Carries both the reminder overview and the next ack-timeout deadline so that
+    /// initialization completes in a single PipeTo — no stashed RunTask to block
+    /// the mailbox after UnstashAll.
+    /// </summary>
+    private sealed record InitResult(ReminderOverview Overview, DateTimeOffset? NextAckDeadline);
+
     private Task LoadReminderOverview()
     {
-        async Task<ReminderOverview> LoadAsync()
+        async Task<InitResult> LoadAsync()
         {
             await ExpireRemindersAsync(TimeProvider.Now);
             using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-            return await Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
+            var overview = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
+            var nextAckDeadline = await Storage.GetNextAwaitingAckDeadlineAsync(cts.Token);
+            return new InitResult(overview, nextAckDeadline);
         }
 
-        var reminders = LoadAsync();
-        return reminders.PipeTo(Self, success: overview => overview, failure: ex => new Status.Failure(ex));
+        var init = LoadAsync();
+        return init.PipeTo(Self, success: r => r, failure: ex => new Status.Failure(ex));
     }
 
     private static readonly Type OpenGenericEnvelopeType = typeof(ReminderEnvelope<>);

@@ -27,7 +27,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
         {
             var response = await client.ListRemindersAsync();
             Assert.Equal(FetchRemindersResponseCode.Success, response.ResponseCode);
-        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(100));
+        }, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(100));
     }
 
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)

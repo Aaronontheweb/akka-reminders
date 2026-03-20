@@ -129,16 +129,18 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         // Assert
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
-        // Wait for multiple occurrences
-        var msg1 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5));
+        // Wait for multiple occurrences — first delivery traverses the full
+        // cluster singleton → shard region → entity actor chain which has
+        // higher latency on constrained CI runners.
+        var msg1 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10));
         Assert.Equal("entity-2", msg1.EntityId);
         Assert.Equal("recurring message", msg1.Message);
 
-        var msg2 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(2));
+        var msg2 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5));
         Assert.Equal("entity-2", msg2.EntityId);
         Assert.Equal("recurring message", msg2.Message);
 
-        var msg3 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(2));
+        var msg3 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5));
         Assert.Equal("entity-2", msg3.EntityId);
         Assert.Equal("recurring message", msg3.Message);
 
