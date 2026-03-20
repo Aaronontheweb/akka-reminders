@@ -39,6 +39,15 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         _clusterFormed = true;
     }
 
+    private async Task EnsureReminderSchedulerReady(IReminderClient client)
+    {
+        await AwaitAssertAsync(async () =>
+        {
+            var response = await client.ListRemindersAsync();
+            Assert.Equal(FetchRemindersResponseCode.Success, response.ResponseCode);
+        }, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(100));
+    }
+
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
         // Configure a single-node cluster
@@ -73,6 +82,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         EnsureClusterFormed();
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient(ShardRegionName, "entity-1");
+        await EnsureReminderSchedulerReady(client);
 
         // Get the shard region to observe messages
         var shardRegion = await Sys.ActorSelection($"/system/sharding/{ShardRegionName}").ResolveOne(TimeSpan.FromSeconds(5));
@@ -104,6 +114,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         EnsureClusterFormed();
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient(ShardRegionName, "entity-2");
+        await EnsureReminderSchedulerReady(client);
 
         var probe = CreateTestProbe();
         Sys.EventStream.Subscribe(probe.Ref, typeof(TestEntity.ReminderReceived));
@@ -143,6 +154,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         var extension = Sys.ReminderClient();
         var client1 = extension.CreateClient(ShardRegionName, "entity-3");
         var client2 = extension.CreateClient(ShardRegionName, "entity-4");
+        await EnsureReminderSchedulerReady(client1);
 
         var probe = CreateTestProbe();
         Sys.EventStream.Subscribe(probe.Ref, typeof(TestEntity.ReminderReceived));
@@ -175,6 +187,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         EnsureClusterFormed();
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient(ShardRegionName, "entity-5");
+        await EnsureReminderSchedulerReady(client);
 
         var probe = CreateTestProbe();
         Sys.EventStream.Subscribe(probe.Ref, typeof(TestEntity.ReminderReceived));

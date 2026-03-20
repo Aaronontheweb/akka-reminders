@@ -301,6 +301,12 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         testScheduler.Advance(TimeSpan.FromSeconds(6));
         var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
 
+        // Let the scheduler finish persisting and timer-scheduling the superseding occurrence
+        // before we advance virtual time again.
+        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
+        var reminders = await client.ListRemindersAsync();
+        Assert.Contains(reminders.Reminders, r => r.DueTimeUtc == now.AddSeconds(10));
+
         testScheduler.Advance(interval);
         var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
         Assert.Equal(now.AddSeconds(10), envelope2.DueTimeUtc);
