@@ -484,14 +484,20 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                         // persist the reminder
                         var r = await Storage.ScheduleReminderAsync(reminder, cts.Token);
-                        replyTo.Tell(r, ActorRefs.NoSender);
 
                         // bail out early if we couldn't schedule or if it was a no-op
                         if (r.ResponseCode != ReminderScheduleResponseCode.Success)
+                        {
+                            replyTo.Tell(r, ActorRefs.NoSender);
                             return;
+                        }
 
                         await ReloadPendingOverviewAsync();
                         TryScheduleFetchReminders();
+
+                        // Reply AFTER the fetch timer is scheduled so the caller
+                        // knows the scheduler is ready to process this reminder.
+                        replyTo.Tell(r, ActorRefs.NoSender);
                     }
                     catch (Exception ex)
                     {
@@ -513,10 +519,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
                         var cancellationResult =
                             await Storage.CancelReminderAsync(cancel.Entity, cancel.Key, cts.Token);
-                        replyTo.Tell(cancellationResult, ActorRefs.NoSender);
 
                         await ReloadPendingOverviewAsync();
                         TryScheduleFetchReminders();
+                        replyTo.Tell(cancellationResult, ActorRefs.NoSender);
                     }
                     catch (Exception ex)
                     {
@@ -539,10 +545,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
                         var cancellationResult =
                             await Storage.CancelAllRemindersForEntityAsync(cancelAll.Entity, cts.Token);
-                        replyTo.Tell(cancellationResult, ActorRefs.NoSender);
 
                         await ReloadPendingOverviewAsync();
                         TryScheduleFetchReminders();
+                        replyTo.Tell(cancellationResult, ActorRefs.NoSender);
                     }
                     catch (Exception ex)
                     {
