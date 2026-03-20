@@ -19,7 +19,8 @@ public interface IShardRegionResolver
     /// </summary>
     /// <param name="entity">The target entity for the reminder.</param>
     /// <param name="envelope">The reminder envelope containing the payload and metadata.</param>
-    public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope);
+    /// <param name="sender">Optional sender actor reference. Defaults to <see cref="ActorRefs.NoSender"/>.</param>
+    public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope, IActorRef? sender = null);
 }
 
 /// <summary>
@@ -49,10 +50,10 @@ public sealed class DefaultShardRegionResolver : IShardRegionResolver
         return null;
     }
 
-    public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope)
+    public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope, IActorRef? sender = null)
     {
         var shardRegion = TryResolve(entity);
-        shardRegion?.Tell(new ShardingEnvelope(entity.EntityId, envelope));
+        shardRegion?.Tell(new ShardingEnvelope(entity.EntityId, envelope), sender ?? ActorRefs.NoSender);
     }
 }
 
@@ -116,9 +117,9 @@ public sealed class TestShardRegionResolver : IShardRegionResolver
         return _shardRegions.GetValueOrDefault(entity.ShardRegionName);
     }
 
-    public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope)
+    public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope, IActorRef? sender = null)
     {
         var actor = TryResolve(entity);
-        actor?.Tell(envelope);
+        actor?.Tell(envelope, sender ?? ActorRefs.NoSender);
     }
 }
