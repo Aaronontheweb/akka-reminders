@@ -5,7 +5,7 @@ namespace Akka.Reminders.Benchmarks;
 
 /// <summary>
 /// Benchmarks the critical path: fetching due reminders in batches and marking them complete.
-/// Uses real PostgreSQL via Testcontainers to measure actual I/O performance.
+/// Uses a real PostgreSQL instance to measure actual I/O performance.
 /// </summary>
 [Config(typeof(ReminderBenchmarkConfig))]
 public class ReminderStorageBenchmarks : SqlReminderBenchmarkBase
