@@ -484,6 +484,21 @@ public sealed class SqliteReminderStorage : IReminderStorage
         return reminders;
     }
 
+    public async Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+
+        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT MIN(ack_deadline_utc) FROM \"{_settings.TableName}\" WHERE completion_status = 'AwaitingAck' AND is_completed = 0;";
+        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is null || result == DBNull.Value ? null : ParseDateTimeOffset(result);
+    }
+
     public async Task<AckResult> AcknowledgeReminderAsync(
         ReminderEntity entity,
         ReminderKey key,
@@ -497,10 +512,74 @@ public sealed class SqliteReminderStorage : IReminderStorage
         CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
-        var results = new List<AckResult>();
+        var acknowledgementList = acknowledgements.ToList();
+        var results = new List<AckResult>(acknowledgementList.Count);
+
+        if (acknowledgementList.Count == 0)
+            return results;
 
         await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
         await connection.OpenAsync(cancellationToken);
+
+        for (var offset = 0; offset < acknowledgementList.Count; offset += MaxRemindersPerStatusUpdate)
+        {
+            var chunk = acknowledgementList.Skip(offset).Take(MaxRemindersPerStatusUpdate).ToList();
+            results.AddRange(await AcknowledgeReminderChunkAsync(connection, chunk, cancellationToken));
+        }
+
+        return results;
+    }
+
+    private async Task<IReadOnlyList<AckResult>> AcknowledgeReminderChunkAsync(
+        System.Data.Common.DbConnection connection,
+        IReadOnlyList<ReminderAcknowledgement> acknowledgements,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await using var command = CreateCommand(connection, transaction);
+            command.CommandText = _dialect.GetBatchAcknowledgeRemindersSql(_settings.TableName, acknowledgements.Count);
+            command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+
+            for (var i = 0; i < acknowledgements.Count; i++)
+            {
+                var acknowledgement = acknowledgements[i];
+                _dialect.AddParameter(command, $"@sr{i}", acknowledgement.Entity.ShardRegionName);
+                _dialect.AddParameter(command, $"@eid{i}", acknowledgement.Entity.EntityId);
+                _dialect.AddParameter(command, $"@rk{i}", acknowledgement.Key.Name);
+                _dialect.AddParameter(command, $"@due{i}", acknowledgement.DueTimeUtc.UtcDateTime);
+                _dialect.AddParameter(command, $"@acked{i}", acknowledgement.AckedAt.UtcDateTime);
+            }
+
+            var updated = await command.ExecuteNonQueryAsync(cancellationToken);
+            if (updated == acknowledgements.Count)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return acknowledgements.Select(ToSuccessfulAckResult).ToList();
+            }
+
+            await transaction.RollbackAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            return acknowledgements.Select(a => new AckResult(
+                a.Entity,
+                a.Key,
+                a.DueTimeUtc,
+                ReminderAckStorageStatus.Error,
+                ex.Message)).ToList();
+        }
+
+        return await AcknowledgeRemindersIndividuallyAsync(connection, acknowledgements, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<AckResult>> AcknowledgeRemindersIndividuallyAsync(
+        System.Data.Common.DbConnection connection,
+        IReadOnlyList<ReminderAcknowledgement> acknowledgements,
+        CancellationToken cancellationToken)
+    {
+        var results = new List<AckResult>(acknowledgements.Count);
 
         foreach (var acknowledgement in acknowledgements)
         {
@@ -517,12 +596,9 @@ public sealed class SqliteReminderStorage : IReminderStorage
                 _dialect.AddParameter(command, "@AckedAtUtc", acknowledgement.AckedAt.UtcDateTime);
 
                 var count = await command.ExecuteNonQueryAsync(cancellationToken);
-                results.Add(new AckResult(
-                    acknowledgement.Entity,
-                    acknowledgement.Key,
-                    acknowledgement.DueTimeUtc,
-                    count > 0 ? ReminderAckStorageStatus.Success : ReminderAckStorageStatus.NotFound,
-                    count > 0 ? null : "Reminder occurrence was not awaiting acknowledgement or was already stale."));
+                results.Add(count > 0
+                    ? ToSuccessfulAckResult(acknowledgement)
+                    : ToMissingAckResult(acknowledgement));
             }
             catch (Exception ex)
             {
@@ -537,6 +613,21 @@ public sealed class SqliteReminderStorage : IReminderStorage
 
         return results;
     }
+
+    private static AckResult ToSuccessfulAckResult(ReminderAcknowledgement acknowledgement)
+        => new(
+            acknowledgement.Entity,
+            acknowledgement.Key,
+            acknowledgement.DueTimeUtc,
+            ReminderAckStorageStatus.Success);
+
+    private static AckResult ToMissingAckResult(ReminderAcknowledgement acknowledgement)
+        => new(
+            acknowledgement.Entity,
+            acknowledgement.Key,
+            acknowledgement.DueTimeUtc,
+            ReminderAckStorageStatus.NotFound,
+            "Reminder occurrence was not awaiting acknowledgement or was already stale.");
 
     private Task EnsureInitializedAsync(CancellationToken cancellationToken)
     {

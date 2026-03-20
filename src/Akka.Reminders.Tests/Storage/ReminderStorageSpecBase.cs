@@ -657,6 +657,30 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     }
 
     [Fact]
+    public async Task GetNextAwaitingAckDeadlineAsync_ShouldReturnEarliestAwaitingDeadline()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var first = CreateTestReminder(CreateTestEntity("a", "1"), CreateTestKey("first"), now.AddMinutes(1));
+        var second = CreateTestReminder(CreateTestEntity("a", "2"), CreateTestKey("second"), now.AddMinutes(2));
+
+        await Storage!.ScheduleReminderAsync(first);
+        await Storage.ScheduleReminderAsync(second);
+
+        await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
+            [],
+            [],
+            [
+                new AwaitingAckReminder(first.Entity, first.Key, first.DueTimeUtc, now, now.AddSeconds(20)),
+                new AwaitingAckReminder(second.Entity, second.Key, second.DueTimeUtc, now, now.AddSeconds(10))
+            ]));
+
+        var deadline = await Storage.GetNextAwaitingAckDeadlineAsync();
+
+        Assert.NotNull(deadline);
+        Assert.True(Math.Abs((deadline!.Value - now.AddSeconds(10)).TotalMilliseconds) < 0.001);
+    }
+
+    [Fact]
     public async Task ExpireRemindersAsync_ShouldCompleteExpiredPendingReminder()
     {
         var now = DateTimeOffset.UtcNow;

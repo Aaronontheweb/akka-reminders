@@ -204,6 +204,48 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
     }
 
     [Fact]
+    public async Task Scheduler_ShouldResumeAckTimeouts_AfterRestart()
+    {
+        var testProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", testProbe);
+
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var now = testScheduler.Now;
+
+        var reminder = new ScheduledReminder(
+            new ReminderEntity("test-region", "entity-ack-timeout"),
+            new ReminderKey("ack-timeout"),
+            now.AddSeconds(-1),
+            "timeout message",
+            RepeatInterval: null,
+            AttemptCount: 0,
+            LastFailureReason: null);
+
+        await _storage.ScheduleReminderAsync(reminder, CancellationToken.None);
+
+        var firstScheduler = CreateScheduler();
+        await Task.Delay(100);
+        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
+
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal("timeout message", envelope.Message);
+
+        await firstScheduler.GracefulStop(TimeSpan.FromSeconds(5));
+
+        var recoveredScheduler = CreateScheduler();
+        await Task.Delay(100);
+
+        testScheduler.Advance(TimeSpan.FromSeconds(31));
+        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
+
+        var reminders = await _storage.GetRemindersForEntityAsync(reminder.Entity, take: 10, skip: 0, CancellationToken.None);
+        var retried = Assert.Single(reminders, r => r.AttemptCount == 1);
+        Assert.Equal(envelope.DueTimeUtc, retried.DueTimeUtc);
+        Assert.Equal(1, retried.AttemptCount);
+        Assert.Equal("Ack timeout", retried.LastFailureReason);
+    }
+
+    [Fact]
     public async Task Scheduler_ShouldRestart_AndRecover_AfterFailure()
     {
         // Arrange - Schedule a reminder through a live scheduler

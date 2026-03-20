@@ -305,6 +305,36 @@ internal sealed class SqliteDialect : ISqlDialect
             """;
     }
 
+    public string GetBatchAcknowledgeRemindersSql(string tableName, int count)
+    {
+        var fullTableName = $"\"{tableName}\"";
+        var predicates = string.Join(" OR ",
+            Enumerable.Range(0, count).Select(i =>
+                $"(shard_region_name = @sr{i} AND entity_id = @eid{i} AND reminder_key = @rk{i} AND due_time_utc = @due{i})"));
+        var ackedCases = string.Join("\n                ",
+            Enumerable.Range(0, count).Select(i =>
+                $"WHEN shard_region_name = @sr{i} AND entity_id = @eid{i} AND reminder_key = @rk{i} AND due_time_utc = @due{i} THEN @acked{i}"));
+
+        return $"""
+            UPDATE {fullTableName}
+            SET is_completed = 1,
+                completed_at_utc = CASE
+                    {ackedCases}
+                    ELSE completed_at_utc
+                END,
+                completion_status = 'Delivered',
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL
+            WHERE completion_status = 'AwaitingAck'
+              AND is_completed = 0
+              AND ({predicates})
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > CASE
+                    {ackedCases}
+                    ELSE completed_at_utc
+                END);
+            """;
+    }
+
     public DbConnection CreateConnection(string connectionString)
     {
         return new SqliteConnection(connectionString);

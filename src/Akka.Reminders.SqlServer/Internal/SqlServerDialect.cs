@@ -324,6 +324,33 @@ internal sealed class SqlServerDialect : ISqlDialect
             """;
     }
 
+    public string GetBatchAcknowledgeRemindersSql(string schemaName, string tableName, int count)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+        var values = string.Join(",\n                ",
+            Enumerable.Range(0, count).Select(i => $"(@sr{i}, @eid{i}, @rk{i}, @due{i}, @acked{i})"));
+
+        return $"""
+            UPDATE t
+            SET t.IsCompleted = 1,
+                t.CompletedAtUtc = v.AckedAtUtc,
+                t.CompletionStatus = 'Delivered',
+                t.DeliveredAtUtc = NULL,
+                t.AckDeadlineUtc = NULL
+            FROM {fullTableName} t
+            INNER JOIN (VALUES
+                {values}
+            ) AS v(ShardRegionName, EntityId, ReminderKey, DueTimeUtc, AckedAtUtc)
+            ON t.ShardRegionName = v.ShardRegionName
+               AND t.EntityId = v.EntityId
+               AND t.ReminderKey = v.ReminderKey
+               AND t.DueTimeUtc = v.DueTimeUtc
+            WHERE t.CompletionStatus = 'AwaitingAck'
+              AND t.IsCompleted = 0
+              AND (t.DeliveryDeadlineUtc IS NULL OR t.DeliveryDeadlineUtc > v.AckedAtUtc);
+            """;
+    }
+
     public DbConnection CreateConnection(string connectionString)
     {
         return new SqlConnection(connectionString);

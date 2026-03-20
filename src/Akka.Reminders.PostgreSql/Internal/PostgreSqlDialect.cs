@@ -262,7 +262,7 @@ internal sealed class PostgreSqlDialect : ISqlDialect
               AND t.reminder_key = v.reminder_key
               AND t.due_time_utc = v.due_time_utc
               AND t.is_completed = FALSE
-              AND t.completion_status = 'Pending';
+             AND t.completion_status = 'Pending';
             """;
     }
 
@@ -304,6 +304,33 @@ internal sealed class PostgreSqlDialect : ISqlDialect
               AND completion_status = 'AwaitingAck'
               AND is_completed = FALSE
               AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @AckedAtUtc);
+            """;
+    }
+
+    public string GetBatchAcknowledgeRemindersSql(string schemaName, string tableName, int count)
+    {
+        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+        var values = string.Join(",\n                ",
+            Enumerable.Range(0, count).Select(i =>
+                $"(@sr{i}::varchar, @eid{i}::varchar, @rk{i}::varchar, @due{i}::timestamptz, @acked{i}::timestamptz)"));
+
+        return $"""
+            UPDATE {fullTableName} t
+            SET is_completed = TRUE,
+                completed_at_utc = v.acked_at_utc,
+                completion_status = 'Delivered',
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL
+            FROM (VALUES
+                {values}
+            ) AS v(shard_region_name, entity_id, reminder_key, due_time_utc, acked_at_utc)
+            WHERE t.shard_region_name = v.shard_region_name
+              AND t.entity_id = v.entity_id
+              AND t.reminder_key = v.reminder_key
+              AND t.due_time_utc = v.due_time_utc
+              AND t.completion_status = 'AwaitingAck'
+              AND t.is_completed = FALSE
+              AND (t.delivery_deadline_utc IS NULL OR t.delivery_deadline_utc > v.acked_at_utc);
             """;
     }
 

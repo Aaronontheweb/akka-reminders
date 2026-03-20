@@ -437,6 +437,21 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
         return reminders;
     }
 
+    public async Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT MIN(ack_deadline_utc) FROM \"" + _settings.SchemaName + "\".\"" + _settings.TableName + "\" WHERE completion_status = 'AwaitingAck' AND is_completed = FALSE;";
+        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+
+        return result is DateTime next
+            ? new DateTimeOffset(DateTime.SpecifyKind(next, DateTimeKind.Utc))
+            : (DateTimeOffset?)null;
+    }
+
     public async Task<AckResult> AcknowledgeReminderAsync(ReminderEntity entity, ReminderKey key, DateTimeOffset dueTimeUtc, DateTimeOffset ackedAt, CancellationToken cancellationToken = default)
         => (await AcknowledgeRemindersAsync([new ReminderAcknowledgement(entity, key, dueTimeUtc, ackedAt)], cancellationToken))[0];
 
@@ -445,40 +460,19 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
         CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
-        var results = new List<AckResult>();
+        var normalizedAcknowledgements = acknowledgements.Select(NormalizeAcknowledgement).ToList();
+        var results = new List<AckResult>(normalizedAcknowledgements.Count);
+
+        if (normalizedAcknowledgements.Count == 0)
+            return results;
 
         await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
         await connection.OpenAsync(cancellationToken);
 
-        foreach (var acknowledgement in acknowledgements.Select(NormalizeAcknowledgement))
+        for (var offset = 0; offset < normalizedAcknowledgements.Count; offset += MaxRemindersPerStatusUpdate)
         {
-            try
-            {
-                await using var command = CreateCommand(connection, null);
-                command.CommandText = _dialect.GetAcknowledgeReminderSql(_settings.SchemaName, _settings.TableName);
-                command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
-                _dialect.AddParameter(command, "@ShardRegionName", acknowledgement.Entity.ShardRegionName);
-                _dialect.AddParameter(command, "@EntityId", acknowledgement.Entity.EntityId);
-                _dialect.AddParameter(command, "@ReminderKey", acknowledgement.Key.Name);
-                _dialect.AddParameter(command, "@DueTimeUtc", acknowledgement.DueTimeUtc);
-                _dialect.AddParameter(command, "@AckedAtUtc", acknowledgement.AckedAt);
-                var count = await command.ExecuteNonQueryAsync(cancellationToken);
-                results.Add(new AckResult(
-                    acknowledgement.Entity,
-                    acknowledgement.Key,
-                    acknowledgement.DueTimeUtc,
-                    count > 0 ? ReminderAckStorageStatus.Success : ReminderAckStorageStatus.NotFound,
-                    count > 0 ? null : "Reminder occurrence was not awaiting acknowledgement or was already stale."));
-            }
-            catch (Exception ex)
-            {
-                results.Add(new AckResult(
-                    acknowledgement.Entity,
-                    acknowledgement.Key,
-                    acknowledgement.DueTimeUtc,
-                    ReminderAckStorageStatus.Error,
-                    ex.Message));
-            }
+            var chunk = normalizedAcknowledgements.Skip(offset).Take(MaxRemindersPerStatusUpdate).ToList();
+            results.AddRange(await AcknowledgeReminderChunkAsync(connection, chunk, cancellationToken));
         }
 
         return results;
@@ -541,6 +535,103 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
             DueTimeUtc = TruncateToMicroseconds(acknowledgement.DueTimeUtc),
             AckedAt = TruncateToMicroseconds(acknowledgement.AckedAt)
         };
+
+    private async Task<IReadOnlyList<AckResult>> AcknowledgeReminderChunkAsync(
+        System.Data.Common.DbConnection connection,
+        IReadOnlyList<ReminderAcknowledgement> acknowledgements,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await using var command = CreateCommand(connection, transaction);
+            command.CommandText = _dialect.GetBatchAcknowledgeRemindersSql(_settings.SchemaName, _settings.TableName, acknowledgements.Count);
+            command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+
+            for (var i = 0; i < acknowledgements.Count; i++)
+            {
+                var acknowledgement = acknowledgements[i];
+                _dialect.AddParameter(command, $"@sr{i}", acknowledgement.Entity.ShardRegionName);
+                _dialect.AddParameter(command, $"@eid{i}", acknowledgement.Entity.EntityId);
+                _dialect.AddParameter(command, $"@rk{i}", acknowledgement.Key.Name);
+                _dialect.AddParameter(command, $"@due{i}", acknowledgement.DueTimeUtc);
+                _dialect.AddParameter(command, $"@acked{i}", acknowledgement.AckedAt);
+            }
+
+            var updated = await command.ExecuteNonQueryAsync(cancellationToken);
+            if (updated == acknowledgements.Count)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return acknowledgements.Select(ToSuccessfulAckResult).ToList();
+            }
+
+            await transaction.RollbackAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            return acknowledgements.Select(a => new AckResult(
+                a.Entity,
+                a.Key,
+                a.DueTimeUtc,
+                ReminderAckStorageStatus.Error,
+                ex.Message)).ToList();
+        }
+
+        return await AcknowledgeRemindersIndividuallyAsync(connection, acknowledgements, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<AckResult>> AcknowledgeRemindersIndividuallyAsync(
+        System.Data.Common.DbConnection connection,
+        IReadOnlyList<ReminderAcknowledgement> acknowledgements,
+        CancellationToken cancellationToken)
+    {
+        var results = new List<AckResult>(acknowledgements.Count);
+
+        foreach (var acknowledgement in acknowledgements)
+        {
+            try
+            {
+                await using var command = CreateCommand(connection, null);
+                command.CommandText = _dialect.GetAcknowledgeReminderSql(_settings.SchemaName, _settings.TableName);
+                command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+                _dialect.AddParameter(command, "@ShardRegionName", acknowledgement.Entity.ShardRegionName);
+                _dialect.AddParameter(command, "@EntityId", acknowledgement.Entity.EntityId);
+                _dialect.AddParameter(command, "@ReminderKey", acknowledgement.Key.Name);
+                _dialect.AddParameter(command, "@DueTimeUtc", acknowledgement.DueTimeUtc);
+                _dialect.AddParameter(command, "@AckedAtUtc", acknowledgement.AckedAt);
+                var count = await command.ExecuteNonQueryAsync(cancellationToken);
+                results.Add(count > 0
+                    ? ToSuccessfulAckResult(acknowledgement)
+                    : ToMissingAckResult(acknowledgement));
+            }
+            catch (Exception ex)
+            {
+                results.Add(new AckResult(
+                    acknowledgement.Entity,
+                    acknowledgement.Key,
+                    acknowledgement.DueTimeUtc,
+                    ReminderAckStorageStatus.Error,
+                    ex.Message));
+            }
+        }
+
+        return results;
+    }
+
+    private static AckResult ToSuccessfulAckResult(ReminderAcknowledgement acknowledgement)
+        => new(
+            acknowledgement.Entity,
+            acknowledgement.Key,
+            acknowledgement.DueTimeUtc,
+            ReminderAckStorageStatus.Success);
+
+    private static AckResult ToMissingAckResult(ReminderAcknowledgement acknowledgement)
+        => new(
+            acknowledgement.Entity,
+            acknowledgement.Key,
+            acknowledgement.DueTimeUtc,
+            ReminderAckStorageStatus.NotFound,
+            "Reminder occurrence was not awaiting acknowledgement or was already stale.");
 
     private async Task<bool> MarkRemindersAsCompletedAsync(
         System.Data.Common.DbConnection connection,

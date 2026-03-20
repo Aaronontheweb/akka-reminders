@@ -138,6 +138,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     private bool _processingReminders;
     private bool _processingAckTimeouts;
     private bool _ackFlushScheduled;
+    private ICancelable? _nextAckTimeoutCheck;
+    private DateTimeOffset? _nextAckTimeoutAt;
 
     private readonly Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), BufferedAckWrite>
         _bufferedAcknowledgements = new();
@@ -210,6 +212,15 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
+    private sealed class RefreshAckTimeoutSchedule
+    {
+        public static readonly RefreshAckTimeoutSchedule Instance = new();
+
+        private RefreshAckTimeoutSchedule()
+        {
+        }
+    }
+
     private sealed class FlushBufferedAcks
     {
         public static readonly FlushBufferedAcks Instance = new();
@@ -269,6 +280,56 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         Self.Tell(FlushBufferedAcks.Instance);
     }
 
+    private void CancelAckTimeoutCheck()
+    {
+        _nextAckTimeoutCheck?.Cancel();
+        _nextAckTimeoutCheck = null;
+        _nextAckTimeoutAt = null;
+    }
+
+    private void ScheduleAckTimeoutCheck(DateTimeOffset ackDeadlineUtc)
+    {
+        ackDeadlineUtc = ackDeadlineUtc.ToUniversalTime();
+
+        if (_nextAckTimeoutAt.HasValue && _nextAckTimeoutAt.Value <= ackDeadlineUtc)
+            return;
+
+        _nextAckTimeoutCheck?.Cancel();
+        _nextAckTimeoutAt = ackDeadlineUtc;
+
+        var delay = ackDeadlineUtc - TimeProvider.Now;
+        if (delay < TimeSpan.Zero)
+            delay = TimeSpan.Zero;
+
+        _nextAckTimeoutCheck = Context.System.Scheduler.ScheduleTellOnceCancelable(
+            delay,
+            Self,
+            CheckAckTimeouts.Instance,
+            Self);
+    }
+
+    private void TrackAckDeadlines(IEnumerable<AwaitingAckReminder> reminders)
+    {
+        var nextDeadline = reminders
+            .Select(r => r.AckDeadline.ToUniversalTime())
+            .DefaultIfEmpty(DateTimeOffset.MaxValue)
+            .Min();
+
+        if (nextDeadline != DateTimeOffset.MaxValue)
+            ScheduleAckTimeoutCheck(nextDeadline);
+    }
+
+    private async Task RefreshAckTimeoutScheduleFromStorageAsync()
+    {
+        using var cts = new CancellationTokenSource(Settings.StorageTimeout);
+        var nextAckDeadline = await Storage.GetNextAwaitingAckDeadlineAsync(cts.Token);
+
+        if (nextAckDeadline.HasValue)
+            ScheduleAckTimeoutCheck(nextAckDeadline.Value);
+        else
+            CancelAckTimeoutCheck();
+    }
+
     private static ReminderAckResponseCode MapAckStatus(ReminderAckStorageStatus status)
         => status switch
         {
@@ -279,6 +340,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
     private async Task FlushBufferedAcksAsync()
     {
+        var shouldRefreshAckTimeoutSchedule = false;
+
         while (_bufferedAcknowledgements.Count > 0)
         {
             var batch = _bufferedAcknowledgements
@@ -330,8 +393,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                 foreach (var replyTo in buffered.ReplyTo)
                     replyTo.Tell(response, ActorRefs.NoSender);
+
+                if (result.Success)
+                    shouldRefreshAckTimeoutSchedule = true;
             }
         }
+
+        if (shouldRefreshAckTimeoutSchedule)
+            await RefreshAckTimeoutScheduleFromStorageAsync();
     }
 
     private async Task FlushBufferedAcksIfAnyAsync()
@@ -578,6 +647,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 if (_processingAckTimeouts)
                     break;
 
+                _nextAckTimeoutCheck = null;
+                _nextAckTimeoutAt = null;
+
                 _processingAckTimeouts = true;
                 RunTask(async () =>
                 {
@@ -590,6 +662,21 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     finally
                     {
                         Self.Tell(CheckAckTimeoutsCompleted.Instance);
+                    }
+                });
+                break;
+            }
+            case RefreshAckTimeoutSchedule:
+            {
+                RunTask(async () =>
+                {
+                    try
+                    {
+                        await RefreshAckTimeoutScheduleFromStorageAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Warning(ex, "Failed to refresh next ack-timeout schedule from storage");
                     }
                 });
                 break;
@@ -616,13 +703,13 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             Settings.PruneInterval);
         _log.Info("Scheduled periodic pruning every {0}", Settings.PruneInterval);
 
-        // Schedule periodic scan for reminders that have been delivered but not acknowledged
-        Timers.StartPeriodicTimer(
-            CheckAckTimeouts.Instance,
-            CheckAckTimeouts.Instance,
-            Settings.AckTimeoutCheckInterval,
-            Settings.AckTimeoutCheckInterval);
-        _log.Info("Scheduled ack-timeout check every {0}", Settings.AckTimeoutCheckInterval);
+        Self.Tell(RefreshAckTimeoutSchedule.Instance);
+    }
+
+    protected override void PostStop()
+    {
+        CancelAckTimeoutCheck();
+        base.PostStop();
     }
 
     private async Task ReloadPendingOverviewAsync()
@@ -772,7 +859,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         {
             When = retryAt,
             AttemptCount = reminder.AttemptCount + 1,
-            LastFailureReason = failureReason
+            LastFailureReason = failureReason,
+            OccurrenceDueTimeUtc = reminder.DueTimeUtc
         };
         terminalStatus = ReminderCompletionStatus.Pending;
         return true;
@@ -875,6 +963,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             TryScheduleFetchReminders();
         }
 
+        await RefreshAckTimeoutScheduleFromStorageAsync();
+
         if (totalRetried > 0 || totalFailed > 0 || totalExpired > 0)
         {
             _log.Info(
@@ -891,6 +981,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         var totalRetried = 0;
         var totalFailed = 0;
         var totalExpired = 0;
+        var latestOverview = PendingReminders;
+        var needsOverviewReload = false;
 
         // When the write circuit is open, probe with a single reminder to test
         // write availability before resuming full-batch processing. This limits
@@ -913,12 +1005,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 batch = await Storage.GetNextRemindersAsync(untilDeadline, TimeProvider.Now,
                     new ReminderBatchSize(effectiveBatchSize), fetchCts.Token);
                 _log.Info("Fetched {0} due reminders (batch)", batch.Reminders.Count);
+                latestOverview = batch.NextOverview;
             }
             catch (Exception ex)
             {
                 // If fetch fails, no reminders were delivered and no write operations were attempted,
                 // so the write circuit remains unchanged.
                 _log.Error(ex, "Failed to fetch due reminders from storage");
+                needsOverviewReload = true;
                 break;
             }
 
@@ -927,6 +1021,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
             var stopProcessing = false;
             var recoveredFromProbe = false;
+            var batchOverview = batch.NextOverview;
 
             // Process the fetched batch in smaller chunks to cap duplicate blast radius
             // if writes fail after delivery.
@@ -1044,9 +1139,21 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                                  "Pausing batch processing until writes recover. " +
                                  "Delivered [{0}] reminders in this run before failure.",
                         totalDelivered);
+                    needsOverviewReload = true;
                     stopProcessing = true;
                     break;
                 }
+
+                if (occurrencesToUpsert.Count > 0)
+                {
+                    foreach (var pendingReminder in occurrencesToUpsert)
+                    {
+                        batchOverview = batchOverview.Apply(pendingReminder, completedAt).newOverview;
+                    }
+                }
+
+                if (remindersToAwaitAck.Count > 0)
+                    TrackAckDeadlines(remindersToAwaitAck);
 
                 if (_writeCircuitOpen)
                 {
@@ -1074,6 +1181,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 }
             }
 
+            latestOverview = batchOverview;
+
             if (stopProcessing)
                 break;
 
@@ -1087,15 +1196,21 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 break;
         }
 
-        // Final overview reload with its own CTS
-        try
+        if (needsOverviewReload)
         {
-            using var overviewCts = new CancellationTokenSource(Settings.StorageTimeout);
-            PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, overviewCts.Token);
+            try
+            {
+                using var overviewCts = new CancellationTokenSource(Settings.StorageTimeout);
+                PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, overviewCts.Token);
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Failed to reload reminder overview after processing");
+            }
         }
-        catch (Exception ex)
+        else
         {
-            _log.Error(ex, "Failed to reload reminder overview after processing");
+            PendingReminders = latestOverview;
         }
 
         _log.Info(

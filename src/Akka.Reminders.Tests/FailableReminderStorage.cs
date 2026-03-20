@@ -127,6 +127,13 @@ internal sealed class FailableReminderStorage : IReminderStorage
         return _inner.GetTimedOutAckRemindersAsync(now, maxCount, ct);
     }
 
+    public Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken ct = default)
+    {
+        if (FailReads)
+            throw new TimeoutException("Simulated database read timeout");
+        return _inner.GetNextAwaitingAckDeadlineAsync(ct);
+    }
+
     public Task<AckResult> AcknowledgeReminderAsync(ReminderEntity entity, ReminderKey key, DateTimeOffset dueTimeUtc, DateTimeOffset ackedAt, CancellationToken ct = default)
     {
         if (FailWrites)

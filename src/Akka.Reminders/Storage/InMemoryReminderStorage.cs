@@ -442,6 +442,21 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     }
 
     /// <inheritdoc />
+    public Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken ct = default)
+    {
+        DateTimeOffset? nextDeadline;
+
+        lock (_sync)
+        {
+            nextDeadline = _awaitingAckReminders.Count == 0
+                ? null
+                : _awaitingAckReminders.Values.Min(v => v.State.AckDeadline);
+        }
+
+        return Task.FromResult(nextDeadline);
+    }
+
+    /// <inheritdoc />
     public async Task<AckResult> AcknowledgeReminderAsync(
         ReminderEntity entity,
         ReminderKey key,

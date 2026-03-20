@@ -256,6 +256,12 @@ public interface IReminderStorage
         CancellationToken ct = default);
 
     /// <summary>
+    /// Gets the earliest acknowledgement deadline currently persisted in storage.
+    /// Returns <c>null</c> when there are no reminders awaiting acknowledgement.
+    /// </summary>
+    Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// Acknowledges a reminder, marking it as fully delivered.
     /// </summary>
     /// <param name="entity">The entity that owns the reminder.</param>
