@@ -11,21 +11,16 @@ namespace Akka.Reminders;
 public static class AkkaHostingExtensions
 {
     /// <summary>
-    /// HOCON configuration that registers the <see cref="Serialization.ReminderSerializer"/> and binds
-    /// it to all types that need to cross node boundaries in a cluster:
-    /// <see cref="ReminderEnvelope"/>, <see cref="ReminderProtocol.ReminderAck"/>, and
-    /// <see cref="ReminderProtocol.ReminderAckResponse"/>.
+    /// Registers the <see cref="Serialization.ReminderSerializer"/> for all
+    /// <see cref="IReminderWireMessage"/> types using the Akka.Hosting serializer API.
     /// </summary>
-    internal const string SerializerHocon = """
-        akka.actor.serializers {
-            reminder-serializer = "Akka.Reminders.Serialization.ReminderSerializer, Akka.Reminders"
-        }
-        akka.actor.serialization-bindings {
-            "Akka.Reminders.ReminderEnvelope, Akka.Reminders" = reminder-serializer
-            "Akka.Reminders.ReminderProtocol+ReminderAck, Akka.Reminders" = reminder-serializer
-            "Akka.Reminders.ReminderProtocol+ReminderAckResponse, Akka.Reminders" = reminder-serializer
-        }
-        """;
+    private static void RegisterReminderSerializer(AkkaConfigurationBuilder builder)
+    {
+        builder.WithCustomSerializer(
+            "reminder-serializer",
+            [typeof(IReminderWireMessage)],
+            system => new Serialization.ReminderSerializer(system));
+    }
 
     /// <summary>
     /// Adds the Akka.Reminders system to the actor system.
@@ -54,9 +49,8 @@ public static class AkkaHostingExtensions
         configure?.Invoke(reminderBuilder);
         var setup = reminderBuilder.Build();
 
-        // Register the reminder serializer so ReminderEnvelope, ReminderAck, and ReminderAckResponse
-        // are properly serialized across cluster boundaries.
-        builder.AddHocon(SerializerHocon, HoconAddMode.Prepend);
+        // Register the reminder serializer for all IReminderWireMessage types.
+        RegisterReminderSerializer(builder);
 
         // Add the setup to the actor system
         builder.AddSetup(setup);
@@ -157,9 +151,8 @@ public static class AkkaHostingExtensions
         var localBuilder = new LocalReminderConfigurationBuilder();
         configure?.Invoke(localBuilder);
 
-        // Register the reminder serializer so ReminderEnvelope, ReminderAck, and ReminderAckResponse
-        // are properly serialized across cluster boundaries.
-        builder.AddHocon(SerializerHocon, HoconAddMode.Prepend);
+        // Register the reminder serializer for all IReminderWireMessage types.
+        RegisterReminderSerializer(builder);
 
         builder.WithActors((system, registry) =>
         {

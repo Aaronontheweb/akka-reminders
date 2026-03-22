@@ -10,9 +10,9 @@ namespace Akka.Reminders.Tests.Serialization;
 /// Round-trip serialization tests for <see cref="ReminderSerializer"/>.
 ///
 /// Follows the core Akka.NET pattern (see ClusterMessageSerializerSpec):
-/// wire the serializer via HOCON, use a small <see cref="AssertAndReturn{T}"/>
-/// helper that verifies the correct serializer is resolved and the message
-/// survives a ToBinary → FromBinary cycle.
+/// register the serializer via <see cref="AkkaConfigurationBuilder.WithCustomSerializer"/>,
+/// use a small <see cref="AssertAndReturn{T}"/> helper that verifies the correct serializer
+/// is resolved and the message survives a ToBinary → FromBinary cycle.
 /// </summary>
 public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
 {
@@ -23,7 +23,10 @@ public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
 
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
-        builder.AddHocon(AkkaHostingExtensions.SerializerHocon, HoconAddMode.Prepend);
+        builder.WithCustomSerializer(
+            "reminder-serializer",
+            [typeof(IReminderWireMessage)],
+            system => new ReminderSerializer(system));
     }
 
     /// <summary>

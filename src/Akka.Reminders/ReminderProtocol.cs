@@ -48,10 +48,17 @@ public readonly record struct ReminderDeadline
 }
 
 /// <summary>
+/// Marker interface for all reminder messages that need to cross node boundaries
+/// via Akka.Remote / Akka.Cluster. Used to bind the <see cref="Serialization.ReminderSerializer"/>
+/// to all wire-visible types in a single registration.
+/// </summary>
+public interface IReminderWireMessage;
+
+/// <summary>
 /// Wraps a reminder message with its originating entity, key, and occurrence metadata,
 /// allowing recipients to acknowledge delivery via <see cref="IReminderClient.AckAsync"/>.
 /// </summary>
-public class ReminderEnvelope : IWrappedMessage
+public class ReminderEnvelope : IWrappedMessage, IReminderWireMessage
 {
     /// <summary>
     /// The entity that scheduled this reminder.
@@ -278,7 +285,7 @@ public static class ReminderProtocol
     public sealed record ReminderAck(
         ReminderEntity Entity,
         ReminderKey Key,
-        DateTimeOffset DueTimeUtc) : IReminderCommand;
+        DateTimeOffset DueTimeUtc) : IReminderCommand, IReminderWireMessage;
 
     /// <summary>
     /// Returned by the scheduler after processing a <see cref="ReminderAck"/>.
@@ -288,7 +295,7 @@ public static class ReminderProtocol
         ReminderKey Key,
         DateTimeOffset DueTimeUtc,
         ReminderAckResponseCode ResponseCode,
-        string? Message = null) : IReminderResponse;
+        string? Message = null) : IReminderResponse, IReminderWireMessage;
 }
 
 /// <summary>
