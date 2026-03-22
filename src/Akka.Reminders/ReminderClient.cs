@@ -30,10 +30,10 @@ internal sealed class ReminderClient : IReminderClient
     public ReminderEntity Entity { get; }
 
     /// <inheritdoc />
-    public async Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync<T>(
+    public async Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync(
         ReminderKey key,
         DateTimeOffset when,
-        T message,
+        object message,
         TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
@@ -41,7 +41,7 @@ internal sealed class ReminderClient : IReminderClient
             Entity,
             key,
             when,
-            message!,
+            message,
             RepeatInterval: null,
             MaxDeliveryWindow: maxDeliveryWindow);
 
@@ -73,11 +73,11 @@ internal sealed class ReminderClient : IReminderClient
     }
 
     /// <inheritdoc />
-    public async Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync<T>(
+    public async Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync(
         ReminderKey key,
         DateTimeOffset firstOccurrence,
         TimeSpan interval,
-        T message,
+        object message,
         TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
@@ -85,7 +85,7 @@ internal sealed class ReminderClient : IReminderClient
             Entity,
             key,
             firstOccurrence,
-            message!,
+            message,
             RepeatInterval: interval,
             MaxDeliveryWindow: maxDeliveryWindow);
 

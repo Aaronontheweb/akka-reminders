@@ -97,7 +97,6 @@ public sealed class ReminderClientExtension : IExtension
     /// <summary>
     /// Schedules a single reminder for the specified entity without creating a client.
     /// </summary>
-    /// <typeparam name="T">The type of the message payload to deliver when the reminder fires.</typeparam>
     /// <param name="entity">The entity that will receive the reminder.</param>
     /// <param name="key">The unique key for this reminder.</param>
     /// <param name="when">When the reminder should fire.</param>
@@ -109,11 +108,11 @@ public sealed class ReminderClientExtension : IExtension
     /// This is a convenience method for scheduling reminders without creating a client first.
     /// Useful for bulk scheduling operations where you don't need to retain a client instance.
     /// </remarks>
-    public Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync<T>(
+    public Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync(
         ReminderEntity entity,
         ReminderKey key,
         DateTimeOffset when,
-        T message,
+        object message,
         TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
@@ -121,7 +120,7 @@ public sealed class ReminderClientExtension : IExtension
             entity,
             key,
             when,
-            message!,
+            message,
             RepeatInterval: null,
             MaxDeliveryWindow: maxDeliveryWindow);
         return SendToSchedulerAsync<ReminderProtocol.ScheduleReminder, ReminderProtocol.ReminderScheduled>(
@@ -136,7 +135,6 @@ public sealed class ReminderClientExtension : IExtension
     /// <summary>
     /// Schedules a single reminder for the specified shard region and entity ID without creating a client.
     /// </summary>
-    /// <typeparam name="T">The type of the message payload to deliver when the reminder fires.</typeparam>
     /// <param name="shardRegionName">The name of the shard region.</param>
     /// <param name="entityId">The entity identifier.</param>
     /// <param name="key">The unique key for this reminder.</param>
@@ -149,12 +147,12 @@ public sealed class ReminderClientExtension : IExtension
     /// This is a convenience method for scheduling reminders without creating a client first.
     /// Useful for bulk scheduling operations where you don't need to retain a client instance.
     /// </remarks>
-    public Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync<T>(
+    public Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync(
         string shardRegionName,
         string entityId,
         ReminderKey key,
         DateTimeOffset when,
-        T message,
+        object message,
         TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
@@ -170,7 +168,6 @@ public sealed class ReminderClientExtension : IExtension
     /// <summary>
     /// Schedules a recurring reminder for the specified entity without creating a client.
     /// </summary>
-    /// <typeparam name="T">The type of the message payload to deliver when the reminder fires.</typeparam>
     /// <param name="entity">The entity that will receive the reminder.</param>
     /// <param name="key">The unique key for this reminder.</param>
     /// <param name="firstOccurrence">When the reminder should fire for the first time.</param>
@@ -183,12 +180,12 @@ public sealed class ReminderClientExtension : IExtension
     /// This is a convenience method for scheduling recurring reminders without creating a client first.
     /// Useful for bulk scheduling operations where you don't need to retain a client instance.
     /// </remarks>
-    public Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync<T>(
+    public Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync(
         ReminderEntity entity,
         ReminderKey key,
         DateTimeOffset firstOccurrence,
         TimeSpan interval,
-        T message,
+        object message,
         TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
@@ -196,7 +193,7 @@ public sealed class ReminderClientExtension : IExtension
             entity,
             key,
             firstOccurrence,
-            message!,
+            message,
             RepeatInterval: interval,
             MaxDeliveryWindow: maxDeliveryWindow);
         return SendToSchedulerAsync<ReminderProtocol.ScheduleReminder, ReminderProtocol.ReminderScheduled>(
@@ -211,7 +208,6 @@ public sealed class ReminderClientExtension : IExtension
     /// <summary>
     /// Schedules a recurring reminder for the specified shard region and entity ID without creating a client.
     /// </summary>
-    /// <typeparam name="T">The type of the message payload to deliver when the reminder fires.</typeparam>
     /// <param name="shardRegionName">The name of the shard region.</param>
     /// <param name="entityId">The entity identifier.</param>
     /// <param name="key">The unique key for this reminder.</param>
@@ -225,13 +221,13 @@ public sealed class ReminderClientExtension : IExtension
     /// This is a convenience method for scheduling recurring reminders without creating a client first.
     /// Useful for bulk scheduling operations where you don't need to retain a client instance.
     /// </remarks>
-    public Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync<T>(
+    public Task<ReminderProtocol.ReminderScheduled> ScheduleRecurringReminderAsync(
         string shardRegionName,
         string entityId,
         ReminderKey key,
         DateTimeOffset firstOccurrence,
         TimeSpan interval,
-        T message,
+        object message,
         TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
