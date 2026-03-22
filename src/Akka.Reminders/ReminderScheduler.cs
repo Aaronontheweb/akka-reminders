@@ -280,7 +280,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         if (_nextAckTimeoutAt.HasValue && _nextAckTimeoutAt.Value <= ackDeadlineUtc)
             return;
 
-        _nextAckTimeoutCheck?.Cancel();
+        CancelAckTimeoutCheck();
         _nextAckTimeoutAt = ackDeadlineUtc;
 
         var delay = ackDeadlineUtc - TimeProvider.Now;
