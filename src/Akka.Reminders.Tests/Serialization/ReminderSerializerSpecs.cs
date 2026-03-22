@@ -241,6 +241,259 @@ public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
     }
 
     #endregion
+
+    #region ScheduleReminder
+
+    [Fact]
+    public void Can_serialize_ScheduleReminder_with_string_payload()
+    {
+        var cmd = new ReminderProtocol.ScheduleReminder(
+            new ReminderEntity("my-region", "entity-42"),
+            new ReminderKey("daily-report"),
+            new DateTimeOffset(2026, 3, 20, 12, 0, 0, TimeSpan.Zero),
+            "generate report");
+
+        var result = AssertAndReturn(cmd);
+
+        Assert.Equal(cmd.Entity, result.Entity);
+        Assert.Equal(cmd.Key, result.Key);
+        Assert.Equal(cmd.When, result.When);
+        Assert.Equal("generate report", result.Message);
+        Assert.Null(result.RepeatInterval);
+        Assert.Null(result.MaxDeliveryWindow);
+    }
+
+    [Fact]
+    public void Can_serialize_ScheduleReminder_with_json_payload()
+    {
+        var payload = new InvoiceReminder
+        {
+            InvoiceId = "INV-2026-0099",
+            AmountDue = 500.00m,
+            Currency = "EUR",
+            CustomerEmail = "test@example.com"
+        };
+
+        var cmd = new ReminderProtocol.ScheduleReminder(
+            new ReminderEntity("invoices", "customer-1"),
+            new ReminderKey("payment-due"),
+            new DateTimeOffset(2026, 4, 1, 0, 0, 0, TimeSpan.Zero),
+            payload);
+
+        var result = AssertAndReturn(cmd);
+
+        Assert.Equal(cmd.Entity, result.Entity);
+        Assert.Equal(cmd.Key, result.Key);
+        Assert.Equal(cmd.When, result.When);
+
+        var deserialized = Assert.IsType<InvoiceReminder>(result.Message);
+        Assert.Equal(payload.InvoiceId, deserialized.InvoiceId);
+        Assert.Equal(payload.AmountDue, deserialized.AmountDue);
+        Assert.Equal(payload.Currency, deserialized.Currency);
+        Assert.Equal(payload.CustomerEmail, deserialized.CustomerEmail);
+    }
+
+    [Fact]
+    public void Can_serialize_ScheduleReminder_with_repeat_interval()
+    {
+        var cmd = new ReminderProtocol.ScheduleReminder(
+            new ReminderEntity("region", "entity"),
+            new ReminderKey("recurring"),
+            DateTimeOffset.UtcNow,
+            "tick",
+            RepeatInterval: TimeSpan.FromHours(1));
+
+        var result = AssertAndReturn(cmd);
+
+        Assert.Equal(cmd.Entity, result.Entity);
+        Assert.Equal(cmd.Key, result.Key);
+        Assert.Equal("tick", result.Message);
+        Assert.Equal(TimeSpan.FromHours(1), result.RepeatInterval);
+        Assert.Null(result.MaxDeliveryWindow);
+    }
+
+    [Fact]
+    public void Can_serialize_ScheduleReminder_with_max_delivery_window()
+    {
+        var cmd = new ReminderProtocol.ScheduleReminder(
+            new ReminderEntity("region", "entity"),
+            new ReminderKey("bounded"),
+            DateTimeOffset.UtcNow,
+            "payload",
+            RepeatInterval: TimeSpan.FromMinutes(30),
+            MaxDeliveryWindow: TimeSpan.FromMinutes(5));
+
+        var result = AssertAndReturn(cmd);
+
+        Assert.Equal(cmd.Entity, result.Entity);
+        Assert.Equal(cmd.Key, result.Key);
+        Assert.Equal("payload", result.Message);
+        Assert.Equal(TimeSpan.FromMinutes(30), result.RepeatInterval);
+        Assert.Equal(TimeSpan.FromMinutes(5), result.MaxDeliveryWindow);
+    }
+
+    #endregion
+
+    #region ReminderScheduled
+
+    [Fact]
+    public void Can_serialize_ReminderScheduled_success()
+    {
+        var cmd = new ReminderProtocol.ScheduleReminder(
+            new ReminderEntity("region", "entity"),
+            new ReminderKey("key"),
+            new DateTimeOffset(2026, 6, 1, 0, 0, 0, TimeSpan.Zero),
+            "my-payload",
+            RepeatInterval: TimeSpan.FromHours(2));
+
+        var scheduled = new ReminderProtocol.ReminderScheduled(
+            cmd,
+            ReminderScheduleResponseCode.Success);
+
+        var result = AssertAndReturn(scheduled);
+
+        Assert.Equal(cmd.Entity, result.Entity);
+        Assert.Equal(cmd.Key, result.Key);
+        Assert.Equal(cmd.When, result.When);
+        Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
+        Assert.Null(result.Message);
+
+        Assert.Equal("my-payload", result.OriginalCommand.Message);
+        Assert.Equal(TimeSpan.FromHours(2), result.OriginalCommand.RepeatInterval);
+    }
+
+    [Fact]
+    public void Can_serialize_ReminderScheduled_error_with_message()
+    {
+        var cmd = new ReminderProtocol.ScheduleReminder(
+            new ReminderEntity("region", "entity"),
+            new ReminderKey("key"),
+            DateTimeOffset.UtcNow,
+            "payload");
+
+        var scheduled = new ReminderProtocol.ReminderScheduled(
+            cmd,
+            ReminderScheduleResponseCode.Error,
+            "Shard region not available");
+
+        var result = AssertAndReturn(scheduled);
+
+        Assert.Equal(ReminderScheduleResponseCode.Error, result.ResponseCode);
+        Assert.Equal("Shard region not available", result.Message);
+        Assert.Equal("payload", result.OriginalCommand.Message);
+    }
+
+    #endregion
+
+    #region RemindersForEntity
+
+    [Fact]
+    public void Can_serialize_RemindersForEntity_with_empty_list()
+    {
+        var msg = new ReminderProtocol.RemindersForEntity(
+            new ReminderEntity("region", "entity"),
+            FetchRemindersResponseCode.NotFound,
+            Array.Empty<ScheduledReminder>(),
+            "No reminders found");
+
+        var result = AssertAndReturn(msg);
+
+        Assert.Equal(msg.Entity, result.Entity);
+        Assert.Equal(FetchRemindersResponseCode.NotFound, result.ResponseCode);
+        Assert.Equal("No reminders found", result.Message);
+        Assert.Empty(result.Reminders);
+    }
+
+    [Fact]
+    public void Can_serialize_RemindersForEntity_with_multiple_reminders()
+    {
+        var entity = new ReminderEntity("orders", "order-42");
+        var when1 = new DateTimeOffset(2026, 5, 1, 10, 0, 0, TimeSpan.Zero);
+        var when2 = new DateTimeOffset(2026, 5, 2, 14, 0, 0, TimeSpan.Zero);
+
+        var reminders = new List<ScheduledReminder>
+        {
+            new(entity, new ReminderKey("reminder-1"), when1, "payload-1",
+                RepeatInterval: TimeSpan.FromHours(1),
+                AttemptCount: 3,
+                LastFailureReason: "timeout",
+                MaxDeliveryWindow: TimeSpan.FromMinutes(5),
+                DeliveryDeadlineUtc: when1.AddMinutes(5),
+                OccurrenceDueTimeUtc: when1.AddMinutes(-1)),
+            new(entity, new ReminderKey("reminder-2"), when2, "payload-2")
+        };
+
+        var msg = new ReminderProtocol.RemindersForEntity(
+            entity,
+            FetchRemindersResponseCode.Success,
+            reminders);
+
+        var result = AssertAndReturn(msg);
+
+        Assert.Equal(entity, result.Entity);
+        Assert.Equal(FetchRemindersResponseCode.Success, result.ResponseCode);
+        Assert.Null(result.Message);
+        Assert.Equal(2, result.Reminders.Count);
+
+        // First reminder — all fields populated
+        var r0 = result.Reminders[0];
+        Assert.Equal(new ReminderKey("reminder-1"), r0.Key);
+        Assert.Equal(when1, r0.When);
+        Assert.Equal("payload-1", r0.Message);
+        Assert.Equal(TimeSpan.FromHours(1), r0.RepeatInterval);
+        Assert.Equal(3, r0.AttemptCount);
+        Assert.Equal("timeout", r0.LastFailureReason);
+        Assert.Equal(TimeSpan.FromMinutes(5), r0.MaxDeliveryWindow);
+        Assert.Equal(when1.AddMinutes(5), r0.DeliveryDeadlineUtc);
+        Assert.Equal(when1.AddMinutes(-1), r0.OccurrenceDueTimeUtc);
+
+        // Second reminder — minimal fields
+        var r1 = result.Reminders[1];
+        Assert.Equal(new ReminderKey("reminder-2"), r1.Key);
+        Assert.Equal(when2, r1.When);
+        Assert.Equal("payload-2", r1.Message);
+        Assert.Null(r1.RepeatInterval);
+        Assert.Equal(0, r1.AttemptCount);
+        Assert.Null(r1.LastFailureReason);
+        Assert.Null(r1.MaxDeliveryWindow);
+        Assert.Null(r1.DeliveryDeadlineUtc);
+        Assert.Null(r1.OccurrenceDueTimeUtc);
+    }
+
+    [Fact]
+    public void Can_serialize_RemindersForEntity_with_json_payload_in_reminders()
+    {
+        var entity = new ReminderEntity("invoices", "customer-7");
+        var payload = new InvoiceReminder
+        {
+            InvoiceId = "INV-001",
+            AmountDue = 99.95m,
+            Currency = "GBP",
+            CustomerEmail = "user@example.com"
+        };
+
+        var reminders = new List<ScheduledReminder>
+        {
+            new(entity, new ReminderKey("invoice-reminder"), DateTimeOffset.UtcNow, payload)
+        };
+
+        var msg = new ReminderProtocol.RemindersForEntity(
+            entity,
+            FetchRemindersResponseCode.Success,
+            reminders);
+
+        var result = AssertAndReturn(msg);
+
+        Assert.Single(result.Reminders);
+        var r = result.Reminders[0];
+        var deserialized = Assert.IsType<InvoiceReminder>(r.Message);
+        Assert.Equal(payload.InvoiceId, deserialized.InvoiceId);
+        Assert.Equal(payload.AmountDue, deserialized.AmountDue);
+        Assert.Equal(payload.Currency, deserialized.Currency);
+        Assert.Equal(payload.CustomerEmail, deserialized.CustomerEmail);
+    }
+
+    #endregion
 }
 
 /// <summary>

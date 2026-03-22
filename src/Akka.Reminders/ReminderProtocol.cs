@@ -230,7 +230,7 @@ public static class ReminderProtocol
         DateTimeOffset When,
         object Message,
         TimeSpan? RepeatInterval = null,
-        TimeSpan? MaxDeliveryWindow = null) : IReminderCommand
+        TimeSpan? MaxDeliveryWindow = null) : IReminderCommand, IReminderWireMessage
     {
         public ScheduledReminder ToScheduledReminder() => new(
             Entity,
@@ -254,7 +254,7 @@ public static class ReminderProtocol
     public sealed record ReminderScheduled(
         ScheduleReminder OriginalCommand,
         ReminderScheduleResponseCode ResponseCode,
-        string? Message = null) : IReminderResponse
+        string? Message = null) : IReminderResponse, IReminderWireMessage
     {
         /// <inheritdoc />
         public ReminderEntity Entity => OriginalCommand.Entity;
@@ -276,7 +276,7 @@ public static class ReminderProtocol
         ReminderEntity Entity,
         FetchRemindersResponseCode ResponseCode,
         IReadOnlyList<ScheduledReminder> Reminders,
-        string? Message = null) : IReminderResponse;
+        string? Message = null) : IReminderResponse, IReminderWireMessage;
 
     /// <summary>
     /// Sent by a recipient to confirm that a reminder has been successfully processed.
