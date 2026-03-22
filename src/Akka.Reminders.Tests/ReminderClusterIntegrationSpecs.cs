@@ -39,6 +39,15 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         _clusterFormed = true;
     }
 
+    private async Task EnsureReminderSchedulerReady(IReminderClient client)
+    {
+        await AwaitAssertAsync(async () =>
+        {
+            var response = await client.ListRemindersAsync();
+            Assert.Equal(FetchRemindersResponseCode.Success, response.ResponseCode);
+        }, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(100));
+    }
+
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
         // Configure a single-node cluster
@@ -73,6 +82,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         EnsureClusterFormed();
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient(ShardRegionName, "entity-1");
+        await EnsureReminderSchedulerReady(client);
 
         // Get the shard region to observe messages
         var shardRegion = await Sys.ActorSelection($"/system/sharding/{ShardRegionName}").ResolveOne(TimeSpan.FromSeconds(5));
@@ -104,6 +114,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         EnsureClusterFormed();
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient(ShardRegionName, "entity-2");
+        await EnsureReminderSchedulerReady(client);
 
         var probe = CreateTestProbe();
         Sys.EventStream.Subscribe(probe.Ref, typeof(TestEntity.ReminderReceived));
@@ -118,16 +129,18 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         // Assert
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
-        // Wait for multiple occurrences
-        var msg1 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5));
+        // Wait for multiple occurrences — first delivery traverses the full
+        // cluster singleton → shard region → entity actor chain which has
+        // higher latency on constrained CI runners.
+        var msg1 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10));
         Assert.Equal("entity-2", msg1.EntityId);
         Assert.Equal("recurring message", msg1.Message);
 
-        var msg2 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(2));
+        var msg2 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5));
         Assert.Equal("entity-2", msg2.EntityId);
         Assert.Equal("recurring message", msg2.Message);
 
-        var msg3 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(2));
+        var msg3 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5));
         Assert.Equal("entity-2", msg3.EntityId);
         Assert.Equal("recurring message", msg3.Message);
 
@@ -143,6 +156,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         var extension = Sys.ReminderClient();
         var client1 = extension.CreateClient(ShardRegionName, "entity-3");
         var client2 = extension.CreateClient(ShardRegionName, "entity-4");
+        await EnsureReminderSchedulerReady(client1);
 
         var probe = CreateTestProbe();
         Sys.EventStream.Subscribe(probe.Ref, typeof(TestEntity.ReminderReceived));
@@ -175,6 +189,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         EnsureClusterFormed();
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient(ShardRegionName, "entity-5");
+        await EnsureReminderSchedulerReady(client);
 
         var probe = CreateTestProbe();
         Sys.EventStream.Subscribe(probe.Ref, typeof(TestEntity.ReminderReceived));
@@ -215,16 +230,21 @@ internal sealed class TestEntity : ReceiveActor
     {
         _entityId = entityId;
 
-        Receive<EntityMessage>(msg =>
+        ReceiveAsync<ReminderEnvelope<EntityMessage>>(async envelope =>
         {
-            // Publish reminder receipt to event stream for test verification
+            // Extract the EntityMessage payload from the reminder envelope
+            var msg = envelope.Message;
             Context.System.EventStream.Publish(new ReminderReceived(_entityId, msg.Payload));
+
+            // Ack the reminder so recurring reminders schedule their next occurrence
+            var ext = Context.System.ReminderClient();
+            await ext.AckAsync(envelope);
         });
 
-        ReceiveAny(msg =>
+        Receive<EntityMessage>(msg =>
         {
-            // Fallback for any other messages
-            Context.System.EventStream.Publish(new ReminderReceived(_entityId, msg.ToString() ?? ""));
+            // Handle direct EntityMessage delivery (non-reminder path)
+            Context.System.EventStream.Publish(new ReminderReceived(_entityId, msg.Payload));
         });
     }
 }

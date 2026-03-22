@@ -2,121 +2,226 @@
 
 ## Delivery Semantics
 
-Akka.Reminders uses **at-least-once delivery**. Reminders are delivered via fire-and-forget `Tell` (no acknowledgement from the target entity). This means:
+Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
 
-- A reminder may be delivered more than once if the system can't confirm completion.
-- Consumers MUST be idempotent — receiving the same reminder twice should not cause incorrect behavior.
-- There is no exactly-once guarantee and no plan to add one.
+- Reminders are delivered through `IShardRegionResolver.DeliverReminder`, which wraps the message in a `ShardingEnvelope(entityId, ReminderEnvelope<T>)` and sends it to the shard region via fire-and-forget `Tell`. The consumer actor receives a strongly-typed `ReminderEnvelope<T>`.
+- Consumers MUST be idempotent.
+- Each occurrence is identified by `(ReminderEntity, ReminderKey, DueTimeUtc)`.
+- The envelope exposes a non-null `Deadline` value object. Unbounded reminders use `ReminderDeadline.Infinite`.
+- Retries are bounded by both `MaxDeliveryAttempts` and the occurrence deadline.
+
+### Latest-only recurring reminders
+
+Recurring reminders are modeled as a stream of occurrences.
+
+- The next occurrence is persisted when the current occurrence is delivered.
+- Each occurrence has its own absolute UTC deadline.
+- By default, a recurring occurrence expires when the next occurrence becomes due.
+- If `MaxDeliveryWindow` is configured, the effective deadline is `min(due + window, next due)`.
+- A late ack for an old occurrence is a harmless `NotFound` because the ack is matched by `DueTimeUtc`.
+
+## Scheduler Initialization
+
+On startup, the scheduler actor is in an initial behavior that stashes all client messages until initialization completes.
+
+1. `PreStart` calls `LoadReminderOverview`, which fetches the `ReminderOverview` (an efficient `COUNT`/`MIN` aggregate — not a full table scan) and the next awaiting-ack deadline from storage in a single async pipeline, bundled into an `InitResult` record.
+2. The result is delivered to `Self` via `PipeTo`.
+3. On receipt, the scheduler schedules the ack-timeout check synchronously, transitions to the `Scheduling` behavior, then calls `UnstashAll` to replay buffered client messages.
+
+This ensures the scheduler is fully initialized — with ack-timeout tracking active — before any client messages are processed. There is no intermediate `RunTask` between the behavior transition and client message replay.
+
+### Recovery of AwaitingAck state after restart
+
+There is no explicit recovery step that resets `AwaitingAck` rows back to `Pending` on startup. Instead, `InitResult.NextAckDeadline` schedules the first ack-timeout check, which naturally discovers any `AwaitingAck` rows whose deadline has elapsed and retries or expires them through the normal `CheckAckTimeouts` path.
+
+### Reply ordering
+
+Schedule and cancel handlers reply to the caller **after** `ReloadPendingOverviewAsync` and `TryScheduleFetchReminders` complete. This guarantees the Ask response is a reliable signal that the fetch timer is registered — callers can depend on the scheduler being ready to process the reminder on the next tick.
 
 ## Processing Pipeline
 
-Each tick of the `ReminderScheduler` runs `ProcessReminders`, which loops through batches:
+### Scheduler tick
 
+Each tick is triggered by a `FetchReminders` timer. The timer delay is derived from the pending overview's `TimeUntilNext` value, plus the `MaxSlippage` setting (which causes the scheduler to fetch reminders slightly ahead of their due time to avoid re-scheduling overhead).
+
+```text
+Flush buffered ack writes (if any)
+  -> Expire stale occurrences (best effort)
+  -> Fetch due Pending reminders (bounded batch, up to MaxBatchSize)
+  -> Process in DeliveryCommitChunkSize chunks:
+      -> Classify each occurrence:
+          - Deadline expired -> terminal (Expired)
+          - Shard region not found -> retry or terminal (Failed/Expired)
+          - Deliverable -> create AwaitingAck state
+      -> For recurring reminders: pre-create next occurrence
+      -> Commit all mutations in a single CommitReminderMutationsAsync call:
+          - Pending upserts (retries + next recurring occurrences)
+          - Terminal completions
+          - AwaitingAck transitions
+      -> Deliver ReminderEnvelope<T> only after the commit succeeds
+  -> Update overview (incrementally from batch results; reload from storage only on failure)
+  -> Schedule next fetch timer
 ```
-Fetch batch (SELECT with LIMIT/TOP)
-  → Process in delivery/persist chunks
-      → Deliver via Tell (fire-and-forget, irrevocable)
-      → Mark completed one-time reminders (batched UPDATE)
-      → Schedule retries for unresolvable shard regions
-      → Schedule next occurrence for recurring reminders
-  → Loop until no more due reminders
+
+### Ack handler
+
+Acks are **not** written to storage immediately. They are buffered in memory and flushed in batches.
+
+```text
+ReminderAck received:
+  -> Buffer in _bufferedAcknowledgements, keyed by (Entity, Key, DueTimeUtc)
+  -> Duplicate acks for the same occurrence are coalesced (additional senders appended)
+  -> Schedule a FlushBufferedAcks self-message (debounced by flag)
+
+FlushBufferedAcks:
+  -> Drain buffer in batches of AckFlushBatchSize (default 256)
+  -> Call Storage.AcknowledgeRemindersAsync per batch
+  -> Storage checks: still AwaitingAck? Before deadline? -> mark Delivered
+  -> Stale, superseded, expired, or already-acked -> return NotFound
+  -> Reply to all buffered senders with the result
+  -> On success, refresh the ack-timeout schedule from storage
+  -> On failure, reply Error to senders; the occurrence stays AwaitingAck
+    and will be retried after ack timeout
+```
+
+Buffered acks are also flushed at the start of each `FetchReminders` tick and each `CheckAckTimeouts` tick, ensuring pending acks are committed before new work begins.
+
+### Ack-timeout checker
+
+Ack-timeout checking is **event-driven**, not periodic. After delivering reminders, the scheduler computes the earliest ack deadline in the batch and schedules a one-shot `CheckAckTimeouts` timer at exactly that deadline. The timer is replaced if an earlier deadline is found.
+
+```text
+CheckAckTimeouts fires:
+  -> Flush buffered ack writes (if any)
+  -> Expire stale occurrences
+  -> Scan storage for AwaitingAck rows whose ack deadline has elapsed
+  -> For each timed-out occurrence:
+      -> If retry is possible (within MaxDeliveryAttempts and deadline):
+          schedule retry with exponential backoff
+      -> Otherwise: mark Failed or Expired
+  -> Commit mutations via CommitReminderMutationsAsync
+  -> Refresh ack-timeout schedule from storage
 ```
 
 ## Threat Model
 
-The primary threat is **asymmetric database failure**: reads succeed but writes fail. This is the exact scenario from issue #73, where Azure SQL at 100% DTU could serve reads from the buffer pool but write I/O was saturated.
+The primary threat is **asymmetric database failure**: reads succeed but writes fail.
 
 ### Why total database failure is safe
 
-If the database is completely unavailable, `GetNextRemindersAsync` (a read) fails in Phase 1. No reminders are fetched, no deliveries happen. The scheduler breaks out of the loop and retries on the next tick. This is completely safe.
+If the database is completely unavailable, the due-reminder fetch fails before any reminders are delivered.
+No delivery occurs and the scheduler retries on a later tick.
 
-### Why asymmetric failure is dangerous
+### Why asymmetric failure used to be dangerous
 
-When reads work but writes fail:
+The historical failure mode was:
 
-1. **Fetch succeeds** — we get a batch of reminders
-2. **Deliver succeeds** — `Tell` is in-process, doesn't touch the database
-3. **Mark-complete fails** — write timeout
-4. Reminders remain `IsCompleted = 0` in the database
-5. On the next tick, the same reminders are re-fetched and re-delivered
+1. Fetch succeeds
+2. Delivery succeeds
+3. Persistence of delivery state fails
+4. The same reminders remain Pending
+5. The next tick re-fetches and re-delivers them
 
-Without mitigation, this creates a **self-inflicted denial of service**:
-- The same N reminders are delivered every tick (~5 seconds)
-- Those entities' mailboxes fill with duplicate messages
-- Other due reminders beyond the `LIMIT`/`TOP` batch are never reached
-- The shard regions can't process real work
+That created duplicate-delivery storms under write pressure.
 
-## Mitigations
+### Current mitigation
 
-### 1. Per-Phase Cancellation Tokens
+Delivery-state writes now happen **before** user messages are sent.
 
-**Problem:** A single `CancellationTokenSource` shared across all phases meant a slow fetch could starve mark-complete of its timeout budget.
+- If those writes fail, the scheduler opens the write circuit and sends nothing.
+- The first-failure duplicate blast radius for delivery-state write failure is therefore zero.
+- While the circuit is open, the scheduler probes with a single reminder before resuming full batches.
 
-**Fix:** Each phase (fetch, mark-complete, retries, recurring, overview) gets its own `CancellationTokenSource(StorageTimeout)`.
+## Important Failure Modes
 
-### 2. Bounded Batch Size (`MaxBatchSize`)
+### Ack lost or recipient crashes before acking
 
-**Problem:** `GetNextRemindersAsync` had no row limit, fetching all due reminders in a single query. With 25K reminders, the SELECT alone could exceed the timeout.
+- The occurrence remains `AwaitingAck`.
+- Once `AckTimeout` elapses, the deadline-driven `CheckAckTimeouts` timer fires.
+- The scheduler retries with exponential backoff (`RetryBackoffBase`, capped by `MaxRetryBackoff`).
+- Retries stop when the occurrence would exceed its deadline or `MaxDeliveryAttempts`.
 
-**Fix:** `MaxBatchSize` setting (default 1,000) adds `TOP`/`LIMIT` to the query. Reminders are processed in a loop of bounded batches.
+### Ack buffer flush fails
 
-### 3. Batched UPDATE via VALUES JOIN
+- The ack write is dropped. All buffered senders receive an `Error` response.
+- The occurrence stays `AwaitingAck` in storage.
+- When the ack deadline elapses, `CheckAckTimeouts` re-encounters the row and retries delivery.
+- The consumer may receive a duplicate delivery; idempotency handles this.
 
-**Problem:** `MarkRemindersAsCompletedAsync` executed N individual UPDATE statements in a single transaction. With 2,000 reminders, that's 2,000 sequential round-trips, consistently exceeding the 5-second timeout on a loaded database.
+### Scheduler restart / singleton handoff
 
-**Fix:** Groups completions by `(Status, When)`, chunks at 500 per statement (to stay within SQL Server's 2,100 parameter limit), and uses dialect-specific batched UPDATE syntax:
-- **SQL Server:** `UPDATE t ... FROM table t INNER JOIN (VALUES ...) AS v(...) ON ...`
-- **PostgreSQL:** `UPDATE table t SET ... FROM (VALUES ...) AS v(...) WHERE ...`
+- Awaiting-ack state is stored in the database, not only in memory.
+- On startup, the scheduler loads the next ack deadline from storage as part of `InitResult` and schedules the timeout check before processing any messages.
+- Late acks remain safe because they are matched by `DueTimeUtc`.
 
-Each chunk auto-commits independently (no wrapping transaction). If chunk 4 of 5 times out, chunks 1-3 are already persisted. Mark-complete is idempotent, so partial progress is safe.
+### Late ack for superseded recurring occurrence
 
-### 4. Write Circuit Breaker
+- The old occurrence is already expired or no longer AwaitingAck.
+- The scheduler returns `NotFound`.
+- The newer occurrence is unaffected.
 
-**Problem:** Even with all the above, if writes are failing, each tick still fetches a full batch and delivers it before discovering the write failure. With 1,000 reminders and 5-second ticks, that's 1,000 duplicate deliveries every 5 seconds.
+### Reminder becomes stale in the mailbox
 
-**Fix:** A simple boolean circuit breaker on the scheduler actor:
+- The envelope carries `Deadline` to user code.
+- Consumers can call `envelope.Deadline.IsExpired()` before doing side effects.
+- Even if the consumer declines to act, it should still ack to stop useless retries.
 
-- **Normal state:** `ProcessReminders` fetches `MaxBatchSize` per batch.
-- **Circuit opens:** When any write operation fails (mark-complete, schedule-retry, schedule-recurring), `_writeCircuitOpen` is set to `true` and the loop breaks.
-- **Probing:** On the next tick, if the circuit is open, `effectiveBatchSize` drops to 1. The scheduler fetches and delivers a single reminder, then attempts mark-complete. This limits the blast radius to 1 duplicate delivery.
-- **Circuit closes:** If the probe's write succeeds, `_writeCircuitOpen` is reset to `false` and `effectiveBatchSize` returns to `MaxBatchSize`. The scheduler immediately continues with full-batch processing in the same run.
+## Backpressure and SQL Design
 
-### 5. Interleaved Deliver/Persist Chunks (`DeliveryCommitChunkSize`)
+### 1. Bounded batch size (`MaxBatchSize`)
 
-**Problem:** Even with a write circuit breaker, the first tick after writes fail could still deliver a full batch (for example, 1,000 reminders) before the first write failure is detected.
+Due-reminder fetches use `TOP` / `LIMIT` so the scheduler never attempts to process the entire backlog in one query.
 
-**Fix:** Each fetched batch is processed in smaller chunks (`DeliveryCommitChunkSize`, default 100). After each chunk is delivered, writes are attempted immediately. If writes fail, processing stops before the next chunk.
+### 2. Chunked delivery commits (`DeliveryCommitChunkSize`)
 
-This bounds first-failure duplicate blast radius to chunk size instead of full fetch size.
+Each fetched batch is processed in smaller chunks. This bounds the amount of state the scheduler tries to persist per write phase.
 
-### 6. Recurring durability boundary changed
+### 3. Batched SQL writes
 
-**Problem:** If mark-complete succeeded for a recurring reminder but scheduling the next occurrence failed, the recurring chain could break permanently.
+Hot-path writes are batched into single round-trips:
 
-**Fix:** Recurring reminders are no longer marked complete. Instead, their durability boundary is successful persistence of the next occurrence (idempotent upsert). If scheduling the next occurrence fails, the original reminder remains pending and can be retried on the next tick.
+- **Delivery path**: `CommitReminderMutationsAsync` handles pending upserts (retries + next recurring occurrences), terminal completions, and awaiting-ack transitions in a single call per chunk.
+- **Ack path**: `AcknowledgeRemindersAsync` flushes buffered acks in batches of `AckFlushBatchSize`.
 
-**Blast radius comparison during a 1-minute write outage (12 ticks at 5s interval):**
+This avoids one round-trip per reminder in both the delivery and acknowledgement paths.
 
-| Scenario | Deliveries per tick | Total duplicates |
-|----------|-------------------:|----------------:|
-| No mitigation (original code) | 1,000 | 12,000 |
-| With circuit breaker | 1 (probe) | 12 |
+### 4. Pending overview excludes AwaitingAck
 
-**First-failure duplicate bound:**
+Pending-overview queries only count actionable `Pending` rows.
 
-| Scenario | First failed tick duplicate upper bound |
-|----------|---------------------------------------:|
-| Legacy full-batch flow | `MaxBatchSize` |
-| Interleaved chunk flow | `DeliveryCommitChunkSize` |
+- `AwaitingAck` rows are not treated as pending work.
+- Expired rows are excluded by deadline filters.
+- This prevents hot empty-fetch polling while the system is simply waiting for acks.
 
-## Remaining Accepted Risks
+### 5. Incremental overview maintenance
 
-### First-tick delivery before circuit opens
+The scheduler maintains the `ReminderOverview` incrementally during batch processing by applying each upserted reminder to the in-memory overview. A full storage reload only happens when a fetch or write fails. This avoids an extra query per tick.
 
-On the first tick after writes break, the scheduler has no way to know writes are failing until it tries. It delivers a full batch before discovering the problem. This is unavoidable without a health-check mechanism that runs before fetch.
+### 6. Write circuit breaker
 
-**Accepted because:** One batch of duplicates is tolerable. The circuit breaker prevents the sustained flood.
+When any hot-path write fails (in either `ProcessReminders` or `ProcessAckTimeouts`):
 
-### Probe re-delivery
+- The circuit opens.
+- The current run stops.
+- Later runs probe with a single reminder.
+- Once the probe succeeds, the scheduler resumes full-batch processing in the same run.
 
-During the circuit-open period, each probe tick delivers 1 reminder that may have already been delivered. Under at-least-once semantics, this is expected behavior. The consumer must be idempotent.
+## Accepted Trade-offs
+
+### At-least-once remains the contract
+
+This system still allows duplicates during normal distributed failure modes.
+The design goal is to keep those duplicates bounded and occurrence-specific.
+
+### Recurring reminders are latest-only, not catch-up
+
+If an old recurring occurrence is still unacked when the next occurrence becomes due, the old one expires instead of building an unbounded replay backlog.
+
+### Deadline expiration is best-effort cleanup
+
+The scheduler marks expired rows terminally during each tick (as a prelude to fetching), but correctness does not depend on cleanup running first.
+Fetch and ack paths also enforce the deadline directly.
+
+### Ack writes are eventually consistent
+
+Acks are buffered in memory and flushed in batches rather than written per-ack. This trades immediate durability for throughput. If the scheduler crashes between receiving an ack and flushing it, the occurrence stays `AwaitingAck` and will be retried after timeout — which is the same outcome as if the ack message had been lost in transit.

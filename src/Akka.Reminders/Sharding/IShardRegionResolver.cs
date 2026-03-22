@@ -17,9 +17,10 @@ public interface IShardRegionResolver
     /// Delivers a reminder message to the target entity.
     /// Implementations handle the delivery mechanism (e.g., wrapping in ShardingEnvelope for cluster sharding).
     /// </summary>
-    /// <param name="entity">The target entity for the reminder</param>
-    /// <param name="message">The reminder message to deliver</param>
-    public void DeliverReminder(ReminderEntity entity, object message);
+    /// <param name="entity">The target entity for the reminder.</param>
+    /// <param name="envelope">The reminder envelope containing the payload and metadata.</param>
+    /// <param name="sender">Optional sender actor reference. Defaults to <see cref="ActorRefs.NoSender"/>.</param>
+    public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope, IActorRef? sender = null);
 }
 
 /// <summary>
@@ -49,13 +50,10 @@ public sealed class DefaultShardRegionResolver : IShardRegionResolver
         return null;
     }
 
-    public void DeliverReminder(ReminderEntity entity, object message)
+    public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope, IActorRef? sender = null)
     {
         var shardRegion = TryResolve(entity);
-        // Wrap message in ShardingEnvelope for cluster sharding
-        
-        // we don't want actors replying to the scheduler, so NoSender is used
-        shardRegion?.Tell(new ShardingEnvelope(entity.EntityId, message), ActorRefs.NoSender);
+        shardRegion?.Tell(new ShardingEnvelope(entity.EntityId, envelope), sender ?? ActorRefs.NoSender);
     }
 }
 
@@ -119,10 +117,9 @@ public sealed class TestShardRegionResolver : IShardRegionResolver
         return _shardRegions.GetValueOrDefault(entity.ShardRegionName);
     }
 
-    public void DeliverReminder(ReminderEntity entity, object message)
+    public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope, IActorRef? sender = null)
     {
         var actor = TryResolve(entity);
-        // Deliver message directly without wrapping - test actors handle raw messages
-        actor?.Tell(message, ActorRefs.NoSender);
+        actor?.Tell(envelope, sender ?? ActorRefs.NoSender);
     }
 }

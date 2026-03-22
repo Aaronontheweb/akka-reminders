@@ -12,6 +12,14 @@ internal sealed class ReminderClient : IReminderClient
     private readonly IActorRef _schedulerProxy;
     private readonly TimeSpan _defaultTimeout = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// Longer timeout for ack operations. The scheduler's ack handler performs a storage write
+    /// that may take up to <c>StorageTimeout</c> (default 5 s) to complete. Using the same
+    /// 5-second default as <see cref="_defaultTimeout"/> would race against that write and cause
+    /// the caller to misreport a successful ack as a timeout failure.
+    /// </summary>
+    private readonly TimeSpan _ackTimeout = TimeSpan.FromSeconds(15);
+
     public ReminderClient(IActorRef schedulerProxy, ReminderEntity entity)
     {
         _schedulerProxy = schedulerProxy;
@@ -26,9 +34,16 @@ internal sealed class ReminderClient : IReminderClient
         ReminderKey key,
         DateTimeOffset when,
         object message,
+        TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleReminder(Entity, key, when, message, RepeatInterval: null);
+        var command = new ReminderProtocol.ScheduleReminder(
+            Entity,
+            key,
+            when,
+            message,
+            RepeatInterval: null,
+            MaxDeliveryWindow: maxDeliveryWindow);
 
         try
         {
@@ -63,9 +78,16 @@ internal sealed class ReminderClient : IReminderClient
         DateTimeOffset firstOccurrence,
         TimeSpan interval,
         object message,
+        TimeSpan? maxDeliveryWindow = null,
         CancellationToken ct = default)
     {
-        var command = new ReminderProtocol.ScheduleReminder(Entity, key, firstOccurrence, message, RepeatInterval: interval);
+        var command = new ReminderProtocol.ScheduleReminder(
+            Entity,
+            key,
+            firstOccurrence,
+            message,
+            RepeatInterval: interval,
+            MaxDeliveryWindow: maxDeliveryWindow);
 
         try
         {
@@ -113,7 +135,7 @@ internal sealed class ReminderClient : IReminderClient
             return new ReminderProtocol.RemindersCancelled(
                 Entity,
                 ReminderCancelResponseCode.Error,
-                Array.Empty<ReminderKey>(),
+                [],
                 "Request timed out while communicating with reminder scheduler");
         }
         catch (Exception ex)
@@ -121,7 +143,7 @@ internal sealed class ReminderClient : IReminderClient
             return new ReminderProtocol.RemindersCancelled(
                 Entity,
                 ReminderCancelResponseCode.Error,
-                Array.Empty<ReminderKey>(),
+                [],
                 $"Error canceling reminder: {ex.Message}");
         }
     }
@@ -146,7 +168,7 @@ internal sealed class ReminderClient : IReminderClient
             return new ReminderProtocol.RemindersCancelled(
                 Entity,
                 ReminderCancelResponseCode.Error,
-                Array.Empty<ReminderKey>(),
+                [],
                 "Request timed out while communicating with reminder scheduler");
         }
         catch (Exception ex)
@@ -154,7 +176,7 @@ internal sealed class ReminderClient : IReminderClient
             return new ReminderProtocol.RemindersCancelled(
                 Entity,
                 ReminderCancelResponseCode.Error,
-                Array.Empty<ReminderKey>(),
+                [],
                 $"Error canceling all reminders: {ex.Message}");
         }
     }
@@ -179,7 +201,7 @@ internal sealed class ReminderClient : IReminderClient
             return new ReminderProtocol.RemindersForEntity(
                 Entity,
                 FetchRemindersResponseCode.Error,
-                Array.Empty<ScheduledReminder>(),
+                [],
                 "Request timed out while communicating with reminder scheduler");
         }
         catch (Exception ex)
@@ -187,8 +209,42 @@ internal sealed class ReminderClient : IReminderClient
             return new ReminderProtocol.RemindersForEntity(
                 Entity,
                 FetchRemindersResponseCode.Error,
-                Array.Empty<ScheduledReminder>(),
+                [],
                 $"Error fetching reminders: {ex.Message}");
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<ReminderProtocol.ReminderAckResponse> AckAsync(
+        ReminderEnvelope envelope,
+        CancellationToken ct = default)
+    {
+        var command = new ReminderProtocol.ReminderAck(envelope.Entity, envelope.Key, envelope.DueTimeUtc);
+
+        try
+        {
+            var response = await _schedulerProxy.Ask<ReminderProtocol.ReminderAckResponse>(
+                command, _ackTimeout, ct);
+
+            return response;
+        }
+        catch (AskTimeoutException)
+        {
+            return new ReminderProtocol.ReminderAckResponse(
+                envelope.Entity,
+                envelope.Key,
+                envelope.DueTimeUtc,
+                ReminderAckResponseCode.Error,
+                "Request timed out while acknowledging reminder");
+        }
+        catch (Exception ex)
+        {
+            return new ReminderProtocol.ReminderAckResponse(
+                envelope.Entity,
+                envelope.Key,
+                envelope.DueTimeUtc,
+                ReminderAckResponseCode.Error,
+                $"Error acknowledging reminder: {ex.Message}");
         }
     }
 }

@@ -7,6 +7,7 @@
     <File Path="README.md" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/Akka.Reminders.Migration.Tests/Akka.Reminders.Migration.Tests.csproj" />
     <Project Path="src/Akka.Reminders.PostgreSql/Akka.Reminders.PostgreSql.csproj" />
     <Project Path="src/Akka.Reminders.Sql/Akka.Reminders.Sql.csproj" />
     <Project Path="src/Akka.Reminders.SqlServer/Akka.Reminders.SqlServer.csproj" />

@@ -50,12 +50,12 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
             $"reminder-scheduler-{Guid.NewGuid():N}");
     }
 
-    private async Task<List<string>> CollectMessages(TestProbe probe, int count, TimeSpan timeout)
+    private async Task<List<ReminderEnvelope<string>>> CollectMessages(TestProbe probe, int count, TimeSpan timeout)
     {
-        var messages = new List<string>();
+        var messages = new List<ReminderEnvelope<string>>();
         for (var i = 0; i < count; i++)
         {
-            messages.Add(await probe.ExpectMsgAsync<string>(timeout));
+            messages.Add(await probe.ExpectMsgAsync<ReminderEnvelope<string>>(timeout));
         }
         return messages;
     }
@@ -101,11 +101,8 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         var scheduler = CreateScheduler(maxBatchSize: 1000, deliveryCommitChunkSize: 1000);
         await WaitForSchedulerReady(scheduler);
 
-        // Tick 1: all 5 delivered before mark-complete fails -> circuit opens.
+        // Tick 1: delivery-tracking write fails before any reminders are sent -> circuit opens.
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
-        var firstTickMessages = await CollectMessages(testProbe, 5, TimeSpan.FromSeconds(5));
-        Assert.Equal(5, firstTickMessages.Count);
-
         await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
     }
 
@@ -145,9 +142,8 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         await WaitForSchedulerReady(scheduler);
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
 
-        // First failed tick should be bounded by DeliveryCommitChunkSize.
-        await CollectMessages(testProbe, 3, TimeSpan.FromSeconds(5));
-        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(300));
+        // Failed writes now prevent delivery entirely, reducing the first-failure blast radius to zero.
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
     }
 
     [Fact]
@@ -164,22 +160,15 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         var scheduler = CreateScheduler(maxBatchSize: 1000, deliveryCommitChunkSize: 3);
         await WaitForSchedulerReady(scheduler);
 
-        // Outage tick: first-failure blast radius is bounded by chunk size.
+        // Outage tick: failed writes prevent any delivery.
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
-        await CollectMessages(testProbe, 3, TimeSpan.FromSeconds(5));
-        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(300));
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
 
-        // Database recovers: first successful probe should close the circuit,
-        // and the following tick should resume full-batch processing.
+        // Database recovers: the probe succeeds, closes the circuit, and the same run resumes full-batch processing.
         _storage.FailWrites = false;
 
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
-        await CollectMessages(testProbe, 1, TimeSpan.FromSeconds(5));
-
-        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
-        await CollectMessages(testProbe, 5, TimeSpan.FromSeconds(5));
-
-        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
+        await CollectMessages(testProbe, 6, TimeSpan.FromSeconds(5));
         await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
     }
 }

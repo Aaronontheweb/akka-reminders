@@ -530,6 +530,258 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
 
     #endregion
 
+    #region Awaiting Ack / Deadline Tests
+
+    /// <summary>
+    /// When a reminder is delivered, the scheduler moves it from Pending to AwaitingAck.
+    /// AwaitingAck reminders must NOT appear in the pending overview — otherwise the
+    /// scheduler would re-fetch and re-deliver them on the next tick, causing duplicates.
+    /// </summary>
+    [Fact]
+    public async Task MarkRemindersAsAwaitingAck_ShouldRemoveReminderFromPendingOverview()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(5));
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        // Transition to AwaitingAck — simulates what the scheduler does after delivering
+        // the reminder via Tell. The ackDeadline is when the scheduler will retry if no
+        // ack arrives (now + AckTimeout).
+        var awaitingAck = new AwaitingAckReminder(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc,
+            now,           // deliveredAt
+            now.AddMinutes(1)); // ackDeadline
+
+        var result = await Storage.MarkRemindersAsAwaitingAckAsync([awaitingAck]);
+        Assert.True(result);
+
+        // The overview only counts Pending rows. AwaitingAck rows are invisible to the
+        // fetch loop — they're tracked by the ack-timeout checker instead.
+        var overview = await Storage.GetRemindersOverviewAsync(now);
+        Assert.Equal(0, overview.TotalPendingReminders);
+    }
+
+    /// <summary>
+    /// Acks are matched by the full occurrence key: (Entity, Key, DueTimeUtc).
+    /// A DueTimeUtc mismatch — even by one second — must return NotFound.
+    /// This is critical for recurring reminders: a late ack for an old occurrence
+    /// (different DueTimeUtc) must not accidentally complete the current one.
+    /// </summary>
+    [Fact]
+    public async Task AcknowledgeReminderAsync_ShouldRequireMatchingDueTime()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(5));
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        var awaitingAck = new AwaitingAckReminder(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc,
+            now,
+            now.AddMinutes(1));
+        await Storage.MarkRemindersAsAwaitingAckAsync([awaitingAck]);
+
+        // Ack with wrong DueTimeUtc — off by 1 second. This simulates a late ack
+        // arriving for a superseded occurrence of a recurring reminder.
+        var wrongAck = await Storage.AcknowledgeReminderAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc.AddSeconds(1), // wrong occurrence
+            now.AddSeconds(10));
+
+        Assert.False(wrongAck.Success);
+        Assert.Equal(ReminderAckStorageStatus.NotFound, wrongAck.Status);
+
+        // Ack with correct DueTimeUtc — matches the occurrence identity exactly.
+        var correctAck = await Storage.AcknowledgeReminderAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc,
+            now.AddSeconds(10));
+
+        Assert.True(correctAck.Success);
+        Assert.Equal(ReminderAckStorageStatus.Success, correctAck.Status);
+    }
+
+    /// <summary>
+    /// This test exercises the core delivery-commit pattern: in a single atomic batch,
+    /// the scheduler must (1) insert the next recurring occurrence as Pending and
+    /// (2) move the current occurrence to AwaitingAck. Both must succeed or neither.
+    ///
+    /// After the commit:
+    /// - The overview should show exactly 1 pending reminder (the next occurrence).
+    ///   The current occurrence is AwaitingAck and invisible to the fetch loop.
+    /// - Both occurrences should be visible via GetRemindersForEntityAsync (which
+    ///   returns both Pending and AwaitingAck rows for the entity).
+    /// - The current (AwaitingAck) occurrence should be ackable.
+    /// </summary>
+    [Fact]
+    public async Task CommitReminderMutationsAsync_ShouldAtomicallyMovePendingToAwaitingAckAndUpsertNextOccurrence()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = new ScheduledReminder(
+            CreateTestEntity(),
+            CreateTestKey("atomic-recurring"),
+            now.AddMinutes(1),
+            "payload",
+            RepeatInterval: TimeSpan.FromMinutes(1),
+            OccurrenceDueTimeUtc: now.AddMinutes(1));
+
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        // Create the next recurring occurrence — due 1 interval later.
+        // In production, CreateNextRecurringOccurrence does this.
+        var nextOccurrence = reminder with
+        {
+            When = reminder.DueTimeUtc.AddMinutes(1),
+            OccurrenceDueTimeUtc = reminder.DueTimeUtc.AddMinutes(1)
+        };
+
+        var awaiting = new AwaitingAckReminder(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc,
+            now,
+            now.AddMinutes(1));
+
+        // Commit both the next occurrence upsert and the AwaitingAck transition
+        // in a single batch — this is the atomicity boundary that prevents
+        // partial state during failures.
+        var result = await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
+            [nextOccurrence],  // PendingUpserts: next recurring occurrence
+            [],                // CompletedReminders: none
+            [awaiting]));      // AwaitingAckReminders: current occurrence
+
+        Assert.True(result);
+
+        // Only the next occurrence is Pending — the current one is AwaitingAck
+        // and excluded from the overview.
+        var overview = await Storage.GetRemindersOverviewAsync(now);
+        Assert.Equal(1, overview.TotalPendingReminders);
+
+        // GetRemindersForEntityAsync returns both Pending and AwaitingAck rows,
+        // so both occurrences should be visible (two different DueTimeUtc values).
+        var reminders = await Storage.GetRemindersForEntityAsync(reminder.Entity);
+        Assert.Equal(2, reminders.Count);
+        Assert.Contains(reminders, r => Math.Abs((r.DueTimeUtc - reminder.DueTimeUtc).TotalMilliseconds) < 0.001);
+        Assert.Contains(reminders, r => Math.Abs((r.DueTimeUtc - nextOccurrence.DueTimeUtc).TotalMilliseconds) < 0.001);
+
+        // The AwaitingAck occurrence should be ackable by its original DueTimeUtc.
+        var ack = await Storage.AcknowledgeReminderAsync(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now.AddSeconds(5));
+        Assert.True(ack.Success);
+    }
+
+    /// <summary>
+    /// When acks are flushed in a batch, the storage must return per-occurrence results.
+    /// A batch might contain both valid acks (matching an AwaitingAck row) and stale acks
+    /// (no matching row — the occurrence was already completed, expired, or superseded).
+    /// Each result must independently report Success or NotFound.
+    /// </summary>
+    [Fact]
+    public async Task AcknowledgeRemindersAsync_ShouldReturnPerOccurrenceResults()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(5));
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        // Move to AwaitingAck so there's something to acknowledge.
+        await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
+            [],
+            [],
+            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+
+        // Ack two occurrences in a single batch: one that exists (correct DueTimeUtc)
+        // and one that doesn't (DueTimeUtc + 1 minute — no such occurrence).
+        var missingDueTime = reminder.DueTimeUtc.AddMinutes(1);
+        var results = await Storage.AcknowledgeRemindersAsync([
+            new ReminderAcknowledgement(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now.AddSeconds(5)),
+            new ReminderAcknowledgement(reminder.Entity, reminder.Key, missingDueTime, now.AddSeconds(5))
+        ]);
+
+        // Results are positional — one per ack in the input batch.
+        Assert.Equal(2, results.Count);
+        Assert.Equal(ReminderAckStorageStatus.Success, results[0].Status);  // valid ack
+        Assert.Equal(ReminderAckStorageStatus.NotFound, results[1].Status); // stale/missing ack
+    }
+
+    /// <summary>
+    /// The scheduler uses event-driven ack-timeout checking. After delivering reminders,
+    /// it queries storage for the earliest ack deadline to schedule a one-shot timer.
+    /// This test verifies that GetNextAwaitingAckDeadlineAsync returns the minimum
+    /// ack deadline across all AwaitingAck rows, regardless of insertion order.
+    /// </summary>
+    [Fact]
+    public async Task GetNextAwaitingAckDeadlineAsync_ShouldReturnEarliestAwaitingDeadline()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var first = CreateTestReminder(CreateTestEntity("a", "1"), CreateTestKey("first"), now.AddMinutes(1));
+        var second = CreateTestReminder(CreateTestEntity("a", "2"), CreateTestKey("second"), now.AddMinutes(2));
+
+        await Storage!.ScheduleReminderAsync(first);
+        await Storage.ScheduleReminderAsync(second);
+
+        // Move both to AwaitingAck with different deadlines.
+        // "first" has a later deadline (20s), "second" has an earlier one (10s).
+        // The query must return the earlier deadline regardless of insertion order.
+        await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
+            [],
+            [],
+            [
+                new AwaitingAckReminder(first.Entity, first.Key, first.DueTimeUtc, now, now.AddSeconds(20)),
+                new AwaitingAckReminder(second.Entity, second.Key, second.DueTimeUtc, now, now.AddSeconds(10))
+            ]));
+
+        var deadline = await Storage.GetNextAwaitingAckDeadlineAsync();
+
+        // Should be the earlier deadline (now + 10s), not the first-inserted one (now + 20s).
+        Assert.NotNull(deadline);
+        Assert.True(Math.Abs((deadline!.Value - now.AddSeconds(10)).TotalMilliseconds) < 0.001);
+    }
+
+    /// <summary>
+    /// Reminders with a MaxDeliveryWindow have a computed DeliveryDeadlineUtc.
+    /// When the current time passes that deadline, ExpireRemindersAsync should
+    /// mark the reminder as completed with status Expired and remove it from
+    /// the pending set. This prevents stale reminders from being delivered
+    /// long after they're relevant.
+    ///
+    /// In this test, the reminder was due 2 minutes ago with a 1-minute delivery
+    /// window, so its deadline was 1 minute ago — it should be expired.
+    /// </summary>
+    [Fact]
+    public async Task ExpireRemindersAsync_ShouldCompleteExpiredPendingReminder()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var dueTime = now.AddMinutes(-2); // due 2 minutes ago
+        var reminder = new ScheduledReminder(
+            CreateTestEntity(),
+            CreateTestKey("expiring-reminder"),
+            dueTime,
+            "stale",
+            MaxDeliveryWindow: TimeSpan.FromMinutes(1),           // 1-minute window
+            DeliveryDeadlineUtc: dueTime.AddMinutes(1),           // deadline was 1 minute ago
+            OccurrenceDueTimeUtc: dueTime);
+
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        // Expire should find this reminder because now > dueTime + 1 minute.
+        var expiredCount = await Storage.ExpireRemindersAsync(now);
+        Assert.True(expiredCount >= 1);
+
+        // The reminder is gone from the pending set — it won't be fetched or delivered.
+        var overview = await Storage.GetRemindersOverviewAsync(now);
+        Assert.Equal(0, overview.TotalPendingReminders);
+
+        // GetRemindersForEntityAsync also excludes expired reminders.
+        var reminders = await Storage.GetRemindersForEntityAsync(reminder.Entity);
+        Assert.Empty(reminders);
+    }
+
+    #endregion
+
     #region Mark Completed Tests
 
     [Fact]
@@ -539,7 +791,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var reminder = CreateTestReminder();
         await Storage!.ScheduleReminderAsync(reminder);
 
-        var completed = new CompletedReminder(reminder.Entity, reminder.Key, DateTimeOffset.UtcNow);
+        var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, DateTimeOffset.UtcNow);
 
         // Act
         var result = await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
@@ -555,7 +807,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var reminder = CreateTestReminder();
         await Storage!.ScheduleReminderAsync(reminder);
 
-        var completed = new CompletedReminder(reminder.Entity, reminder.Key, DateTimeOffset.UtcNow);
+        var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, DateTimeOffset.UtcNow);
         await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
 
         // Act
@@ -576,8 +828,8 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage!.ScheduleReminderAsync(reminder1);
         await Storage.ScheduleReminderAsync(reminder2);
 
-        var completed1 = new CompletedReminder(reminder1.Entity, reminder1.Key, DateTimeOffset.UtcNow);
-        var completed2 = new CompletedReminder(reminder2.Entity, reminder2.Key, DateTimeOffset.UtcNow);
+        var completed1 = new CompletedReminder(reminder1.Entity, reminder1.Key, reminder1.DueTimeUtc, DateTimeOffset.UtcNow);
+        var completed2 = new CompletedReminder(reminder2.Entity, reminder2.Key, reminder2.DueTimeUtc, DateTimeOffset.UtcNow);
 
         // Act
         var result = await Storage.MarkRemindersAsCompletedAsync(new[] { completed1, completed2 });
@@ -600,7 +852,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage!.ScheduleReminderAsync(reminder);
 
         var completedTime = DateTimeOffset.UtcNow.AddDays(-10);
-        var completed = new CompletedReminder(reminder.Entity, reminder.Key, completedTime);
+        var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, completedTime);
         await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
 
         // Act
@@ -618,7 +870,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage!.ScheduleReminderAsync(reminder);
 
         var recentCompletedTime = DateTimeOffset.UtcNow.AddDays(-3);
-        var completed = new CompletedReminder(reminder.Entity, reminder.Key, recentCompletedTime);
+        var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, recentCompletedTime);
         await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
 
         // Act - cleanup reminders older than 5 days

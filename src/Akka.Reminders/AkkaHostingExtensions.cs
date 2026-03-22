@@ -11,6 +11,18 @@ namespace Akka.Reminders;
 public static class AkkaHostingExtensions
 {
     /// <summary>
+    /// Registers the <see cref="Serialization.ReminderSerializer"/> for all
+    /// <see cref="IReminderWireMessage"/> types using the Akka.Hosting serializer API.
+    /// </summary>
+    private static void RegisterReminderSerializer(AkkaConfigurationBuilder builder)
+    {
+        builder.WithCustomSerializer(
+            "reminder-serializer",
+            [typeof(IReminderWireMessage)],
+            system => new Serialization.ReminderSerializer(system));
+    }
+
+    /// <summary>
     /// Adds the Akka.Reminders system to the actor system.
     /// </summary>
     /// <param name="builder">The Akka configuration builder.</param>
@@ -36,6 +48,9 @@ public static class AkkaHostingExtensions
         reminderBuilder.WithRole(role);
         configure?.Invoke(reminderBuilder);
         var setup = reminderBuilder.Build();
+
+        // Register the reminder serializer for all IReminderWireMessage types.
+        RegisterReminderSerializer(builder);
 
         // Add the setup to the actor system
         builder.AddSetup(setup);
@@ -135,6 +150,9 @@ public static class AkkaHostingExtensions
     {
         var localBuilder = new LocalReminderConfigurationBuilder();
         configure?.Invoke(localBuilder);
+
+        // Register the reminder serializer for all IReminderWireMessage types.
+        RegisterReminderSerializer(builder);
 
         builder.WithActors((system, registry) =>
         {

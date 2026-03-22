@@ -29,51 +29,57 @@ internal sealed class SqlServerDialect : ISqlDialect
                     EntityId NVARCHAR(255) NOT NULL,
                     ReminderKey NVARCHAR(255) NOT NULL,
                     WhenUtc DATETIME2 NOT NULL,
+                    DueTimeUtc DATETIME2 NOT NULL,
                     RepeatIntervalTicks BIGINT NULL,
                     SerializerId INT NOT NULL,
                     Manifest NVARCHAR(500) NULL,
                     Payload VARBINARY(MAX) NOT NULL,
                     AttemptCount INT NOT NULL DEFAULT 0,
                     LastFailureReason NVARCHAR(MAX) NULL,
+                    MaxDeliveryWindowTicks BIGINT NULL,
+                    DeliveryDeadlineUtc DATETIME2 NULL,
                     IsCompleted BIT NOT NULL DEFAULT 0,
                     CompletedAtUtc DATETIME2 NULL,
                     CompletionStatus VARCHAR(20) NOT NULL DEFAULT 'Pending',
+                    DeliveredAtUtc DATETIME2 NULL,
+                    AckDeadlineUtc DATETIME2 NULL,
 
-                    CONSTRAINT PK_{tableName} PRIMARY KEY (ShardRegionName, EntityId, ReminderKey)
+                    CONSTRAINT PK_{tableName} PRIMARY KEY (ShardRegionName, EntityId, ReminderKey, DueTimeUtc)
                 );
 
                 CREATE INDEX IX_{tableName}_DueReminders
                 ON {fullTableName} (WhenUtc, ShardRegionName, EntityId)
-                WHERE IsCompleted = 0;
+                WHERE IsCompleted = 0 AND CompletionStatus = 'Pending';
 
                 CREATE INDEX IX_{tableName}_Cleanup
                 ON {fullTableName} (CompletedAtUtc)
                 WHERE IsCompleted = 1;
+
+                CREATE INDEX IX_{tableName}_AwaitingAck
+                ON {fullTableName} (AckDeadlineUtc)
+                WHERE CompletionStatus = 'AwaitingAck' AND IsCompleted = 0;
             END
             """;
     }
 
-    public string GetUpsertReminderSql(string schemaName, string tableName)
+    public string GetBatchUpsertRemindersSql(string schemaName, string tableName, int count)
     {
         var fullTableName = $"[{schemaName}].[{tableName}]";
+        var values = string.Join(",\n                ",
+            Enumerable.Range(0, count).Select(i =>
+                $"(@ShardRegionName{i}, @EntityId{i}, @ReminderKey{i}, @WhenUtc{i}, @DueTimeUtc{i}, @RepeatIntervalTicks{i}, @SerializerId{i}, @Manifest{i}, @Payload{i}, @AttemptCount{i}, @LastFailureReason{i}, @MaxDeliveryWindowTicks{i}, @DeliveryDeadlineUtc{i})"));
 
         return $"""
             MERGE {fullTableName} AS target
-            USING (SELECT
-                @ShardRegionName AS ShardRegionName,
-                @EntityId AS EntityId,
-                @ReminderKey AS ReminderKey,
-                @WhenUtc AS WhenUtc,
-                @RepeatIntervalTicks AS RepeatIntervalTicks,
-                @SerializerId AS SerializerId,
-                @Manifest AS Manifest,
-                @Payload AS Payload,
-                @AttemptCount AS AttemptCount,
-                @LastFailureReason AS LastFailureReason
-            ) AS source
+            USING (VALUES
+                {values}
+            ) AS source(ShardRegionName, EntityId, ReminderKey, WhenUtc, DueTimeUtc, RepeatIntervalTicks,
+                        SerializerId, Manifest, Payload, AttemptCount, LastFailureReason,
+                        MaxDeliveryWindowTicks, DeliveryDeadlineUtc)
             ON target.ShardRegionName = source.ShardRegionName
                AND target.EntityId = source.EntityId
                AND target.ReminderKey = source.ReminderKey
+               AND target.DueTimeUtc = source.DueTimeUtc
             WHEN MATCHED THEN
                 UPDATE SET
                     WhenUtc = source.WhenUtc,
@@ -83,16 +89,22 @@ internal sealed class SqlServerDialect : ISqlDialect
                     Payload = source.Payload,
                     AttemptCount = source.AttemptCount,
                     LastFailureReason = source.LastFailureReason,
+                    MaxDeliveryWindowTicks = source.MaxDeliveryWindowTicks,
+                    DeliveryDeadlineUtc = source.DeliveryDeadlineUtc,
                     IsCompleted = 0,
                     CompletedAtUtc = NULL,
-                    CompletionStatus = 'Pending'
+                    CompletionStatus = 'Pending',
+                    DeliveredAtUtc = NULL,
+                    AckDeadlineUtc = NULL
             WHEN NOT MATCHED THEN
-                INSERT (ShardRegionName, EntityId, ReminderKey, WhenUtc, RepeatIntervalTicks,
+                INSERT (ShardRegionName, EntityId, ReminderKey, WhenUtc, DueTimeUtc, RepeatIntervalTicks,
                         SerializerId, Manifest, Payload, AttemptCount, LastFailureReason,
-                        IsCompleted, CompletedAtUtc, CompletionStatus)
-                VALUES (source.ShardRegionName, source.EntityId, source.ReminderKey, source.WhenUtc,
+                        MaxDeliveryWindowTicks, DeliveryDeadlineUtc,
+                        IsCompleted, CompletedAtUtc, CompletionStatus, DeliveredAtUtc, AckDeadlineUtc)
+                VALUES (source.ShardRegionName, source.EntityId, source.ReminderKey, source.WhenUtc, source.DueTimeUtc,
                         source.RepeatIntervalTicks, source.SerializerId, source.Manifest, source.Payload,
-                        source.AttemptCount, source.LastFailureReason, 0, NULL, 'Pending');
+                        source.AttemptCount, source.LastFailureReason, source.MaxDeliveryWindowTicks,
+                        source.DeliveryDeadlineUtc, 0, NULL, 'Pending', NULL, NULL);
             """;
     }
 
@@ -104,50 +116,56 @@ internal sealed class SqlServerDialect : ISqlDialect
         var fullTableName = $"[{schemaName}].[{tableName}]";
 
         return $"""
-            SELECT TOP ({maxCount}) ShardRegionName, EntityId, ReminderKey, WhenUtc, RepeatIntervalTicks,
-                   SerializerId, Manifest, Payload, AttemptCount, LastFailureReason
+            SELECT TOP ({maxCount}) ShardRegionName, EntityId, ReminderKey, WhenUtc, DueTimeUtc, RepeatIntervalTicks,
+                   SerializerId, Manifest, Payload, AttemptCount, LastFailureReason,
+                   MaxDeliveryWindowTicks, DeliveryDeadlineUtc
             FROM {fullTableName}
             WHERE IsCompleted = 0
+              AND CompletionStatus = 'Pending'
               AND WhenUtc <= @UntilDeadline
+              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now)
             ORDER BY WhenUtc ASC;
-            """;
-    }
-
-    public string GetMarkCompletedSql(string schemaName, string tableName)
-    {
-        var fullTableName = $"[{schemaName}].[{tableName}]";
-
-        return $"""
-            UPDATE {fullTableName}
-            SET IsCompleted = 1,
-                CompletedAtUtc = @CompletedAtUtc,
-                CompletionStatus = @CompletionStatus
-            WHERE ShardRegionName = @ShardRegionName
-              AND EntityId = @EntityId
-              AND ReminderKey = @ReminderKey;
             """;
     }
 
     public string GetBatchMarkCompletedSql(string schemaName, string tableName, int count)
     {
         var fullTableName = $"[{schemaName}].[{tableName}]";
-
         var values = string.Join(",\n                ",
-            Enumerable.Range(0, count).Select(i =>
-                $"(@sr{i}, @eid{i}, @rk{i})"));
+            Enumerable.Range(0, count).Select(i => $"(@sr{i}, @eid{i}, @rk{i}, @due{i})"));
 
         return $"""
             UPDATE t
             SET t.IsCompleted = 1,
                 t.CompletedAtUtc = @CompletedAtUtc,
-                t.CompletionStatus = @CompletionStatus
+                t.CompletionStatus = @CompletionStatus,
+                t.DeliveredAtUtc = NULL,
+                t.AckDeadlineUtc = NULL
             FROM {fullTableName} t
             INNER JOIN (VALUES
                 {values}
-            ) AS v(ShardRegionName, EntityId, ReminderKey)
+            ) AS v(ShardRegionName, EntityId, ReminderKey, DueTimeUtc)
             ON t.ShardRegionName = v.ShardRegionName
                AND t.EntityId = v.EntityId
-               AND t.ReminderKey = v.ReminderKey;
+               AND t.ReminderKey = v.ReminderKey
+               AND t.DueTimeUtc = v.DueTimeUtc;
+            """;
+    }
+
+    public string GetExpireRemindersSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+
+        return $"""
+            UPDATE {fullTableName}
+            SET IsCompleted = 1,
+                CompletedAtUtc = @Now,
+                CompletionStatus = 'Expired',
+                DeliveredAtUtc = NULL,
+                AckDeadlineUtc = NULL
+            WHERE IsCompleted = 0
+              AND DeliveryDeadlineUtc IS NOT NULL
+              AND DeliveryDeadlineUtc <= @Now;
             """;
     }
 
@@ -169,7 +187,9 @@ internal sealed class SqlServerDialect : ISqlDialect
         return $"""
             SELECT COUNT(*) AS TotalCount, MIN(WhenUtc) AS NextWhenUtc
             FROM {fullTableName}
-            WHERE IsCompleted = 0;
+            WHERE IsCompleted = 0
+              AND CompletionStatus = 'Pending'
+              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now);
             """;
     }
 
@@ -181,6 +201,8 @@ internal sealed class SqlServerDialect : ISqlDialect
             SELECT WhenUtc
             FROM {fullTableName}
             WHERE IsCompleted = 0
+              AND CompletionStatus = 'Pending'
+              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now)
             ORDER BY WhenUtc ASC
             OFFSET @Skip ROWS FETCH NEXT 1 ROW ONLY;
             """;
@@ -194,7 +216,9 @@ internal sealed class SqlServerDialect : ISqlDialect
             UPDATE {fullTableName}
             SET IsCompleted = 1,
                 CompletedAtUtc = @CompletedAtUtc,
-                CompletionStatus = 'Cancelled'
+                CompletionStatus = 'Cancelled',
+                DeliveredAtUtc = NULL,
+                AckDeadlineUtc = NULL
             WHERE ShardRegionName = @ShardRegionName
               AND EntityId = @EntityId
               AND ReminderKey = @ReminderKey
@@ -210,7 +234,9 @@ internal sealed class SqlServerDialect : ISqlDialect
             UPDATE {fullTableName}
             SET IsCompleted = 1,
                 CompletedAtUtc = @CompletedAtUtc,
-                CompletionStatus = 'Cancelled'
+                CompletionStatus = 'Cancelled',
+                DeliveredAtUtc = NULL,
+                AckDeadlineUtc = NULL
             WHERE ShardRegionName = @ShardRegionName
               AND EntityId = @EntityId
               AND IsCompleted = 0;
@@ -222,13 +248,106 @@ internal sealed class SqlServerDialect : ISqlDialect
         var fullTableName = $"[{schemaName}].[{tableName}]";
 
         return $"""
-            SELECT ShardRegionName, EntityId, ReminderKey, WhenUtc, RepeatIntervalTicks,
-                   SerializerId, Manifest, Payload, AttemptCount, LastFailureReason, IsCompleted
+            SELECT ShardRegionName, EntityId, ReminderKey, WhenUtc, DueTimeUtc, RepeatIntervalTicks,
+                   SerializerId, Manifest, Payload, AttemptCount, LastFailureReason,
+                   MaxDeliveryWindowTicks, DeliveryDeadlineUtc
             FROM {fullTableName}
             WHERE ShardRegionName = @ShardRegionName
               AND EntityId = @EntityId
               AND IsCompleted = 0
+              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now)
             ORDER BY WhenUtc ASC;
+            """;
+    }
+
+    public string GetBatchMarkAsAwaitingAckSql(string schemaName, string tableName, int count)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+        var values = string.Join(",\n                ",
+            Enumerable.Range(0, count).Select(i => $"(@sr{i}, @eid{i}, @rk{i}, @due{i}, @del{i}, @ack{i})"));
+
+        return $"""
+            UPDATE t
+            SET t.CompletionStatus = 'AwaitingAck',
+                t.DeliveredAtUtc = v.DeliveredAtUtc,
+                t.AckDeadlineUtc = v.AckDeadlineUtc
+            FROM {fullTableName} t
+            INNER JOIN (VALUES
+                {values}
+            ) AS v(ShardRegionName, EntityId, ReminderKey, DueTimeUtc, DeliveredAtUtc, AckDeadlineUtc)
+            ON t.ShardRegionName = v.ShardRegionName
+               AND t.EntityId = v.EntityId
+               AND t.ReminderKey = v.ReminderKey
+               AND t.DueTimeUtc = v.DueTimeUtc
+            WHERE t.IsCompleted = 0
+              AND t.CompletionStatus = 'Pending';
+            """;
+    }
+
+    public string GetTimedOutAckRemindersSql(string schemaName, string tableName, int maxCount)
+    {
+        if (maxCount < 1)
+            throw new ArgumentOutOfRangeException(nameof(maxCount), "maxCount must be greater than or equal to 1.");
+
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+
+        return $"""
+            SELECT TOP ({maxCount}) ShardRegionName, EntityId, ReminderKey, WhenUtc, DueTimeUtc, RepeatIntervalTicks,
+                   SerializerId, Manifest, Payload, AttemptCount, LastFailureReason,
+                   MaxDeliveryWindowTicks, DeliveryDeadlineUtc
+            FROM {fullTableName}
+            WHERE CompletionStatus = 'AwaitingAck'
+              AND IsCompleted = 0
+              AND AckDeadlineUtc <= @Now
+            ORDER BY AckDeadlineUtc ASC;
+            """;
+    }
+
+    public string GetAcknowledgeReminderSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+
+        return $"""
+            UPDATE {fullTableName}
+            SET IsCompleted = 1,
+                CompletedAtUtc = @AckedAtUtc,
+                CompletionStatus = 'Delivered',
+                DeliveredAtUtc = NULL,
+                AckDeadlineUtc = NULL
+            WHERE ShardRegionName = @ShardRegionName
+              AND EntityId = @EntityId
+              AND ReminderKey = @ReminderKey
+              AND DueTimeUtc = @DueTimeUtc
+              AND CompletionStatus = 'AwaitingAck'
+              AND IsCompleted = 0
+              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @AckedAtUtc);
+            """;
+    }
+
+    public string GetBatchAcknowledgeRemindersSql(string schemaName, string tableName, int count)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+        var values = string.Join(",\n                ",
+            Enumerable.Range(0, count).Select(i => $"(@sr{i}, @eid{i}, @rk{i}, @due{i}, @acked{i})"));
+
+        return $"""
+            UPDATE t
+            SET t.IsCompleted = 1,
+                t.CompletedAtUtc = v.AckedAtUtc,
+                t.CompletionStatus = 'Delivered',
+                t.DeliveredAtUtc = NULL,
+                t.AckDeadlineUtc = NULL
+            FROM {fullTableName} t
+            INNER JOIN (VALUES
+                {values}
+            ) AS v(ShardRegionName, EntityId, ReminderKey, DueTimeUtc, AckedAtUtc)
+            ON t.ShardRegionName = v.ShardRegionName
+               AND t.EntityId = v.EntityId
+               AND t.ReminderKey = v.ReminderKey
+               AND t.DueTimeUtc = v.DueTimeUtc
+            WHERE t.CompletionStatus = 'AwaitingAck'
+              AND t.IsCompleted = 0
+              AND (t.DeliveryDeadlineUtc IS NULL OR t.DeliveryDeadlineUtc > v.AckedAtUtc);
             """;
     }
 

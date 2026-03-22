@@ -10,8 +10,14 @@ namespace Akka.Reminders.Tests;
 
 /// <summary>
 /// Tests for ReminderScheduler recovery behavior.
-/// Validates that the scheduler correctly loads and processes reminders from storage on startup,
-/// including overdue reminders that should have fired while the scheduler was down.
+///
+/// These tests simulate scheduler restarts by pre-populating InMemoryReminderStorage
+/// before creating the scheduler actor. Because storage is shared across scheduler
+/// instances, creating a new scheduler is equivalent to a singleton handoff or
+/// process restart — the new instance loads its state from the same storage.
+///
+/// All tests use TestScheduler for deterministic time control. Virtual time advances
+/// only via explicit Advance() calls, so timer-driven delivery is fully reproducible.
 /// </summary>
 public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
 {
@@ -26,7 +32,6 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
 
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
-        // Use TestScheduler for deterministic time control
         builder.AddHocon("akka.scheduler.implementation = \"Akka.TestKit.TestScheduler, Akka.TestKit\"", HoconAddMode.Prepend);
     }
 
@@ -45,16 +50,52 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
             $"reminder-scheduler-{Guid.NewGuid():N}");
     }
 
+    /// <summary>
+    /// Waits for the scheduler to finish initialization (PreStart → LoadReminderOverview
+    /// → PipeTo → Become(Scheduling) → UnstashAll). Sends a GetReminders query which
+    /// gets stashed during init and replayed after — the response proves the scheduler
+    /// is in the Scheduling behavior and ready to process commands.
+    /// </summary>
+    private async Task WaitForSchedulerReady(IActorRef scheduler)
+    {
+        var probe = new ReminderEntity("__probe__", "__probe__");
+        var response = await scheduler.Ask<ReminderProtocol.RemindersForEntity>(
+            new ReminderProtocol.GetReminders(probe),
+            TimeSpan.FromSeconds(10));
+        Assert.Equal(FetchRemindersResponseCode.Success, response.ResponseCode);
+    }
+
+    /// <summary>
+    /// Sends an ack to the scheduler and waits for the response. This guarantees the
+    /// ack has been buffered and flushed before the test continues — no arbitrary delay.
+    /// </summary>
+    private async Task AckAndWait(IActorRef scheduler, ReminderEnvelope envelope)
+    {
+        var response = await scheduler.Ask<ReminderProtocol.ReminderAckResponse>(
+            new ReminderProtocol.ReminderAck(envelope.Entity, envelope.Key, envelope.DueTimeUtc),
+            TimeSpan.FromSeconds(10));
+        Assert.Equal(ReminderAckResponseCode.Success, response.ResponseCode);
+    }
+
+    /// <summary>
+    /// Verifies that a new scheduler loads existing reminders from storage on startup.
+    /// Pre-populates storage with two future reminders, then creates the scheduler and
+    /// advances virtual time past each due time to confirm delivery.
+    ///
+    /// This simulates the normal startup path where the scheduler discovers pending work
+    /// from a previous instance or from application-level pre-seeding.
+    /// </summary>
     [Fact]
     public async Task Scheduler_ShouldLoadRemindersFromStorage_OnStartup()
     {
-        // Arrange - Pre-populate storage with reminders before scheduler starts
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
 
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var now = testScheduler.Now;
 
+        // Pre-populate storage before the scheduler exists — simulates reminders
+        // persisted by a previous scheduler instance or by application startup logic.
         var reminder1 = new ScheduledReminder(
             new ReminderEntity("test-region", "entity-1"),
             new ReminderKey("reminder-1"),
@@ -76,39 +117,52 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         await _storage.ScheduleReminderAsync(reminder1, CancellationToken.None);
         await _storage.ScheduleReminderAsync(reminder2, CancellationToken.None);
 
-        // Act - Create scheduler (triggers PreStart -> LoadReminderOverview)
+        // Create scheduler — triggers PreStart → LoadReminderOverview → TryScheduleFetchReminders.
         var scheduler = CreateScheduler();
+        await WaitForSchedulerReady(scheduler);
 
-        // Give scheduler time to initialize and load from storage
-        await Task.Delay(100);
-
-        // Assert - Verify reminders are loaded by checking they fire at the right times
+        // Advance past reminder-1's due time. The scheduler's fetch timer fires and
+        // delivers reminder-1 to the test probe via the shard region resolver.
         testScheduler.Advance(TimeSpan.FromSeconds(11));
-        var message1 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("message 1", message1);
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal("message 1", envelope1.Message);
 
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
+        // Ack reminder-1 so it's marked Delivered and won't be re-fetched on the next tick.
+        await AckAndWait(scheduler, envelope1);
 
+        // Reminder-2 hasn't fired yet — its due time is T+20s, we're only at T+11s.
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(100));
+
+        // Advance to reminder-2's due time.
         testScheduler.Advance(TimeSpan.FromSeconds(10));
-        var message2 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("message 2", message2);
+        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal("message 2", envelope2.Message);
     }
 
+    /// <summary>
+    /// Verifies that overdue reminders (due time in the past) are processed immediately
+    /// on startup. When a scheduler starts and finds reminders whose when_utc is already
+    /// past, TryScheduleFetchReminders computes a zero or negative delay (clamped to zero),
+    /// so the fetch timer fires on the next tick.
+    ///
+    /// This simulates a scheduler that was down for a period and needs to catch up on
+    /// missed deliveries.
+    /// </summary>
     [Fact]
     public async Task Scheduler_ShouldProcessOverdueReminders_Immediately()
     {
-        // Arrange - Create reminders that are already overdue
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
 
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var now = testScheduler.Now;
 
-        // These reminders are already past due
+        // These reminders are already past due — simulates the scheduler being down
+        // when they were supposed to fire.
         var overdueReminder1 = new ScheduledReminder(
             new ReminderEntity("test-region", "entity-1"),
             new ReminderKey("overdue-1"),
-            now.AddSeconds(-5), // 5 seconds ago
+            now.AddSeconds(-5),
             "overdue message 1",
             RepeatInterval: null,
             AttemptCount: 0,
@@ -117,7 +171,7 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         var overdueReminder2 = new ScheduledReminder(
             new ReminderEntity("test-region", "entity-2"),
             new ReminderKey("overdue-2"),
-            now.AddSeconds(-10), // 10 seconds ago
+            now.AddSeconds(-10),
             "overdue message 2",
             RepeatInterval: null,
             AttemptCount: 0,
@@ -126,34 +180,33 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         await _storage.ScheduleReminderAsync(overdueReminder1, CancellationToken.None);
         await _storage.ScheduleReminderAsync(overdueReminder2, CancellationToken.None);
 
-        Output?.WriteLine($"TestScheduler.Now before scheduler start: {testScheduler.Now}");
-        Output?.WriteLine($"Overdue reminder 1 was due at: {overdueReminder1.When}");
-        Output?.WriteLine($"Overdue reminder 2 was due at: {overdueReminder2.When}");
-
-        // Act - Create scheduler - it should process overdue reminders immediately
         var scheduler = CreateScheduler();
+        await WaitForSchedulerReady(scheduler);
 
-        // Give scheduler time to initialize
-        await Task.Delay(100);
-
-        // Small advance to trigger processing
+        // A small advance triggers the zero-delay fetch timer, which finds both
+        // overdue reminders and delivers them in a single batch.
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
 
-        // Assert - Both overdue reminders should be delivered immediately
         var messages = new List<string>();
-        var message1 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        messages.Add(message1);
-        var message2 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        messages.Add(message2);
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        messages.Add(envelope1.Message);
+        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        messages.Add(envelope2.Message);
 
+        // Both overdue reminders should be delivered (order within a batch may vary).
         Assert.Contains("overdue message 1", messages);
         Assert.Contains("overdue message 2", messages);
     }
 
+    /// <summary>
+    /// Verifies that a recurring reminder loaded from storage continues to produce
+    /// occurrences across multiple cycles. Each delivery requires an ack before the
+    /// next occurrence can be processed — the ack triggers the scheduler to reload
+    /// its pending overview and schedule the next fetch timer.
+    /// </summary>
     [Fact]
     public async Task Scheduler_ShouldRecover_RecurringReminders()
     {
-        // Arrange - Create a recurring reminder before scheduler starts
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
 
@@ -171,48 +224,124 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
 
         await _storage.ScheduleReminderAsync(recurringReminder, CancellationToken.None);
 
-        // Act - Create scheduler
         var scheduler = CreateScheduler();
-        await Task.Delay(100);
+        await WaitForSchedulerReady(scheduler);
 
-        // Assert - First occurrence
+        // First occurrence: advance past T+5s, receive delivery.
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var message1 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("recurring message", message1);
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal("recurring message", envelope1.Message);
 
-        // Wait for next occurrence to be scheduled
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
+        // Ack the first delivery. The next occurrence (T+10s) was already persisted
+        // during the commit phase, but the ack confirms the current one is done.
+        await AckAndWait(scheduler, envelope1);
 
-        // Second occurrence
+        // Second occurrence: advance by another interval.
         testScheduler.Advance(TimeSpan.FromSeconds(5));
-        var message2 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("recurring message", message2);
+        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal("recurring message", envelope2.Message);
 
-        // Wait for next occurrence to be scheduled
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
+        await AckAndWait(scheduler, envelope2);
 
-        // Third occurrence
+        // Third occurrence: confirms the cycle continues indefinitely.
         testScheduler.Advance(TimeSpan.FromSeconds(5));
-        var message3 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("recurring message", message3);
+        var envelope3 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal("recurring message", envelope3.Message);
     }
 
+    /// <summary>
+    /// Verifies that ack-timeout state survives a scheduler restart.
+    ///
+    /// Scenario:
+    /// 1. First scheduler delivers a reminder (moves it to AwaitingAck in storage)
+    /// 2. No ack arrives — the first scheduler is stopped
+    /// 3. Second scheduler starts, loads the ack deadline from InitResult
+    /// 4. When the ack deadline passes, the second scheduler detects the timeout
+    ///    and retries the reminder (incrementing AttemptCount, setting failure reason)
+    ///
+    /// This is the key singleton-handoff test: AwaitingAck state is in the database,
+    /// not in-memory, so the new scheduler picks up where the old one left off.
+    /// </summary>
     [Fact]
-    public async Task Scheduler_ShouldRestart_AndRecover_AfterFailure()
+    public async Task Scheduler_ShouldResumeAckTimeouts_AfterRestart()
     {
-        // Arrange - Schedule a reminder through a live scheduler
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
 
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var now = testScheduler.Now;
 
+        // Schedule an overdue reminder so it's delivered immediately.
+        var reminder = new ScheduledReminder(
+            new ReminderEntity("test-region", "entity-ack-timeout"),
+            new ReminderKey("ack-timeout"),
+            now.AddSeconds(-1),
+            "timeout message",
+            RepeatInterval: null,
+            AttemptCount: 0,
+            LastFailureReason: null);
+
+        await _storage.ScheduleReminderAsync(reminder, CancellationToken.None);
+
+        // First scheduler: delivers the reminder but we intentionally don't ack it.
         var firstScheduler = CreateScheduler();
+        await WaitForSchedulerReady(firstScheduler);
+        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
 
-        // Wait for initialization
-        await Task.Delay(100);
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal("timeout message", envelope.Message);
 
-        // Schedule a reminder for the future - send directly to scheduler, not through client
+        // Stop the first scheduler without acking — the occurrence stays AwaitingAck in storage.
+        await firstScheduler.GracefulStop(TimeSpan.FromSeconds(5));
+
+        // Second scheduler: loads InitResult with the ack deadline from storage.
+        var recoveredScheduler = CreateScheduler();
+        await WaitForSchedulerReady(recoveredScheduler);
+
+        // Advance past the AckTimeout (30s default). The ack-timeout checker fires,
+        // finds the timed-out occurrence, and creates a retry (back to Pending with
+        // incremented AttemptCount and backoff when_utc).
+        testScheduler.Advance(TimeSpan.FromSeconds(31));
+
+        // The retry isn't delivered yet — it has a backoff delay. But we can verify
+        // the storage state to confirm the timeout was processed. Use AwaitAssertAsync
+        // to wait for the RunTask to complete rather than a fixed delay.
+        await AwaitAssertAsync(async () =>
+        {
+            var reminders = await _storage.GetRemindersForEntityAsync(
+                reminder.Entity, take: 10, skip: 0, CancellationToken.None);
+            Assert.Single(reminders, r => r.AttemptCount == 1);
+        }, TimeSpan.FromSeconds(5));
+
+        var finalReminders = await _storage.GetRemindersForEntityAsync(reminder.Entity, take: 10, skip: 0, CancellationToken.None);
+        var retried = Assert.Single(finalReminders, r => r.AttemptCount == 1);
+        // DueTimeUtc stays the same (occurrence identity), but when_utc moved forward.
+        Assert.Equal(envelope.DueTimeUtc, retried.DueTimeUtc);
+        Assert.Equal(1, retried.AttemptCount);
+        Assert.Equal("Ack timeout", retried.LastFailureReason);
+    }
+
+    /// <summary>
+    /// Verifies that a reminder scheduled through one scheduler instance is correctly
+    /// delivered by a different instance after a simulated crash and restart.
+    ///
+    /// The key insight: the reminder is persisted in storage, not in the scheduler's
+    /// memory. The second scheduler loads the pending overview on startup and discovers
+    /// the reminder, then delivers it when its due time arrives.
+    /// </summary>
+    [Fact]
+    public async Task Scheduler_ShouldRestart_AndRecover_AfterFailure()
+    {
+        var testProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", testProbe);
+
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var now = testScheduler.Now;
+
+        // First scheduler: schedule a reminder for T+30s.
+        var firstScheduler = CreateScheduler();
+        await WaitForSchedulerReady(firstScheduler);
+
         var reminderTime = now.AddSeconds(30);
         firstScheduler.Tell(new ReminderProtocol.ScheduleReminder(
             new ReminderEntity("test-region", "entity-1"),
@@ -223,49 +352,45 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         var scheduleResponse = await testProbe.ExpectMsgAsync<ReminderProtocol.ReminderScheduled>(TimeSpan.FromSeconds(5));
         Assert.Equal(ReminderScheduleResponseCode.Success, scheduleResponse.ResponseCode);
 
-        Output?.WriteLine($"Scheduled reminder for: {reminderTime}");
-        Output?.WriteLine($"Current time: {testScheduler.Now}");
-
-        // Act - Kill the scheduler (simulating crash/restart)
-        Output?.WriteLine("Stopping first scheduler...");
+        // Crash: stop the scheduler while the reminder is still in the future.
         await firstScheduler.GracefulStop(TimeSpan.FromSeconds(5));
 
-        // Advance time while scheduler is "down"
-        Output?.WriteLine("Advancing time by 15 seconds while scheduler is down...");
+        // Time passes while the scheduler is "down."
         testScheduler.Advance(TimeSpan.FromSeconds(15));
-        Output?.WriteLine($"Current time after advance: {testScheduler.Now}");
 
-        // Create new scheduler instance - simulates recovery
-        Output?.WriteLine("Creating new scheduler (recovery)...");
+        // Recovery: new scheduler loads the reminder from storage.
         var recoveredScheduler = CreateScheduler();
-        await Task.Delay(100);
+        await WaitForSchedulerReady(recoveredScheduler);
 
-        // Assert - The reminder should still fire at its scheduled time
-        Output?.WriteLine($"Advancing to reminder time (15 more seconds)...");
-        testScheduler.Advance(TimeSpan.FromSeconds(16)); // Total 31 seconds from start
-        Output?.WriteLine($"Current time after second advance: {testScheduler.Now}");
+        // Advance past the reminder's due time. The recovered scheduler delivers it.
+        testScheduler.Advance(TimeSpan.FromSeconds(16));
 
-        var message = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("future message", message);
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal("future message", envelope.Message);
     }
 
+    /// <summary>
+    /// Verifies that when multiple overdue reminders exist at startup, all of them
+    /// are delivered. GetNextRemindersAsync fetches them as a batch ordered by when_utc,
+    /// and ProcessReminders delivers all of them in a single tick.
+    /// </summary>
     [Fact]
     public async Task Scheduler_ShouldProcessMultipleOverdueReminders_InOrder()
     {
-        // Arrange - Create multiple overdue reminders with different due times
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
 
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var now = testScheduler.Now;
 
-        // Create reminders that are overdue by varying amounts
+        // Three reminders overdue by varying amounts — simulates the scheduler being
+        // down for 30 seconds while reminders piled up.
         var reminders = new[]
         {
             new ScheduledReminder(
                 new ReminderEntity("test-region", "entity-1"),
                 new ReminderKey("oldest"),
-                now.AddSeconds(-30), // Oldest
+                now.AddSeconds(-30),
                 "oldest message",
                 RepeatInterval: null,
                 AttemptCount: 0,
@@ -283,7 +408,7 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
             new ScheduledReminder(
                 new ReminderEntity("test-region", "entity-3"),
                 new ReminderKey("newest"),
-                now.AddSeconds(-5), // Most recent
+                now.AddSeconds(-5),
                 "newest message",
                 RepeatInterval: null,
                 AttemptCount: 0,
@@ -295,30 +420,36 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
             await _storage.ScheduleReminderAsync(reminder, CancellationToken.None);
         }
 
-        // Act - Create scheduler
         var scheduler = CreateScheduler();
-        await Task.Delay(100);
+        await WaitForSchedulerReady(scheduler);
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
 
-        // Assert - All overdue reminders should be processed
+        // All three are overdue and fetched in a single batch.
         var messages = new List<string>();
-        var message1 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        messages.Add(message1);
-        var message2 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        messages.Add(message2);
-        var message3 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        messages.Add(message3);
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        messages.Add(envelope1.Message);
+        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        messages.Add(envelope2.Message);
+        var envelope3 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        messages.Add(envelope3.Message);
 
-        // Verify all messages were delivered (order may vary due to async processing)
+        // All delivered — order within a batch may vary due to async processing.
         Assert.Contains("oldest message", messages);
         Assert.Contains("middle message", messages);
         Assert.Contains("newest message", messages);
     }
 
+    /// <summary>
+    /// Verifies that the scheduler correctly handles a mix of overdue and future
+    /// reminders on startup. Overdue reminders fire on the first tick; future
+    /// reminders wait for their scheduled time.
+    ///
+    /// This is the most realistic recovery scenario: some reminders were missed
+    /// while the scheduler was down, and others haven't come due yet.
+    /// </summary>
     [Fact]
     public async Task Scheduler_ShouldRecover_AndProcessMixOfOverdueAndFutureReminders()
     {
-        // Arrange - Mix of overdue and future reminders
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
 
@@ -346,37 +477,42 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         await _storage.ScheduleReminderAsync(overdueReminder, CancellationToken.None);
         await _storage.ScheduleReminderAsync(futureReminder, CancellationToken.None);
 
-        // Act - Create scheduler
         var scheduler = CreateScheduler();
-        await Task.Delay(100);
+        await WaitForSchedulerReady(scheduler);
 
-        // Assert - Overdue reminder fires immediately
+        // Overdue reminder fires immediately on the first tick.
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
-        var message1 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("overdue message", message1);
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal("overdue message", envelope1.Message);
 
-        // Future reminder hasn't fired yet
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
+        // Ack the overdue reminder so it doesn't interfere with the future one.
+        await AckAndWait(scheduler, envelope1);
 
-        // Advance to future reminder time
+        // Future reminder hasn't fired yet — its due time is T+10s.
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(100));
+
+        // Advance to the future reminder's due time.
         testScheduler.Advance(TimeSpan.FromSeconds(10));
-        var message2 = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("future message", message2);
+        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal("future message", envelope2.Message);
     }
 
+    /// <summary>
+    /// Verifies that the scheduler initializes correctly with empty storage.
+    /// This is the fresh-start scenario: no pre-existing reminders, the scheduler
+    /// just needs to be ready to accept new commands.
+    /// </summary>
     [Fact]
     public async Task Scheduler_ShouldHandleEmptyStorage_OnStartup()
     {
-        // Arrange - Empty storage
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
 
-        // Act - Create scheduler with empty storage
+        // Create scheduler with empty storage — no reminders to load.
         var scheduler = CreateScheduler();
-        await Task.Delay(100);
+        await WaitForSchedulerReady(scheduler);
 
-        // Assert - Scheduler should initialize successfully
-        // Schedule a new reminder to verify scheduler is working - send directly to scheduler
+        // Verify the scheduler is operational by scheduling and delivering a reminder.
         var testScheduler = (TestScheduler)Sys.Scheduler;
         scheduler.Tell(new ReminderProtocol.ScheduleReminder(
             new ReminderEntity("test-region", "entity-1"),
@@ -388,7 +524,7 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal(ReminderScheduleResponseCode.Success, response.ResponseCode);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var message = await testProbe.ExpectMsgAsync<string>(TimeSpan.FromSeconds(5));
-        Assert.Equal("test message", message);
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        Assert.Equal("test message", envelope.Message);
     }
 }

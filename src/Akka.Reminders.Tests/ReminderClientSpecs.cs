@@ -21,6 +21,15 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
         _resolver = new TestShardRegionResolver();
     }
 
+    private async Task EnsureReminderSchedulerReady(IReminderClient client)
+    {
+        await AwaitAssertAsync(async () =>
+        {
+            var response = await client.ListRemindersAsync();
+            Assert.Equal(FetchRemindersResponseCode.Success, response.ResponseCode);
+        }, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(100));
+    }
+
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
         // For testing, we create the reminder scheduler directly without clustering
@@ -121,6 +130,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
 
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("test-region", "entity-1");
+        await EnsureReminderSchedulerReady(client);
 
         // Act
         var result = await client.ScheduleSingleReminderAsync(
@@ -138,6 +148,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
         // Arrange
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("missing-region", "entity-1");
+        await EnsureReminderSchedulerReady(client);
 
         // Act
         var result = await client.ScheduleSingleReminderAsync(
@@ -159,6 +170,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("test-region", "entity-1");
         var key = new ReminderKey("test-reminder");
+        await EnsureReminderSchedulerReady(client);
 
         // Act - Schedule first reminder
         var result1 = await client.ScheduleSingleReminderAsync(
@@ -195,6 +207,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
 
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("test-region", "entity-1");
+        await EnsureReminderSchedulerReady(client);
 
         // Act
         var result = await client.ScheduleRecurringReminderAsync(
@@ -212,6 +225,32 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal(TimeSpan.FromMinutes(5), list.Reminders[0].RepeatInterval);
     }
 
+    [Fact]
+    public async Task ScheduleSingleReminder_ShouldPersistMaxDeliveryWindow()
+    {
+        var testProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", testProbe);
+
+        var extension = Sys.ReminderClient();
+        var client = extension.CreateClient("test-region", "entity-1");
+        var when = DateTimeOffset.UtcNow.AddMinutes(5);
+        var window = TimeSpan.FromMinutes(2);
+        await EnsureReminderSchedulerReady(client);
+
+        var result = await client.ScheduleSingleReminderAsync(
+            new ReminderKey("deadline-reminder"),
+            when,
+            "deadline message",
+            maxDeliveryWindow: window);
+
+        Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
+
+        var list = await client.ListRemindersAsync();
+        Assert.Single(list.Reminders);
+        Assert.Equal(window, list.Reminders[0].MaxDeliveryWindow);
+        Assert.True(list.Reminders[0].DeliveryDeadlineUtc.HasValue);
+    }
+
     #endregion
 
     #region Cancellation Tests
@@ -226,6 +265,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("test-region", "entity-1");
         var key = new ReminderKey("test-reminder");
+        await EnsureReminderSchedulerReady(client);
 
         await client.ScheduleSingleReminderAsync(key, DateTimeOffset.UtcNow.AddHours(1), "test message");
 
@@ -247,6 +287,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
         // Arrange
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("test-region", "entity-1");
+        await EnsureReminderSchedulerReady(client);
 
         // Act
         var result = await client.CancelReminderAsync(new ReminderKey("nonexistent"));
@@ -264,6 +305,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
 
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("test-region", "entity-1");
+        await EnsureReminderSchedulerReady(client);
 
         await client.ScheduleSingleReminderAsync(new ReminderKey("r1"), DateTimeOffset.UtcNow.AddHours(1), "m1");
         await client.ScheduleSingleReminderAsync(new ReminderKey("r2"), DateTimeOffset.UtcNow.AddHours(2), "m2");
@@ -290,6 +332,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
         // Arrange
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("test-region", "entity-1");
+        await EnsureReminderSchedulerReady(client);
 
         // Act
         var result = await client.ListRemindersAsync();
@@ -308,6 +351,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
 
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("test-region", "entity-1");
+        await EnsureReminderSchedulerReady(client);
 
         await client.ScheduleSingleReminderAsync(new ReminderKey("r1"), DateTimeOffset.UtcNow.AddHours(1), "m1");
         await client.ScheduleSingleReminderAsync(new ReminderKey("r2"), DateTimeOffset.UtcNow.AddHours(2), "m2");
@@ -330,6 +374,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
         var extension = Sys.ReminderClient();
         var client1 = extension.CreateClient("test-region", "entity-1");
         var client2 = extension.CreateClient("test-region", "entity-2");
+        await EnsureReminderSchedulerReady(client1);
 
         await client1.ScheduleSingleReminderAsync(new ReminderKey("r1"), DateTimeOffset.UtcNow.AddHours(1), "m1");
         await client2.ScheduleSingleReminderAsync(new ReminderKey("r2"), DateTimeOffset.UtcNow.AddHours(2), "m2");
@@ -347,4 +392,3 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
 
     #endregion
 }
-

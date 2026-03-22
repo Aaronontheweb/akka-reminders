@@ -32,6 +32,16 @@ public sealed class SqlReminderStorage : IReminderStorage
         CancellationToken cancellationToken = default)
         => _storage.ScheduleReminderAsync(reminder, cancellationToken);
 
+    public Task<bool> UpsertReminderOccurrencesAsync(
+        IEnumerable<ScheduledReminder> reminders,
+        CancellationToken cancellationToken = default)
+        => _storage.UpsertReminderOccurrencesAsync(reminders, cancellationToken);
+
+    public Task<bool> CommitReminderMutationsAsync(
+        ReminderMutationBatch mutationBatch,
+        CancellationToken cancellationToken = default)
+        => _storage.CommitReminderMutationsAsync(mutationBatch, cancellationToken);
+
     public Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(
         ReminderEntity entity,
         ReminderKey key,
@@ -71,4 +81,36 @@ public sealed class SqlReminderStorage : IReminderStorage
         DateTimeOffset olderThan,
         CancellationToken cancellationToken = default)
         => _storage.CleanUpCompletedRemindersAsync(olderThan, cancellationToken);
+
+    public Task<int> ExpireRemindersAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+        => _storage.ExpireRemindersAsync(now, cancellationToken);
+
+    public Task<bool> MarkRemindersAsAwaitingAckAsync(
+        IEnumerable<AwaitingAckReminder> reminders,
+        CancellationToken ct = default)
+        => _storage.MarkRemindersAsAwaitingAckAsync(reminders, ct);
+
+    public Task<IReadOnlyList<ScheduledReminder>> GetTimedOutAckRemindersAsync(
+        DateTimeOffset now,
+        ReminderBatchSize maxCount,
+        CancellationToken ct = default)
+        => _storage.GetTimedOutAckRemindersAsync(now, maxCount, ct);
+
+    public Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken ct = default)
+        => _storage.GetNextAwaitingAckDeadlineAsync(ct);
+
+    public Task<AckResult> AcknowledgeReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        DateTimeOffset ackedAt,
+        CancellationToken ct = default)
+        => _storage.AcknowledgeReminderAsync(entity, key, dueTimeUtc, ackedAt, ct);
+
+    public Task<IReadOnlyList<AckResult>> AcknowledgeRemindersAsync(
+        IEnumerable<ReminderAcknowledgement> acknowledgements,
+        CancellationToken ct = default)
+        => _storage.AcknowledgeRemindersAsync(acknowledgements, ct);
 }
