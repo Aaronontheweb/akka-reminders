@@ -130,11 +130,37 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// </summary>
     private bool _writeCircuitOpen;
 
+    /// <summary>
+    /// Guards against re-entrant FetchReminders processing. RunTask suspends the mailbox,
+    /// but the timer could fire again before FetchRemindersCompleted is processed.
+    /// </summary>
     private bool _processingReminders;
+
+    /// <summary>
+    /// Same guard for CheckAckTimeouts — prevents overlapping ack-timeout scans.
+    /// </summary>
     private bool _processingAckTimeouts;
+
+    /// <summary>
+    /// Debounce flag for ack flush scheduling. Multiple ReminderAck messages can arrive
+    /// while the actor is processing other work; this flag ensures only one
+    /// FlushBufferedAcks self-message is queued at a time.
+    /// </summary>
     private bool _ackFlushScheduled;
+
+    /// <summary>
+    /// Tracks the currently scheduled ack-timeout deadline so we can avoid rescheduling
+    /// the timer when a later deadline arrives. Only replaced when an earlier deadline
+    /// is found.
+    /// </summary>
     private DateTimeOffset? _nextAckTimeoutAt;
 
+    /// <summary>
+    /// In-memory buffer for incoming acks. Acks are NOT written to storage immediately —
+    /// they accumulate here and are flushed in batches via FlushBufferedAcksAsync.
+    /// Keyed by occurrence identity so duplicate acks for the same occurrence are
+    /// coalesced (additional senders are appended to the existing entry's ReplyTo list).
+    /// </summary>
     private readonly Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), BufferedAckWrite>
         _bufferedAcknowledgements = new();
 
@@ -256,6 +282,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         DateTimeOffset dueTimeUtc)
         => (entity, key, dueTimeUtc);
 
+    /// <summary>
+    /// Schedules a FlushBufferedAcks message to self if one isn't already pending.
+    /// Uses Self.Tell (not a timer) so the flush happens on the next mailbox dispatch —
+    /// essentially "as soon as possible" without blocking the current message handler.
+    /// </summary>
     private void ScheduleBufferedAckFlush()
     {
         if (_ackFlushScheduled || _bufferedAcknowledgements.Count == 0)
@@ -271,8 +302,15 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         _nextAckTimeoutAt = null;
     }
 
+    /// <summary>
+    /// Schedules a CheckAckTimeouts timer at the given deadline, but only if it's
+    /// earlier than any currently scheduled check. This ensures the ack-timeout checker
+    /// fires at the earliest possible deadline across all AwaitingAck reminders.
+    /// StartSingleTimer with the same key automatically cancels any prior timer.
+    /// </summary>
     private void ScheduleAckTimeoutCheck(DateTimeOffset ackDeadlineUtc)
     {
+        // Already have an earlier or equal deadline scheduled — no need to reschedule.
         if (_nextAckTimeoutAt.HasValue && _nextAckTimeoutAt.Value <= ackDeadlineUtc)
             return;
 
@@ -315,6 +353,13 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             _ => ReminderAckResponseCode.Error
         };
 
+    /// <summary>
+    /// Drains the ack buffer in batches, writing each batch to storage via
+    /// AcknowledgeRemindersAsync. On success, marks the occurrence as Delivered
+    /// and refreshes the ack-timeout schedule. On failure, replies Error to all
+    /// buffered senders — the occurrence stays AwaitingAck and will be retried
+    /// after the ack timeout fires.
+    /// </summary>
     private async Task FlushBufferedAcksAsync()
     {
         var shouldRefreshAckTimeoutSchedule = false;
@@ -325,6 +370,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 .Take(Settings.AckFlushBatchSize)
                 .ToList();
 
+            // Remove from the buffer before writing — if the write fails, the entries
+            // are gone. This is safe because the occurrence stays AwaitingAck in storage
+            // and the ack-timeout checker will handle it on the next scan.
             foreach (var entry in batch)
                 _bufferedAcknowledgements.Remove(entry.Key);
 
@@ -425,6 +473,12 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
+    /// <summary>
+    /// Main behavior after initialization. Handles scheduling commands, delivery ticks,
+    /// ack processing, and ack-timeout scanning. All I/O-bound work uses RunTask to
+    /// avoid blocking the dispatcher thread — the mailbox is suspended until each
+    /// RunTask completes.
+    /// </summary>
     private void Scheduling(object message)
     {
         switch (message)
@@ -435,6 +489,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     break;
 
                 _processingReminders = true;
+                // Each tick: flush any pending acks first (so the fetch sees up-to-date
+                // storage state), then expire stale reminders, then process due reminders.
+                // MaxSlippage causes the scheduler to fetch slightly ahead of the current
+                // time, avoiding a re-schedule for reminders about to become due.
                 RunTask(async () =>
                 {
                     try
@@ -603,6 +661,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 });
                 break;
             }
+            // Acks are buffered in memory and flushed in batches, not written per-ack.
+            // If multiple acks arrive for the same occurrence (duplicate delivery),
+            // they're coalesced — all senders get the same response when the batch flushes.
             case ReminderProtocol.ReminderAck ack:
             {
                 _log.Debug("Received ReminderAck for [{0}] / [{1}] due at [{2}]", ack.Entity, ack.Key, ack.DueTimeUtc);
@@ -610,6 +671,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 var occurrenceKey = ToOccurrenceKey(ack.Entity, ack.Key, ack.DueTimeUtc);
                 if (_bufferedAcknowledgements.TryGetValue(occurrenceKey, out var bufferedAck))
                 {
+                    // Duplicate ack for an occurrence already in the buffer — just
+                    // append the sender so they get the response when it flushes.
                     bufferedAck.AddReplyTo(ackSender);
                 }
                 else
@@ -631,6 +694,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 RunTask(FlushBufferedAcksAsync);
                 break;
             }
+            // Fired by a deadline-driven one-shot timer (not periodic). Scans storage
+            // for AwaitingAck rows whose ack deadline has elapsed, and either retries
+            // them (back to Pending with backoff) or marks them terminal (Failed/Expired).
+            // Flushes buffered acks first so we don't retry an occurrence that was
+            // actually acked but not yet flushed.
             case CheckAckTimeouts:
             {
                 if (_processingAckTimeouts)
@@ -749,6 +817,15 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 $"Failed to create {closedType.FullName} for message type {messageType.FullName}"));
     }
 
+    /// <summary>
+    /// Computes the absolute UTC deadline for a reminder occurrence.
+    ///
+    /// Rules:
+    /// - No window, no repeat: null (infinite — retries until MaxDeliveryAttempts).
+    /// - Window set: due + window.
+    /// - Recurring: clamped to the next occurrence's due time (latest-only semantics).
+    /// - Both: min(due + window, next due).
+    /// </summary>
     private static DateTimeOffset? ComputeDeliveryDeadlineUtc(
         DateTimeOffset dueTimeUtc,
         TimeSpan? repeatInterval,
@@ -784,6 +861,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             OccurrenceDueTimeUtc: dueTimeUtc);
     }
 
+    /// <summary>
+    /// Creates the next occurrence for a recurring reminder. Both when_utc and due_time_utc
+    /// advance by RepeatInterval — this is a NEW row with a new occurrence identity,
+    /// not a mutation of the current one. AttemptCount resets to 0 for the fresh occurrence.
+    /// </summary>
     private ScheduledReminder CreateNextRecurringOccurrence(ScheduledReminder reminder)
     {
         if (!reminder.RepeatInterval.HasValue)
@@ -800,6 +882,15 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         };
     }
 
+    /// <summary>
+    /// Attempts to create a retry for a failed reminder delivery. Returns false when
+    /// the reminder has exhausted its retry budget (MaxDeliveryAttempts) or its
+    /// delivery deadline has passed — in those cases, the caller should mark it terminal.
+    ///
+    /// The retry uses exponential backoff: when_utc is pushed forward by
+    /// RetryBackoffBase * 2^AttemptCount (capped by MaxRetryBackoff). The DueTimeUtc
+    /// (occurrence identity) stays fixed so the ack still matches the original occurrence.
+    /// </summary>
     private bool TryCreateRetryReminder(
         ScheduledReminder reminder,
         DateTimeOffset now,
@@ -809,12 +900,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     {
         retryReminder = reminder;
 
+        // Deadline passed — no point retrying.
         if (reminder.DeliveryDeadlineUtc.HasValue && reminder.DeliveryDeadlineUtc.Value <= now)
         {
             terminalStatus = ReminderCompletionStatus.Expired;
             return false;
         }
 
+        // Used all attempts.
         if (reminder.AttemptCount + 1 >= Settings.MaxDeliveryAttempts)
         {
             terminalStatus = ReminderCompletionStatus.Failed;
@@ -827,12 +920,15 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 Settings.MaxRetryBackoff.TotalSeconds));
         var retryAt = now.Add(backoff);
 
+        // Backoff would land after the deadline — expire instead of scheduling a doomed retry.
         if (reminder.DeliveryDeadlineUtc.HasValue && retryAt >= reminder.DeliveryDeadlineUtc.Value)
         {
             terminalStatus = ReminderCompletionStatus.Expired;
             return false;
         }
 
+        // Push when_utc forward (changes the fetch time) but keep DueTimeUtc fixed
+        // (preserves the occurrence identity for ack matching).
         retryReminder = reminder with
         {
             When = retryAt,
@@ -1069,11 +1165,17 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     {
                         var ackDeadline = TimeProvider.Now.Add(Settings.AckTimeout);
 
+                        // For recurring reminders, pre-create the next occurrence NOW
+                        // (before delivery) so it's persisted in the same commit batch.
+                        // This means the next occurrence exists in storage even if the
+                        // scheduler crashes after delivery — no occurrences are lost.
                         if (reminder.RepeatInterval.HasValue)
                         {
                             occurrencesToUpsert.Add(CreateNextRecurringOccurrence(reminder));
                         }
 
+                        // Move the current occurrence to AwaitingAck. It stays there
+                        // until the entity acks it or the ack deadline elapses.
                         remindersToAwaitAck.Add(new AwaitingAckReminder(
                             reminder.Entity,
                             reminder.Key,
@@ -1084,6 +1186,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     }
                 }
 
+                // Phase 3: Commit all mutations in a single atomic batch BEFORE delivery.
+                // This is the key correctness boundary — if the write fails, nothing is
+                // delivered, so there are zero duplicate deliveries on first failure.
                 var writeFailed = false;
                 var mutationBatch = new ReminderMutationBatch(
                     occurrencesToUpsert,
@@ -1122,6 +1227,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     break;
                 }
 
+                // Update the in-memory overview incrementally from upserted reminders
+                // (next recurring occurrences, retries). Avoids an extra storage query
+                // per chunk — the overview is only reloaded from storage on failure.
                 if (occurrencesToUpsert.Count > 0)
                 {
                     foreach (var pendingReminder in occurrencesToUpsert)
@@ -1141,6 +1249,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     _log.Info("Write circuit CLOSED — database writes recovered, resuming full-batch processing");
                 }
 
+                // Phase 4: Deliver AFTER the commit succeeds. If we get here, storage
+                // has the AwaitingAck state persisted, so a crash after delivery is safe —
+                // the ack-timeout checker will find the unacked occurrence and retry it.
                 foreach (var delivery in deliveries)
                 {
                     _log.Debug("Sending reminder occurrence [{0}] / [{1}] due at [{2}] to [{3}]",
