@@ -304,11 +304,17 @@ public class ReminderSchedulerRecoverySpecs : Akka.Hosting.TestKit.TestKit
         testScheduler.Advance(TimeSpan.FromSeconds(31));
 
         // The retry isn't delivered yet — it has a backoff delay. But we can verify
-        // the storage state to confirm the timeout was processed.
-        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(100));
+        // the storage state to confirm the timeout was processed. Use AwaitAssertAsync
+        // to wait for the RunTask to complete rather than a fixed delay.
+        await AwaitAssertAsync(async () =>
+        {
+            var reminders = await _storage.GetRemindersForEntityAsync(
+                reminder.Entity, take: 10, skip: 0, CancellationToken.None);
+            Assert.Single(reminders, r => r.AttemptCount == 1);
+        }, TimeSpan.FromSeconds(5));
 
-        var reminders = await _storage.GetRemindersForEntityAsync(reminder.Entity, take: 10, skip: 0, CancellationToken.None);
-        var retried = Assert.Single(reminders, r => r.AttemptCount == 1);
+        var finalReminders = await _storage.GetRemindersForEntityAsync(reminder.Entity, take: 10, skip: 0, CancellationToken.None);
+        var retried = Assert.Single(finalReminders, r => r.AttemptCount == 1);
         // DueTimeUtc stays the same (occurrence identity), but when_utc moved forward.
         Assert.Equal(envelope.DueTimeUtc, retried.DueTimeUtc);
         Assert.Equal(1, retried.AttemptCount);
