@@ -133,7 +133,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     private bool _processingReminders;
     private bool _processingAckTimeouts;
     private bool _ackFlushScheduled;
-    private ICancelable? _nextAckTimeoutCheck;
     private DateTimeOffset? _nextAckTimeoutAt;
 
     private readonly Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), BufferedAckWrite>
@@ -268,8 +267,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
     private void CancelAckTimeoutCheck()
     {
-        _nextAckTimeoutCheck?.Cancel();
-        _nextAckTimeoutCheck = null;
+        Timers.Cancel(CheckAckTimeouts.Instance);
         _nextAckTimeoutAt = null;
     }
 
@@ -280,18 +278,13 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         if (_nextAckTimeoutAt.HasValue && _nextAckTimeoutAt.Value <= ackDeadlineUtc)
             return;
 
-        CancelAckTimeoutCheck();
         _nextAckTimeoutAt = ackDeadlineUtc;
 
         var delay = ackDeadlineUtc - TimeProvider.Now;
         if (delay < TimeSpan.Zero)
             delay = TimeSpan.Zero;
 
-        _nextAckTimeoutCheck = Context.System.Scheduler.ScheduleTellOnceCancelable(
-            delay,
-            Self,
-            CheckAckTimeouts.Instance,
-            Self);
+        Timers.StartSingleTimer(CheckAckTimeouts.Instance, CheckAckTimeouts.Instance, delay);
     }
 
     private void TrackAckDeadlines(IEnumerable<AwaitingAckReminder> reminders)
@@ -645,7 +638,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 if (_processingAckTimeouts)
                     break;
 
-                _nextAckTimeoutCheck = null;
                 _nextAckTimeoutAt = null;
 
                 _processingAckTimeouts = true;
@@ -689,7 +681,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
     protected override void PostStop()
     {
-        CancelAckTimeoutCheck();
+        // IWithTimers cancels all timers automatically on stop.
         base.PostStop();
     }
 
