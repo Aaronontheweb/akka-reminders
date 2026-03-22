@@ -20,10 +20,10 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         => (reminder.Entity, reminder.Key, reminder.DueTimeUtc);
 
     private static (ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc) ToKey(AwaitingAckReminder reminder)
-        => (reminder.Entity, reminder.Key, reminder.DueTimeUtc.ToUniversalTime());
+        => (reminder.Entity, reminder.Key, reminder.DueTimeUtc);
 
     private static (ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc) ToKey(CompletedReminder reminder)
-        => (reminder.Entity, reminder.Key, reminder.DueTimeUtc.ToUniversalTime());
+        => (reminder.Entity, reminder.Key, reminder.DueTimeUtc);
 
     /// <inheritdoc />
     public Task<ReminderProtocol.ReminderScheduled> ScheduleReminderAsync(
@@ -476,7 +476,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         {
             foreach (var acknowledgement in acknowledgements)
             {
-                var reminderKey = (acknowledgement.Entity, acknowledgement.Key, acknowledgement.DueTimeUtc.ToUniversalTime());
+                var reminderKey = (acknowledgement.Entity, acknowledgement.Key, acknowledgement.DueTimeUtc);
 
                 if (!_awaitingAckReminders.TryRemove(reminderKey, out var awaiting))
                 {

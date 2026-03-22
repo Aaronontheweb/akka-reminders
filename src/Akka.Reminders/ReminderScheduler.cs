@@ -254,7 +254,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         ReminderEntity entity,
         ReminderKey key,
         DateTimeOffset dueTimeUtc)
-        => (entity, key, dueTimeUtc.ToUniversalTime());
+        => (entity, key, dueTimeUtc);
 
     private void ScheduleBufferedAckFlush()
     {
@@ -273,8 +273,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
     private void ScheduleAckTimeoutCheck(DateTimeOffset ackDeadlineUtc)
     {
-        ackDeadlineUtc = ackDeadlineUtc.ToUniversalTime();
-
         if (_nextAckTimeoutAt.HasValue && _nextAckTimeoutAt.Value <= ackDeadlineUtc)
             return;
 
@@ -290,7 +288,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     private void TrackAckDeadlines(IEnumerable<AwaitingAckReminder> reminders)
     {
         var nextDeadline = reminders
-            .Select(r => r.AckDeadline.ToUniversalTime())
+            .Select(r => r.AckDeadline)
             .DefaultIfEmpty(DateTimeOffset.MaxValue)
             .Min();
 
@@ -756,8 +754,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         TimeSpan? repeatInterval,
         TimeSpan? maxDeliveryWindow)
     {
-        dueTimeUtc = dueTimeUtc.ToUniversalTime();
-
         DateTimeOffset? deadline = null;
         if (maxDeliveryWindow.HasValue)
             deadline = dueTimeUtc.Add(maxDeliveryWindow.Value);
