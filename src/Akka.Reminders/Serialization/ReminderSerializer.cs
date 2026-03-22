@@ -5,9 +5,9 @@ using Akka.Serialization;
 namespace Akka.Reminders.Serialization;
 
 /// <summary>
-/// Custom Akka serializer for <see cref="ReminderEnvelope"/>, <see cref="ReminderProtocol.ReminderAck"/>,
-/// and <see cref="ReminderProtocol.ReminderAckResponse"/>. Handles cross-node serialization for
-/// Akka.Remote and Akka.Cluster deployments.
+/// Custom Akka serializer for all <see cref="IReminderWireMessage"/> types. Handles cross-node
+/// serialization for Akka.Remote and Akka.Cluster deployments. Registered via
+/// <c>WithCustomSerializer</c> in <see cref="AkkaHostingExtensions"/>.
 /// </summary>
 /// <remarks>
 /// <para>
