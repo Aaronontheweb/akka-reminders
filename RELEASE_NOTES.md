@@ -9,7 +9,7 @@
 
 - **Reliable Delivery with Acknowledgement Protocol** - Reminders now require explicit acknowledgement from recipients via `IReminderClient.AckAsync(envelope)`. Unacknowledged reminders are automatically retried with exponential backoff. This ensures recipients actually process reminders, not just that `Tell()` didn't throw.
   - `AckAsync` returns a `Task` backed by `Ask<T>` — recipients know whether the scheduler confirmed their ack (no duplicate coming) or if a duplicate may arrive
-  - Configurable via `ReminderSettings.AckTimeout` (default: 30s)
+  - Configurable via `ReminderSettings.AckTimeout` (default: 10s)
   - Existing `MaxDeliveryAttempts` and `RetryBackoffBase` now apply to ack-timeout retries
   - New `AwaitingAck` delivery state in the state machine: `Pending → AwaitingAck → Delivered/Failed`
 
