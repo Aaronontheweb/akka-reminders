@@ -252,6 +252,108 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
     }
 
     [Fact]
+    public async Task ReminderEnvelope_ShouldUseAckTimeoutAsDeadline_WhenMoreRetriesAvailable()
+    {
+        var testProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", testProbe);
+
+        var client = Sys.ReminderClient().CreateClient("test-region", "entity-1");
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var dueTime = testScheduler.Now.AddSeconds(5);
+
+        // Use a long delivery window (60s) so the occurrence deadline is far out.
+        // With AckTimeout=10s and MaxDeliveryAttempts=3, this is the first attempt
+        // and the next backoff (5s) fits within the occurrence deadline.
+        // Therefore the envelope deadline should be the ack timeout, not the occurrence deadline.
+        var result = await client.ScheduleSingleReminderAsync(
+            new ReminderKey("ack-deadline-reminder"),
+            dueTime,
+            "ack deadline message",
+            maxDeliveryWindow: TimeSpan.FromSeconds(60));
+
+        Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
+
+        testScheduler.Advance(TimeSpan.FromSeconds(6));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(dueTime, envelope.DueTimeUtc);
+        Assert.False(envelope.Deadline.IsInfinite);
+
+        // The deadline should be based on the ack timeout (~10s from delivery time),
+        // NOT the occurrence deadline (dueTime + 60s).
+        // Delivery happens roughly at dueTime, so the deadline should be
+        // well before dueTime + 60s.
+        Assert.True(envelope.Deadline.UtcDateTime < dueTime.AddSeconds(30),
+            $"Expected deadline before {dueTime.AddSeconds(30)}, but was {envelope.Deadline.UtcDateTime}. " +
+            "Deadline should reflect the ack timeout, not the occurrence deadline.");
+
+        // And it should not be expired immediately — the ack timeout hasn't passed yet
+        Assert.False(envelope.Deadline.IsExpired(dueTime.AddSeconds(1)));
+    }
+
+    [Fact]
+    public async Task ReminderEnvelope_ShouldUseOccurrenceDeadline_WhenNoMoreRetriesPossible()
+    {
+        var testProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", testProbe);
+
+        var client = Sys.ReminderClient().CreateClient("test-region", "entity-1");
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var dueTime = testScheduler.Now.AddSeconds(5);
+
+        // Use a short delivery window (2s). With AckTimeout=10s (default),
+        // the ack timeout alone exceeds the occurrence deadline,
+        // so this is effectively the last attempt — envelope deadline should be
+        // the occurrence deadline (dueTime + 2s).
+        var result = await client.ScheduleSingleReminderAsync(
+            new ReminderKey("occurrence-deadline-reminder"),
+            dueTime,
+            "occurrence deadline message",
+            maxDeliveryWindow: TimeSpan.FromSeconds(2));
+
+        Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
+
+        testScheduler.Advance(TimeSpan.FromSeconds(6));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(dueTime, envelope.DueTimeUtc);
+        Assert.False(envelope.Deadline.IsInfinite);
+        // Deadline should be dueTime + 2s (the occurrence deadline)
+        Assert.False(envelope.Deadline.IsExpired(dueTime.AddSeconds(1)));
+        Assert.True(envelope.Deadline.IsExpired(dueTime.AddSeconds(3)));
+    }
+
+    [Fact]
+    public async Task ReminderEnvelope_ShouldUseInfiniteDeadline_WhenNoDeadlineAndFinalAttempt()
+    {
+        var testProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", testProbe);
+
+        var client = Sys.ReminderClient().CreateClient("test-region", "entity-1");
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var dueTime = testScheduler.Now.AddSeconds(5);
+
+        // No maxDeliveryWindow and no repeat interval — unbounded reminder.
+        // With MaxDeliveryAttempts=3 and this being the first attempt,
+        // there are more retries possible but no occurrence deadline to clamp to.
+        // The ack timeout should be used since more attempts are available.
+        var result = await client.ScheduleSingleReminderAsync(
+            new ReminderKey("unbounded-reminder"),
+            dueTime,
+            "unbounded message");
+
+        Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
+
+        testScheduler.Advance(TimeSpan.FromSeconds(6));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(dueTime, envelope.DueTimeUtc);
+        // Unbounded with more retries: deadline should be ack timeout, not infinite
+        Assert.False(envelope.Deadline.IsInfinite,
+            "Expected ack-timeout-based deadline, not Infinite, because more retries are available");
+    }
+
+    [Fact]
     public async Task RecurringReminder_ShouldScheduleNextOccurrenceWithoutWaitingForAck()
     {
         var testProbe = CreateTestProbe();

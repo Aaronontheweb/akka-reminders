@@ -67,7 +67,12 @@ public sealed record ReminderSettings
     /// <summary>
     /// How long to wait for an acknowledgement after delivering a reminder before retrying.
     /// </summary>
-    public TimeSpan AckTimeout { get; init; } = TimeSpan.FromSeconds(10);
+    /// <summary>
+    /// Default ack timeout: 10 seconds.
+    /// </summary>
+    public static readonly TimeSpan DefaultAckTimeout = TimeSpan.FromSeconds(10);
+
+    public TimeSpan AckTimeout { get; init; } = DefaultAckTimeout;
 
     /// <summary>
     /// Maximum number of acknowledgements to flush in a single storage batch.
