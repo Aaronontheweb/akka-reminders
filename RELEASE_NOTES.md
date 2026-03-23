@@ -23,18 +23,31 @@
   - [SQLite](https://github.com/Aaronontheweb/akka-reminders/blob/dev/src/Akka.Reminders.Sqlite/Scripts/Migrations/V0_6_0__add_ack_columns.sql)
   - [PostgreSQL](https://github.com/Aaronontheweb/akka-reminders/blob/dev/src/Akka.Reminders.PostgreSql/Scripts/Migrations/V0_6_0__add_ack_columns.sql)
   - [SQL Server](https://github.com/Aaronontheweb/akka-reminders/blob/dev/src/Akka.Reminders.SqlServer/Scripts/Migrations/V0_6_0__add_ack_columns.sql)
-- **Code changes**: Update reminder handlers:
-  ```csharp
-  // Before (0.5.x):
-  Receive<MyMessage>(msg => { /* handle */ });
+- **Code changes**:
+  - **Reminder handlers must ack**: Change `Receive<T>` to `ReceiveAsync<ReminderEnvelope<T>>` and call `AckAsync` after processing. Unacked reminders are retried after `AckTimeout` (default 30s).
+    ```csharp
+    // Before (0.5.x):
+    Receive<MyMessage>(msg => { /* handle */ });
 
-  // After (0.6.0):
-  ReceiveAsync<ReminderEnvelope<MyMessage>>(async envelope => {
-      var msg = envelope.Message; // MyMessage, strongly typed
-      /* handle */
-      await _reminderClient.AckAsync(envelope);
-  });
-  ```
+    // After (0.6.0):
+    ReceiveAsync<ReminderEnvelope<MyMessage>>(async envelope => {
+        var msg = envelope.Message; // MyMessage, strongly typed
+        /* handle */
+        var ext = Context.System.ReminderClient();
+        await ext.AckAsync(envelope);
+    });
+    ```
+  - **Custom `IShardRegionResolver` implementations**: Update `DeliverReminder` to accept `ReminderEnvelope` instead of raw `object message`. The `sender` parameter is now optional.
+    ```csharp
+    // Before (0.5.x):
+    public void DeliverReminder(ReminderEntity entity, object message);
+
+    // After (0.6.0):
+    public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope, IActorRef? sender = null);
+    ```
+  - **`MessageExtractor` unchanged**: Your `HashCodeMessageExtractor` does NOT need to handle `ReminderEnvelope` — the scheduler wraps it in a `ShardingEnvelope` which provides the entity ID directly.
+  - **`IReminderClient` scheduling API unchanged**: `ScheduleSingleReminderAsync` and `ScheduleRecurringReminderAsync` still accept `object message`. No changes needed to scheduling code.
+  - **`WithReminders` / `WithLocalReminders` unchanged**: The Akka.Hosting configuration API is the same.
 
 #### 0.5.1 March 9th 2026 ####
 
