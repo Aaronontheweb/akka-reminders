@@ -1,4 +1,10 @@
-#### 0.6.0 March 18th 2026 ####
+#### 0.6.0-beta2 March 23rd 2026 ####
+
+**Changes Since beta1**
+
+- **`ReminderEnvelope.Deadline` now reflects per-attempt expiration** - When another retry is possible, `Deadline` equals the ack timeout (`now + AckTimeout`), telling the recipient exactly when the next delivery will replace this one. On the final attempt, it falls back to the occurrence deadline or `Infinite` ([#109](https://github.com/Aaronontheweb/akka-reminders/pull/109))
+- **Default `AckTimeout` lowered from 30s to 10s** - 30s was too long for most use cases ([#109](https://github.com/Aaronontheweb/akka-reminders/pull/109))
+- Expanded migration guide with all C# code changes needed for 0.6.0
 
 **Breaking Changes**
 
