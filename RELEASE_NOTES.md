@@ -3,8 +3,7 @@
 **Breaking Changes**
 
 - **Reminder delivery now uses `ReminderEnvelope<T>` instead of raw messages** - All reminders are delivered wrapped in a strongly-typed envelope that must be acknowledged. Actors receiving reminders must change from `Receive<MyMessage>` to `ReceiveAsync<ReminderEnvelope<MyMessage>>` and call `await client.AckAsync(envelope)` after processing.
-- **`IReminderClient` scheduling methods are now generic** - `ScheduleSingleReminderAsync<T>` and `ScheduleRecurringReminderAsync<T>` replace the `object message` parameter with `T message` for type safety.
-- **`IShardRegionResolver.DeliverReminder` signature changed** - Now accepts `ReminderEnvelope` and `IActorRef sender` instead of raw `object message`.
+- **`IShardRegionResolver.DeliverReminder` signature changed** - Now accepts `ReminderEnvelope` instead of raw `object message`. The `sender` parameter is optional (defaults to `ActorRefs.NoSender`).
 
 **New Features**
 
@@ -16,7 +15,7 @@
 
 - **Strongly-Typed `ReminderEnvelope<T>`** - Delivered reminders are wrapped in a generic envelope implementing `IWrappedMessage`. Use `ReminderEnvelope<T>` for compile-time type safety or `ReminderEnvelope` (non-generic base) for flexibility. Both have public constructors for easy testing.
 
-- **Custom Akka.Remote Serializer** - `ReminderEnvelope`, `ReminderAck`, and `ReminderAckResponse` are automatically serialized across cluster boundaries using a dedicated `SerializerWithStringManifest`. Inner message serialization is delegated to Akka's existing serialization system.
+- **Custom Akka.Remote Serializer** - All wire protocol messages (`ReminderEnvelope`, `ReminderAck`, `ReminderAckResponse`, `ScheduleReminder`, `ReminderScheduled`, `RemindersForEntity`) are automatically serialized across cluster boundaries using a dedicated `SerializerWithStringManifest` bound via the `IReminderWireMessage` marker interface. Inner user message serialization is delegated to Akka's existing serialization system via `FindSerializerFor`, so user-defined custom serializers (Protobuf, MessagePack, etc.) work correctly end-to-end.
 
 **Migration from 0.5.x**
 
