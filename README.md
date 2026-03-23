@@ -383,8 +383,11 @@ Configure reminder behavior and performance characteristics:
         // Cap on exponential backoff to prevent absurdly long intervals
         MaxRetryBackoff = TimeSpan.FromMinutes(10),
 
-        // How long to wait for a recipient ack before retrying delivery
-        AckTimeout = TimeSpan.FromSeconds(30)
+        // How long to wait for a recipient ack before retrying delivery.
+        // This also controls the Deadline on delivered ReminderEnvelope<T> messages —
+        // when another retry is possible, the envelope deadline equals the ack timeout
+        // so recipients know exactly how long until the next delivery replaces this one.
+        AckTimeout = TimeSpan.FromSeconds(10)
     }))
 ```
 
@@ -550,7 +553,15 @@ Acknowledges receipt of a delivered reminder. Must be called after processing a 
 
 ### Acknowledgement Protocol
 
-Reminders are wrapped in `ReminderEnvelope<T>` before delivery. The envelope carries the original payload alongside the `ReminderEntity`, `ReminderKey`, occurrence `DueTimeUtc`, and a non-null `Deadline` value object. Unbounded reminders use `ReminderDeadline.Infinite`.
+Reminders are wrapped in `ReminderEnvelope<T>` before delivery. The envelope carries the original payload alongside the `ReminderEntity`, `ReminderKey`, occurrence `DueTimeUtc`, and a non-null `Deadline` value object.
+
+The `Deadline` tells the recipient how long the current delivery is relevant:
+
+- **When another retry is possible** (attempts remain and the next backoff fits within the occurrence deadline): the deadline equals the ack timeout for this attempt (`now + AckTimeout`). A new delivery will replace this one when the deadline passes.
+- **When this is the final attempt** (max attempts reached, or backoff would exceed the occurrence deadline): the deadline equals the occurrence-level delivery deadline.
+- **When there is no occurrence deadline and no more retries**: the deadline is `ReminderDeadline.Infinite`.
+
+Use `envelope.Deadline.TimeRemaining()` to know how long you have, or `envelope.Deadline.IsExpired()` to check whether a new delivery has likely already replaced this one.
 
 **Receiving and acknowledging a reminder:**
 
@@ -583,7 +594,7 @@ ReceiveAsync<ReminderEnvelope<DoSomething>>(async envelope =>
 | Outcome | Scheduler behavior |
 |---------|-------------------|
 | `AckAsync` succeeds | Current occurrence marked Delivered |
-| `AckAsync` times out or returns Error | Reminder retried after `AckTimeout` with exponential backoff while it is still before deadline |
+| `AckAsync` times out or returns Error | Reminder retried after `AckTimeout` (default: 10s) with exponential backoff while it is still before the occurrence deadline |
 | Retry attempts exhausted (`MaxDeliveryAttempts`) | Reminder marked Failed |
 | Reminder exceeds its deadline | Reminder marked Expired and will not be retried |
 | Ack received for a stale or superseded occurrence | Scheduler returns `NotFound`; the ack is a harmless no-op |

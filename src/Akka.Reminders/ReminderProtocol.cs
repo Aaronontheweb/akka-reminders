@@ -76,8 +76,10 @@ public class ReminderEnvelope : IWrappedMessage, IReminderWireMessage
     public DateTimeOffset DueTimeUtc { get; }
 
     /// <summary>
-    /// Absolute delivery deadline for this reminder occurrence.
-    /// Unbounded reminders use <see cref="ReminderDeadline.Infinite"/>.
+    /// Deadline indicating how long this delivery attempt is relevant.
+    /// When another retry is possible, this equals the ack timeout for this attempt.
+    /// When this is the final attempt, this equals the occurrence-level delivery deadline.
+    /// Unbounded final attempts use <see cref="ReminderDeadline.Infinite"/>.
     /// </summary>
     public ReminderDeadline Deadline { get; }
 
