@@ -21,8 +21,7 @@ public class SqlServerReminderStorageSpecs : ReminderStorageSpecBase
     {
         _system = ActorSystem.Create("test-system");
 
-        _container = new MsSqlBuilder()
-            .WithImage("mcr.microsoft.com/mssql/server:2022-latest")
+        _container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-latest")
             .WithPassword("yourStrong(!)Password")
             .Build();
 
@@ -57,8 +56,7 @@ public class PostgreSqlReminderStorageSpecs : ReminderStorageSpecBase
     {
         _system = ActorSystem.Create("test-system");
 
-        _container = new PostgreSqlBuilder()
-            .WithImage("postgres:16-alpine")
+        _container = new PostgreSqlBuilder("postgres:16-alpine")
             .Build();
 
         await _container.StartAsync();
