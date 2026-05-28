@@ -44,4 +44,18 @@ public class ReminderSettingsValidationSpecs
         var batchSize = new ReminderBatchSize(25);
         Assert.Equal(25, batchSize.Value);
     }
+
+    [Fact]
+    public void Defaults_ShouldHaveExpectedValues()
+    {
+        var settings = new ReminderSettings();
+        Assert.Equal(TimeSpan.FromSeconds(10), settings.AckTimeout);
+        Assert.Equal(10, settings.MaxDeliveryAttempts);
+        Assert.Equal(TimeSpan.FromSeconds(60), settings.RetryBackoffBase);
+        Assert.Equal(TimeSpan.FromMinutes(10), settings.MaxRetryBackoff);
+        Assert.Equal(1000, settings.MaxBatchSize);
+        Assert.Equal(100, settings.DeliveryCommitChunkSize);
+        Assert.Equal(TimeSpan.FromSeconds(5), settings.MaxSlippage);
+        Assert.Equal(TimeSpan.FromSeconds(5), settings.StorageTimeout);
+    }
 }

@@ -1,4 +1,10 @@
-#### 0.6.0 March 18th 2026 ####
+#### 0.6.0-beta2 March 23rd 2026 ####
+
+**Changes Since beta1**
+
+- **`ReminderEnvelope.Deadline` now reflects per-attempt expiration** - When another retry is possible, `Deadline` equals the ack timeout (`now + AckTimeout`), telling the recipient exactly when the next delivery will replace this one. On the final attempt, it falls back to the occurrence deadline or `Infinite` ([#109](https://github.com/Aaronontheweb/akka-reminders/pull/109))
+- **Default `AckTimeout` lowered from 30s to 10s** - 30s was too long for most use cases ([#109](https://github.com/Aaronontheweb/akka-reminders/pull/109))
+- Expanded migration guide with all C# code changes needed for 0.6.0
 
 **Breaking Changes**
 
@@ -9,7 +15,7 @@
 
 - **Reliable Delivery with Acknowledgement Protocol** - Reminders now require explicit acknowledgement from recipients via `IReminderClient.AckAsync(envelope)`. Unacknowledged reminders are automatically retried with exponential backoff. This ensures recipients actually process reminders, not just that `Tell()` didn't throw.
   - `AckAsync` returns a `Task` backed by `Ask<T>` — recipients know whether the scheduler confirmed their ack (no duplicate coming) or if a duplicate may arrive
-  - Configurable via `ReminderSettings.AckTimeout` (default: 30s)
+  - Configurable via `ReminderSettings.AckTimeout` (default: 10s)
   - Existing `MaxDeliveryAttempts` and `RetryBackoffBase` now apply to ack-timeout retries
   - New `AwaitingAck` delivery state in the state machine: `Pending → AwaitingAck → Delivered/Failed`
 

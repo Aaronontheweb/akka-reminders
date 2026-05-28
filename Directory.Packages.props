@@ -9,8 +9,8 @@
     <PackageVersion Include="Akka.Cluster.Hosting" Version="$(AkkaHostingVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="9.0.8" />
     <PackageVersion Include="Microsoft.Data.SqlClient" Version="6.1.4" />
-    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.3" />
-    <PackageVersion Include="Npgsql" Version="10.0.1" />
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.5" />
+    <PackageVersion Include="Npgsql" Version="10.0.2" />
   </ItemGroup>
   <!-- Test dependencies -->
   <ItemGroup>
@@ -28,6 +28,6 @@
   </ItemGroup>
   <!-- SourceLink support for all Akka.NET projects -->
   <ItemGroup>
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.200" />
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.201" />
   </ItemGroup>
 </Project>

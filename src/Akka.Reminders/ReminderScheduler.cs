@@ -67,7 +67,12 @@ public sealed record ReminderSettings
     /// <summary>
     /// How long to wait for an acknowledgement after delivering a reminder before retrying.
     /// </summary>
-    public TimeSpan AckTimeout { get; init; } = TimeSpan.FromSeconds(30);
+    /// <summary>
+    /// Default ack timeout: 10 seconds.
+    /// </summary>
+    public static readonly TimeSpan DefaultAckTimeout = TimeSpan.FromSeconds(10);
+
+    public TimeSpan AckTimeout { get; init; } = DefaultAckTimeout;
 
     /// <summary>
     /// Maximum number of acknowledgements to flush in a single storage batch.
@@ -844,6 +849,54 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         return deadline;
     }
 
+    /// <summary>
+    /// Computes the <see cref="ReminderDeadline"/> to attach to the delivered
+    /// <see cref="ReminderEnvelope"/>. This tells the recipient how long the
+    /// current delivery attempt is relevant:
+    ///
+    /// - If another retry is possible (attempts remain and backoff fits within
+    ///   the occurrence deadline), the deadline is the ack timeout for this attempt
+    ///   (<paramref name="ackDeadline"/>), because a new delivery will replace this one.
+    /// - If this is the final attempt (max attempts reached, or the next backoff
+    ///   would exceed the occurrence deadline), the deadline is the occurrence-level
+    ///   <see cref="ScheduledReminder.DeliveryDeadlineUtc"/>, or
+    ///   <see cref="ReminderDeadline.Infinite"/> if none exists.
+    /// </summary>
+    private ReminderDeadline ComputeEnvelopeDeadline(
+        ScheduledReminder reminder,
+        DateTimeOffset ackDeadline)
+    {
+        // Will there be another attempt after this one?
+        var hasMoreAttempts = reminder.AttemptCount + 1 < Settings.MaxDeliveryAttempts;
+
+        if (hasMoreAttempts)
+        {
+            // Check whether the next backoff would land before the occurrence deadline.
+            // If the occurrence has no deadline, there's always room for another attempt.
+            if (reminder.DeliveryDeadlineUtc.HasValue)
+            {
+                var nextBackoff = TimeSpan.FromSeconds(
+                    Math.Min(
+                        Settings.RetryBackoffBase.TotalSeconds * Math.Pow(2, reminder.AttemptCount),
+                        Settings.MaxRetryBackoff.TotalSeconds));
+                var nextRetryAt = ackDeadline.Add(nextBackoff);
+
+                if (nextRetryAt >= reminder.DeliveryDeadlineUtc.Value)
+                {
+                    // Next retry would miss the occurrence deadline — this is effectively
+                    // the last attempt. Use the occurrence deadline.
+                    return new ReminderDeadline(reminder.DeliveryDeadlineUtc.Value);
+                }
+            }
+
+            // Another delivery is coming — this attempt expires at the ack deadline.
+            return new ReminderDeadline(ackDeadline);
+        }
+
+        // Final attempt — use the occurrence deadline or infinite.
+        return reminder.Deadline;
+    }
+
     private ScheduledReminder CreateScheduledReminder(ReminderProtocol.ScheduleReminder scheduleReminder)
     {
         var dueTimeUtc = scheduleReminder.When.ToUniversalTime();
@@ -1113,7 +1166,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 var occurrencesToUpsert = new List<ScheduledReminder>();
                 var terminalReminders = new List<CompletedReminder>();
                 var remindersToAwaitAck = new List<AwaitingAckReminder>();
-                var deliveries = new List<(IActorRef ShardRegion, ScheduledReminder Reminder)>();
+                var deliveries = new List<(IActorRef ShardRegion, ScheduledReminder Reminder, DateTimeOffset AckDeadline)>();
 
                 foreach (var reminder in chunk)
                 {
@@ -1182,7 +1235,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             reminder.DueTimeUtc,
                             completedAt,
                             ackDeadline));
-                        deliveries.Add((shardRegion, reminder));
+                        deliveries.Add((shardRegion, reminder, ackDeadline));
                     }
                 }
 
@@ -1263,7 +1316,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         delivery.Reminder.Entity,
                         delivery.Reminder.Key,
                         delivery.Reminder.DueTimeUtc,
-                        delivery.Reminder.Deadline,
+                        ComputeEnvelopeDeadline(delivery.Reminder, delivery.AckDeadline),
                         delivery.Reminder.Message);
                     ShardRegionResolver.DeliverReminder(delivery.Reminder.Entity, envelope);
                     totalDelivered += 1;
