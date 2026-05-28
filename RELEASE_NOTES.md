@@ -1,4 +1,17 @@
+#### 0.6.0 May 28th 2026 ####
+
+**Bug Fixes**
+
+- **Fixed strict serialization for `InitResult`** — Marked `InitResult` with `INoSerializationVerificationNeeded` to resolve serialization issues under strict mode ([#121](https://github.com/Aaronontheweb/akka-reminders/pull/121))
+
+**Dependency Updates**
+
+- Updated Npgsql from 10.0.1 to 10.0.2 ([#99](https://github.com/Aaronontheweb/akka-reminders/pull/99))
+- Updated Microsoft.Data.Sqlite from 10.0.3 to 10.0.5 ([#97](https://github.com/Aaronontheweb/akka-reminders/pull/97))
+
 #### 0.6.0-beta2 March 23rd 2026 ####
+
+**Changes Since beta1**
 
 **Changes Since beta1**
 
