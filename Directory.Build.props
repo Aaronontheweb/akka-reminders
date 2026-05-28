@@ -7,61 +7,15 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <VersionPrefix>0.6.0-beta2</VersionPrefix>
-    <PackageReleaseNotes>**Changes Since beta1**
+    <VersionPrefix>0.6.0</VersionPrefix>
+    <PackageReleaseNotes>**Bug Fixes**
 
-- **`ReminderEnvelope.Deadline` now reflects per-attempt expiration** - When another retry is possible, `Deadline` equals the ack timeout (`now + AckTimeout`), telling the recipient exactly when the next delivery will replace this one. On the final attempt, it falls back to the occurrence deadline or `Infinite` ([#109](https://github.com/Aaronontheweb/akka-reminders/pull/109))
-- **Default `AckTimeout` lowered from 30s to 10s** - 30s was too long for most use cases ([#109](https://github.com/Aaronontheweb/akka-reminders/pull/109))
-- Expanded migration guide with all C# code changes needed for 0.6.0
+- **Fixed strict serialization for `InitResult`** — Marked `InitResult` with `INoSerializationVerificationNeeded` to resolve serialization issues under strict mode ([#121](https://github.com/Aaronontheweb/akka-reminders/pull/121))
 
-**Breaking Changes**
+**Dependency Updates**
 
-- **Reminder delivery now uses `ReminderEnvelope&lt;T&gt;` instead of raw messages** - All reminders are delivered wrapped in a strongly-typed envelope that must be acknowledged. Actors receiving reminders must change from `Receive&lt;MyMessage&gt;` to `ReceiveAsync&lt;ReminderEnvelope&lt;MyMessage&gt;&gt;` and call `await client.AckAsync(envelope)` after processing.
-- **`IShardRegionResolver.DeliverReminder` signature changed** - Now accepts `ReminderEnvelope` instead of raw `object message`. The `sender` parameter is optional (defaults to `ActorRefs.NoSender`).
-
-**New Features**
-
-- **Reliable Delivery with Acknowledgement Protocol** - Reminders now require explicit acknowledgement from recipients via `IReminderClient.AckAsync(envelope)`. Unacknowledged reminders are automatically retried with exponential backoff. This ensures recipients actually process reminders, not just that `Tell()` didn't throw.
-  - `AckAsync` returns a `Task` backed by `Ask&lt;T&gt;` — recipients know whether the scheduler confirmed their ack (no duplicate coming) or if a duplicate may arrive
-  - Configurable via `ReminderSettings.AckTimeout` (default: 10s)
-  - Existing `MaxDeliveryAttempts` and `RetryBackoffBase` now apply to ack-timeout retries
-  - New `AwaitingAck` delivery state in the state machine: `Pending → AwaitingAck → Delivered/Failed`
-
-- **Strongly-Typed `ReminderEnvelope&lt;T&gt;`** - Delivered reminders are wrapped in a generic envelope implementing `IWrappedMessage`. Use `ReminderEnvelope&lt;T&gt;` for compile-time type safety or `ReminderEnvelope` (non-generic base) for flexibility. Both have public constructors for easy testing.
-
-- **Custom Akka.Remote Serializer** - All wire protocol messages (`ReminderEnvelope`, `ReminderAck`, `ReminderAckResponse`, `ScheduleReminder`, `ReminderScheduled`, `RemindersForEntity`) are automatically serialized across cluster boundaries using a dedicated `SerializerWithStringManifest` bound via the `IReminderWireMessage` marker interface. Inner user message serialization is delegated to Akka's existing serialization system via `FindSerializerFor`, so user-defined custom serializers (Protobuf, MessagePack, etc.) work correctly end-to-end.
-
-**Migration from 0.5.x**
-
-- **Database schema**: Run the migration script for your storage provider:
-  - [SQLite](https://github.com/Aaronontheweb/akka-reminders/blob/dev/src/Akka.Reminders.Sqlite/Scripts/Migrations/V0_6_0__add_ack_columns.sql)
-  - [PostgreSQL](https://github.com/Aaronontheweb/akka-reminders/blob/dev/src/Akka.Reminders.PostgreSql/Scripts/Migrations/V0_6_0__add_ack_columns.sql)
-  - [SQL Server](https://github.com/Aaronontheweb/akka-reminders/blob/dev/src/Akka.Reminders.SqlServer/Scripts/Migrations/V0_6_0__add_ack_columns.sql)
-- **Code changes**:
-  - **Reminder handlers must ack**: Change `Receive&lt;T&gt;` to `ReceiveAsync&lt;ReminderEnvelope&lt;T&gt;&gt;` and call `AckAsync` after processing. Unacked reminders are retried after `AckTimeout` (default 30s).
-    ```csharp
-    // Before (0.5.x):
-    Receive&lt;MyMessage&gt;(msg =&gt; { /* handle */ });
-
-    // After (0.6.0):
-    ReceiveAsync&lt;ReminderEnvelope&lt;MyMessage&gt;&gt;(async envelope =&gt; {
-        var msg = envelope.Message; // MyMessage, strongly typed
-        /* handle */
-        var ext = Context.System.ReminderClient();
-        await ext.AckAsync(envelope);
-    });
-    ```
-  - **Custom `IShardRegionResolver` implementations**: Update `DeliverReminder` to accept `ReminderEnvelope` instead of raw `object message`. The `sender` parameter is now optional.
-    ```csharp
-    // Before (0.5.x):
-    public void DeliverReminder(ReminderEntity entity, object message);
-
-    // After (0.6.0):
-    public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope, IActorRef? sender = null);
-    ```
-  - **`MessageExtractor` unchanged**: Your `HashCodeMessageExtractor` does NOT need to handle `ReminderEnvelope` — the scheduler wraps it in a `ShardingEnvelope` which provides the entity ID directly.
-  - **`IReminderClient` scheduling API unchanged**: `ScheduleSingleReminderAsync` and `ScheduleRecurringReminderAsync` still accept `object message`. No changes needed to scheduling code.
-  - **`WithReminders` / `WithLocalReminders` unchanged**: The Akka.Hosting configuration API is the same.</PackageReleaseNotes>
+- Updated Npgsql from 10.0.1 to 10.0.2 ([#99](https://github.com/Aaronontheweb/akka-reminders/pull/99))
+- Updated Microsoft.Data.Sqlite from 10.0.3 to 10.0.5 ([#97](https://github.com/Aaronontheweb/akka-reminders/pull/97))</PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Visual Studio C# settings -->
