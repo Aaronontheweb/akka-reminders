@@ -232,7 +232,7 @@ public static class ReminderProtocol
         DateTimeOffset When,
         object Message,
         TimeSpan? RepeatInterval = null,
-        TimeSpan? MaxDeliveryWindow = null) : IReminderCommand, IReminderWireMessage
+        TimeSpan? MaxDeliveryWindow = null) : IReminderCommand, IReminderWireMessage, INoSerializationVerificationNeeded
     {
         public ScheduledReminder ToScheduledReminder() => new(
             Entity,
@@ -243,15 +243,15 @@ public static class ReminderProtocol
             MaxDeliveryWindow: MaxDeliveryWindow);
     }
 
-    public sealed record CancelReminder(ReminderEntity Entity, ReminderKey Key) : IReminderCommand;
+    public sealed record CancelReminder(ReminderEntity Entity, ReminderKey Key) : IReminderCommand, INoSerializationVerificationNeeded;
 
-    public sealed record CancelAllReminders(ReminderEntity Entity) : IReminderCommand;
+    public sealed record CancelAllReminders(ReminderEntity Entity) : IReminderCommand, INoSerializationVerificationNeeded;
 
     public sealed record RemindersCancelled(
         ReminderEntity Entity,
         ReminderCancelResponseCode ResponseCode,
         IReadOnlyList<ReminderKey> Keys,
-        string? Message = null) : IReminderResponse;
+        string? Message = null) : IReminderResponse, INoSerializationVerificationNeeded;
 
     public sealed record ReminderScheduled(
         ScheduleReminder OriginalCommand,
@@ -272,7 +272,7 @@ public static class ReminderProtocol
         public DateTimeOffset When => OriginalCommand.When;
     }
 
-    public sealed record GetReminders(ReminderEntity Entity) : IReminderQuery;
+    public sealed record GetReminders(ReminderEntity Entity) : IReminderQuery, INoSerializationVerificationNeeded;
 
     public sealed record RemindersForEntity(
         ReminderEntity Entity,

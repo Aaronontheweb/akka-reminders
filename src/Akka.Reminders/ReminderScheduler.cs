@@ -784,7 +784,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// initialization completes in a single PipeTo — no stashed RunTask to block
     /// the mailbox after UnstashAll.
     /// </summary>
-    private sealed record InitResult(ReminderOverview Overview, DateTimeOffset? NextAckDeadline);
+    private sealed record InitResult(ReminderOverview Overview, DateTimeOffset? NextAckDeadline) : Akka.Actor.INoSerializationVerificationNeeded;
 
     private Task LoadReminderOverview()
     {
