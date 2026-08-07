@@ -43,8 +43,17 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
                 akka.actor.serialize-messages = on
                 akka.actor.serialization-settings.allow-unregistered-types = off
                 akka.actor.serialization-bindings {
-                    ""Akka.Actor.Identify"" = hyperion
-                    ""Akka.Hosting.TestKit.TestKit+StableTestProbeRef+UpdateTarget, Akka.Hosting.TestKit"" = hyperion
+                    # TestKit-internal control messages (not part of the system under test).
+                    # Akka.Hosting.TestKit 1.5.70 sends Akka.Actor.Identify (ResolveOne during
+                    # shard-region resolution) and StableTestProbeRef+UpdateTarget (probe retargeting
+                    # across host startup). Bind both to the built-in json serializer so strict mode
+                    # (allow-unregistered-types = off) has a serializer for them.
+                    ""Akka.Actor.Identify"" = json
+                    ""Akka.Hosting.TestKit.TestKit+StableTestProbeRef+UpdateTarget, Akka.Hosting.TestKit"" = json
+                    # The user-supplied reminder payload used by these specs. A real app running
+                    # strict serialization would register a serializer for its own payload types;
+                    # bind it to json here so the reminder can round-trip through delivery.
+                    ""Akka.Reminders.Tests.StrictSerializationSpecs+StrictSerialTestMsg, Akka.Reminders.Tests"" = json
                 }
             "), HoconAddMode.Prepend);
     }
@@ -104,16 +113,16 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
         var result = await client.ScheduleSingleReminderAsync(
             key,
             when,
-            new StrictSerialTestMsg("retry"));
+            new StrictSerialTestMsg("retry"), ct: TestContext.Current.CancellationToken);
         result.ResponseCode.Should().Be(ReminderScheduleResponseCode.Success);
 
         var first = await targetActor.ExpectMsgAsync<ReminderEnvelope<StrictSerialTestMsg>>(
-            TimeSpan.FromSeconds(2));
-        var nack = await client.NackAsync(first, "test failure");
+            TimeSpan.FromSeconds(2), cancellationToken: TestContext.Current.CancellationToken);
+        var nack = await client.NackAsync(first, "test failure", ct: TestContext.Current.CancellationToken);
         nack.ResponseCode.Should().Be(ReminderNackResponseCode.RetryScheduled);
 
         var retry = await targetActor.ExpectMsgAsync<ReminderEnvelope<StrictSerialTestMsg>>(
-            TimeSpan.FromSeconds(2));
+            TimeSpan.FromSeconds(2), cancellationToken: TestContext.Current.CancellationToken);
         retry.DueTimeUtc.Should().Be(first.DueTimeUtc);
     }
 

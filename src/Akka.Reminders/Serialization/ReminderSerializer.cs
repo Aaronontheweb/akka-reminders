@@ -130,6 +130,10 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
     private const string ReminderNackResponseManifest = "rnr";
     private const string GetReminderOccurrenceStatusManifest = "rosq";
     private const string ReminderOccurrenceStatusResponseManifest = "rosr";
+    private const string CancelReminderManifest = "cr";
+    private const string CancelAllRemindersManifest = "car";
+    private const string RemindersCancelledManifest = "rc";
+    private const string GetRemindersManifest = "gr";
 
     private static readonly Type ReminderEnvelopeOpenGenericType = typeof(ReminderEnvelope<>);
 
@@ -165,6 +169,10 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         ReminderProtocol.ReminderNackResponse => ReminderNackResponseManifest,
         ReminderProtocol.GetReminderOccurrenceStatus => GetReminderOccurrenceStatusManifest,
         ReminderProtocol.ReminderOccurrenceStatusResponse => ReminderOccurrenceStatusResponseManifest,
+        ReminderProtocol.CancelReminder => CancelReminderManifest,
+        ReminderProtocol.CancelAllReminders => CancelAllRemindersManifest,
+        ReminderProtocol.RemindersCancelled => RemindersCancelledManifest,
+        ReminderProtocol.GetReminders => GetRemindersManifest,
         _ => throw new ArgumentException($"{nameof(ReminderSerializer)} does not support serializing [{o.GetType().FullName}]", nameof(o))
     };
 
@@ -181,6 +189,10 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         ReminderProtocol.ReminderNackResponse nackResponse => SerializeReminderNackResponse(nackResponse),
         ReminderProtocol.GetReminderOccurrenceStatus query => SerializeGetReminderOccurrenceStatus(query),
         ReminderProtocol.ReminderOccurrenceStatusResponse statusResponse => SerializeReminderOccurrenceStatusResponse(statusResponse),
+        ReminderProtocol.CancelReminder cancel => SerializeCancelReminder(cancel),
+        ReminderProtocol.CancelAllReminders cancelAll => SerializeCancelAllReminders(cancelAll),
+        ReminderProtocol.RemindersCancelled cancelled => SerializeRemindersCancelled(cancelled),
+        ReminderProtocol.GetReminders getReminders => SerializeGetReminders(getReminders),
         _ => throw new ArgumentException($"{nameof(ReminderSerializer)} does not support serializing [{obj.GetType().FullName}]", nameof(obj))
     };
 
@@ -197,6 +209,10 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         ReminderNackResponseManifest => DeserializeReminderNackResponse(bytes),
         GetReminderOccurrenceStatusManifest => DeserializeGetReminderOccurrenceStatus(bytes),
         ReminderOccurrenceStatusResponseManifest => DeserializeReminderOccurrenceStatusResponse(bytes),
+        CancelReminderManifest => DeserializeCancelReminder(bytes),
+        CancelAllRemindersManifest => DeserializeCancelAllReminders(bytes),
+        RemindersCancelledManifest => DeserializeRemindersCancelled(bytes),
+        GetRemindersManifest => DeserializeGetReminders(bytes),
         _ => throw new ArgumentException($"{nameof(ReminderSerializer)} does not recognize manifest [{manifest}]", nameof(manifest))
     };
 
@@ -452,6 +468,115 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
             responseCode,
             status,
             string.IsNullOrEmpty(message) ? null : message);
+    }
+
+    private static byte[] SerializeCancelReminder(ReminderProtocol.CancelReminder cancel)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+
+        writer.Write(cancel.Entity.ShardRegionName);
+        writer.Write(cancel.Entity.EntityId);
+        writer.Write(cancel.Key.Name);
+
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static ReminderProtocol.CancelReminder DeserializeCancelReminder(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+
+        var entity = new ReminderEntity(reader.ReadString(), reader.ReadString());
+        var key = new ReminderKey(reader.ReadString());
+
+        return new ReminderProtocol.CancelReminder(entity, key);
+    }
+
+    private static byte[] SerializeCancelAllReminders(ReminderProtocol.CancelAllReminders cancelAll)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+
+        writer.Write(cancelAll.Entity.ShardRegionName);
+        writer.Write(cancelAll.Entity.EntityId);
+
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static ReminderProtocol.CancelAllReminders DeserializeCancelAllReminders(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+
+        var entity = new ReminderEntity(reader.ReadString(), reader.ReadString());
+
+        return new ReminderProtocol.CancelAllReminders(entity);
+    }
+
+    private static byte[] SerializeRemindersCancelled(ReminderProtocol.RemindersCancelled cancelled)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+
+        writer.Write(cancelled.Entity.ShardRegionName);
+        writer.Write(cancelled.Entity.EntityId);
+        writer.Write((int)cancelled.ResponseCode);
+
+        writer.Write(cancelled.Keys.Count);
+        foreach (var key in cancelled.Keys)
+            writer.Write(key.Name);
+
+        writer.Write(cancelled.Message ?? string.Empty);
+
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static ReminderProtocol.RemindersCancelled DeserializeRemindersCancelled(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+
+        var entity = new ReminderEntity(reader.ReadString(), reader.ReadString());
+        var responseCode = (ReminderCancelResponseCode)reader.ReadInt32();
+
+        var count = reader.ReadInt32();
+        var keys = new List<ReminderKey>(count);
+        for (var i = 0; i < count; i++)
+            keys.Add(new ReminderKey(reader.ReadString()));
+
+        var message = reader.ReadString();
+
+        return new ReminderProtocol.RemindersCancelled(
+            entity,
+            responseCode,
+            keys,
+            string.IsNullOrEmpty(message) ? null : message);
+    }
+
+    private static byte[] SerializeGetReminders(ReminderProtocol.GetReminders getReminders)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+
+        writer.Write(getReminders.Entity.ShardRegionName);
+        writer.Write(getReminders.Entity.EntityId);
+
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static ReminderProtocol.GetReminders DeserializeGetReminders(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+
+        var entity = new ReminderEntity(reader.ReadString(), reader.ReadString());
+
+        return new ReminderProtocol.GetReminders(entity);
     }
 
     private static void WriteOccurrenceIdentity(
