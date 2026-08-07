@@ -1,6 +1,7 @@
 using Akka.Hosting;
 using Akka.Hosting.TestKit;
 using Akka.Reminders.Serialization;
+using Akka.Reminders.Storage;
 using Akka.Serialization;
 using Xunit.Abstractions;
 
@@ -172,6 +173,67 @@ public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
 
         Assert.Equal(payload.ShipmentId, result.Message.ShipmentId);
         Assert.Equal(payload.Items, result.Message.Items);
+    }
+
+    #endregion
+
+    #region ReminderDeliveryControl
+
+    [Fact]
+    public void Can_serialize_ReminderNack()
+    {
+        AssertEqual(new ReminderProtocol.ReminderNack(
+            new ReminderEntity("region", "entity"),
+            new ReminderKey("key"),
+            new DateTimeOffset(2026, 8, 7, 13, 0, 0, TimeSpan.Zero),
+            "session recovery failed"));
+    }
+
+    [Fact]
+    public void Can_serialize_ReminderNackResponse()
+    {
+        AssertEqual(new ReminderProtocol.ReminderNackResponse(
+            new ReminderEntity("region", "entity"),
+            new ReminderKey("key"),
+            new DateTimeOffset(2026, 8, 7, 13, 0, 0, TimeSpan.Zero),
+            ReminderNackResponseCode.RetryScheduled,
+            AttemptCount: 2,
+            NextAttemptAtUtc: new DateTimeOffset(2026, 8, 7, 13, 2, 0, TimeSpan.Zero),
+            Message: "retry scheduled"));
+    }
+
+    [Fact]
+    public void Can_serialize_GetReminderOccurrenceStatus()
+    {
+        AssertEqual(new ReminderProtocol.GetReminderOccurrenceStatus(
+            new ReminderEntity("region", "entity"),
+            new ReminderKey("key"),
+            new DateTimeOffset(2026, 8, 7, 13, 0, 0, TimeSpan.Zero)));
+    }
+
+    [Fact]
+    public void Can_serialize_ReminderOccurrenceStatusResponse()
+    {
+        var entity = new ReminderEntity("region", "entity");
+        var key = new ReminderKey("key");
+        var dueTime = new DateTimeOffset(2026, 8, 7, 13, 0, 0, TimeSpan.Zero);
+        AssertEqual(new ReminderProtocol.ReminderOccurrenceStatusResponse(
+            entity,
+            key,
+            dueTime,
+            ReminderOccurrenceStatusResponseCode.Success,
+            new ReminderOccurrenceStatus(
+                entity,
+                key,
+                dueTime,
+                dueTime.AddMinutes(2),
+                AttemptCount: 2,
+                LastFailureReason: "session recovery failed",
+                ReminderCompletionStatus.Pending,
+                DeliveryDeadlineUtc: dueTime.AddHours(1),
+                DeliveredAtUtc: dueTime.AddSeconds(1),
+                AckDeadlineUtc: dueTime.AddMinutes(1),
+                CompletedAtUtc: null)));
     }
 
     #endregion

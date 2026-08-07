@@ -358,6 +358,104 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             _ => ReminderAckResponseCode.Error
         };
 
+    private async Task<ScheduledReminder?> GetAwaitingAckOccurrenceAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc)
+    {
+        using var cts = new CancellationTokenSource(Settings.StorageTimeout);
+        var awaiting = await Storage.GetTimedOutAckRemindersAsync(
+            DateTimeOffset.MaxValue,
+            new ReminderBatchSize(int.MaxValue),
+            cts.Token);
+
+        return awaiting.FirstOrDefault(reminder =>
+            reminder.Entity.Equals(entity)
+            && reminder.Key.Equals(key)
+            && reminder.DueTimeUtc == dueTimeUtc.ToUniversalTime());
+    }
+
+    private async Task HandleNackAsync(ReminderProtocol.ReminderNack nack, IActorRef replyTo)
+    {
+        await FlushBufferedAcksIfAnyAsync();
+
+        var reminder = await GetAwaitingAckOccurrenceAsync(nack.Entity, nack.Key, nack.DueTimeUtc);
+        if (reminder is null)
+        {
+            replyTo.Tell(new ReminderProtocol.ReminderNackResponse(
+                nack.Entity,
+                nack.Key,
+                nack.DueTimeUtc,
+                ReminderNackResponseCode.NotFound,
+                AttemptCount: 0,
+                Message: "Reminder occurrence was not awaiting acknowledgement or was already stale."), ActorRefs.NoSender);
+            return;
+        }
+
+        var now = TimeProvider.Now;
+        var pendingUpserts = new List<ScheduledReminder>();
+        var completions = new List<CompletedReminder>();
+        ReminderNackResponseCode responseCode;
+        DateTimeOffset? nextAttemptAtUtc = null;
+        int attemptCount;
+
+        if (TryCreateRetryReminder(reminder, now, nack.Reason, out var retryReminder, out var terminalStatus))
+        {
+            pendingUpserts.Add(retryReminder);
+            responseCode = ReminderNackResponseCode.RetryScheduled;
+            nextAttemptAtUtc = retryReminder.When;
+            attemptCount = retryReminder.AttemptCount;
+        }
+        else
+        {
+            var terminalAttempt = reminder with
+            {
+                AttemptCount = reminder.AttemptCount + 1,
+                LastFailureReason = nack.Reason
+            };
+            pendingUpserts.Add(terminalAttempt);
+            completions.Add(new CompletedReminder(
+                reminder.Entity,
+                reminder.Key,
+                reminder.DueTimeUtc,
+                now,
+                terminalStatus));
+            responseCode = terminalStatus == ReminderCompletionStatus.Expired
+                ? ReminderNackResponseCode.Expired
+                : ReminderNackResponseCode.Failed;
+            attemptCount = terminalAttempt.AttemptCount;
+        }
+
+        using var mutationCts = new CancellationTokenSource(Settings.StorageTimeout);
+        var committed = await Storage.CommitReminderMutationsAsync(
+            new ReminderMutationBatch(pendingUpserts, completions, []),
+            mutationCts.Token);
+        if (!committed)
+        {
+            replyTo.Tell(new ReminderProtocol.ReminderNackResponse(
+                nack.Entity,
+                nack.Key,
+                nack.DueTimeUtc,
+                ReminderNackResponseCode.Error,
+                reminder.AttemptCount,
+                Message: "Storage rejected the negative acknowledgement mutation."), ActorRefs.NoSender);
+            return;
+        }
+
+        await ReloadPendingOverviewAsync();
+        TryScheduleFetchReminders();
+        await RefreshAckTimeoutScheduleFromStorageAsync();
+
+        replyTo.Tell(new ReminderProtocol.ReminderNackResponse(
+            nack.Entity,
+            nack.Key,
+            nack.DueTimeUtc,
+            responseCode,
+            attemptCount,
+            nextAttemptAtUtc,
+            nack.Reason), ActorRefs.NoSender);
+    }
+
     /// <summary>
     /// Drains the ack buffer in batches, writing each batch to storage via
     /// AcknowledgeRemindersAsync. On success, marks the occurrence as Delivered
@@ -640,6 +738,52 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 });
                 break;
             }
+            case ReminderProtocol.GetReminderOccurrenceStatus query:
+            {
+                var replyTo = Sender;
+                RunTask(async () =>
+                {
+                    if (Storage is not IReminderOccurrenceStatusStorage statusStorage)
+                    {
+                        replyTo.Tell(new ReminderProtocol.ReminderOccurrenceStatusResponse(
+                            query.Entity,
+                            query.Key,
+                            query.DueTimeUtc,
+                            ReminderOccurrenceStatusResponseCode.Unsupported,
+                            Message: "The configured reminder storage does not support occurrence status queries."), ActorRefs.NoSender);
+                        return;
+                    }
+
+                    try
+                    {
+                        using var cts = new CancellationTokenSource(Settings.StorageTimeout);
+                        var status = await statusStorage.GetReminderOccurrenceStatusAsync(
+                            query.Entity,
+                            query.Key,
+                            query.DueTimeUtc,
+                            cts.Token);
+                        replyTo.Tell(new ReminderProtocol.ReminderOccurrenceStatusResponse(
+                            query.Entity,
+                            query.Key,
+                            query.DueTimeUtc,
+                            status is null
+                                ? ReminderOccurrenceStatusResponseCode.NotFound
+                                : ReminderOccurrenceStatusResponseCode.Success,
+                            status), ActorRefs.NoSender);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex, "Failed to get reminder occurrence status for [{0}] / [{1}]", query.Entity, query.Key);
+                        replyTo.Tell(new ReminderProtocol.ReminderOccurrenceStatusResponse(
+                            query.Entity,
+                            query.Key,
+                            query.DueTimeUtc,
+                            ReminderOccurrenceStatusResponseCode.Error,
+                            Message: ex.Message), ActorRefs.NoSender);
+                    }
+                });
+                break;
+            }
             case PruneCompletedReminders:
             {
                 _log.Debug("Pruning completed reminders older than {0}", Settings.PruneOlderThan);
@@ -688,6 +832,29 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 }
 
                 ScheduleBufferedAckFlush();
+                break;
+            }
+            case ReminderProtocol.ReminderNack nack:
+            {
+                var replyTo = Sender;
+                RunTask(async () =>
+                {
+                    try
+                    {
+                        await HandleNackAsync(nack, replyTo);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex, "Failed to reject reminder occurrence [{0}] / [{1}]", nack.Entity, nack.Key);
+                        replyTo.Tell(new ReminderProtocol.ReminderNackResponse(
+                            nack.Entity,
+                            nack.Key,
+                            nack.DueTimeUtc,
+                            ReminderNackResponseCode.Error,
+                            AttemptCount: 0,
+                            Message: ex.Message), ActorRefs.NoSender);
+                    }
+                });
                 break;
             }
             case FlushBufferedAcks:

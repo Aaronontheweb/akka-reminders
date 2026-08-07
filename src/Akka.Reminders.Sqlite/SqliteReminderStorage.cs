@@ -10,7 +10,7 @@ namespace Akka.Reminders.Sqlite;
 /// <summary>
 /// SQLite implementation of <see cref="IReminderStorage"/>.
 /// </summary>
-public sealed class SqliteReminderStorage : IReminderStorage
+public sealed class SqliteReminderStorage : IReminderStorage, IReminderOccurrenceStatusStorage
 {
     private readonly SqliteReminderStorageSettings _settings;
     private readonly ISqlDialect _dialect;
@@ -528,6 +528,75 @@ public sealed class SqliteReminderStorage : IReminderStorage
         }
 
         return results;
+    }
+
+    public async Task<ReminderOccurrenceStatus?> GetReminderOccurrenceStatusAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT when_utc, attempt_count, last_failure_reason, completion_status,
+                   delivery_deadline_utc, delivered_at_utc, ack_deadline_utc, completed_at_utc
+            FROM "{_settings.TableName}"
+            WHERE shard_region_name = @ShardRegionName
+              AND entity_id = @EntityId
+              AND reminder_key = @ReminderKey
+              AND due_time_utc = @DueTimeUtc
+            LIMIT 1;
+            """;
+        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+        _dialect.AddParameter(command, "@ShardRegionName", entity.ShardRegionName);
+        _dialect.AddParameter(command, "@EntityId", entity.EntityId);
+        _dialect.AddParameter(command, "@ReminderKey", key.Name);
+        _dialect.AddParameter(command, "@DueTimeUtc", dueTimeUtc.ToUniversalTime().UtcDateTime);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            return null;
+
+        return ReadOccurrenceStatus(reader, entity, key, dueTimeUtc);
+    }
+
+    private static ReminderOccurrenceStatus ReadOccurrenceStatus(
+        IDataReader reader,
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc)
+    {
+        var statusText = reader.GetString(reader.GetOrdinal("completion_status"));
+        if (!Enum.TryParse<ReminderCompletionStatus>(statusText, out var completionStatus))
+            throw new InvalidOperationException($"Unknown reminder completion status '{statusText}'.");
+
+        return new ReminderOccurrenceStatus(
+            entity,
+            key,
+            dueTimeUtc.ToUniversalTime(),
+            ParseDateTimeOffset(reader.GetValue(reader.GetOrdinal("when_utc"))),
+            Convert.ToInt32(reader.GetValue(reader.GetOrdinal("attempt_count")), CultureInfo.InvariantCulture),
+            ReadNullableString(reader, "last_failure_reason"),
+            completionStatus,
+            ReadNullableDateTimeOffset(reader, "delivery_deadline_utc"),
+            ReadNullableDateTimeOffset(reader, "delivered_at_utc"),
+            ReadNullableDateTimeOffset(reader, "ack_deadline_utc"),
+            ReadNullableDateTimeOffset(reader, "completed_at_utc"));
+    }
+
+    private static string? ReadNullableString(IDataReader reader, string name)
+    {
+        var ordinal = reader.GetOrdinal(name);
+        return reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+    }
+
+    private static DateTimeOffset? ReadNullableDateTimeOffset(IDataReader reader, string name)
+    {
+        var ordinal = reader.GetOrdinal(name);
+        return reader.IsDBNull(ordinal) ? null : ParseDateTimeOffset(reader.GetValue(ordinal));
     }
 
     private async Task<IReadOnlyList<AckResult>> AcknowledgeReminderChunkAsync(

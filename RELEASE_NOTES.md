@@ -1,3 +1,16 @@
+#### 0.7.0 August 7th 2026 ####
+
+**New Features**
+
+- Added `IReminderDeliveryControl.NackAsync` for immediate failure reports that use the existing retry policy.
+- Added durable occurrence status queries for active and terminal delivery states.
+- Added occurrence status support for the in-memory, SQLite, PostgreSQL, and SQL Server providers.
+
+**Compatibility**
+
+- Kept `IReminderClient` and `IReminderStorage` unchanged.
+- Reused the 0.6.0 storage schema, so this release needs no new database migration.
+
 #### 0.6.0 May 28th 2026 ####
 
 **Bug Fixes**

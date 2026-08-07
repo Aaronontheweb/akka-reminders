@@ -10,7 +10,7 @@ namespace Akka.Reminders.Sql;
 /// <summary>
 /// Compatibility wrapper for SQL storage providers.
 /// </summary>
-public sealed class SqlReminderStorage : IReminderStorage
+public sealed class SqlReminderStorage : IReminderStorage, IReminderOccurrenceStatusStorage
 {
     private readonly IReminderStorage _storage;
 
@@ -113,4 +113,12 @@ public sealed class SqlReminderStorage : IReminderStorage
         IEnumerable<ReminderAcknowledgement> acknowledgements,
         CancellationToken ct = default)
         => _storage.AcknowledgeRemindersAsync(acknowledgements, ct);
+
+    public Task<ReminderOccurrenceStatus?> GetReminderOccurrenceStatusAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default)
+        => ((IReminderOccurrenceStatusStorage)_storage)
+            .GetReminderOccurrenceStatusAsync(entity, key, dueTimeUtc, ct);
 }

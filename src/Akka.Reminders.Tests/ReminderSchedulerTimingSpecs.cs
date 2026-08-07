@@ -421,6 +421,51 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
     }
 
     [Fact]
+    public async Task Nack_ShouldUseRetryBudgetAndExposeTerminalStatus()
+    {
+        var testProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", testProbe);
+
+        var extension = Sys.ReminderClient();
+        var client = extension.CreateClient("test-region", "entity-nack");
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var dueTime = testScheduler.Now.AddSeconds(5);
+        var key = new ReminderKey("nack-retry");
+
+        var scheduled = await client.ScheduleSingleReminderAsync(key, dueTime, "retry me");
+        Assert.Equal(ReminderScheduleResponseCode.Success, scheduled.ResponseCode);
+
+        testScheduler.Advance(TimeSpan.FromSeconds(6));
+        var first = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var firstNack = await extension.NackAsync(first, "first failure");
+        Assert.Equal(ReminderNackResponseCode.RetryScheduled, firstNack.ResponseCode);
+        Assert.Equal(1, firstNack.AttemptCount);
+
+        var pending = await extension.GetOccurrenceStatusAsync(first.Entity, first.Key, first.DueTimeUtc);
+        Assert.Equal(ReminderOccurrenceStatusResponseCode.Success, pending.ResponseCode);
+        Assert.Equal(ReminderCompletionStatus.Pending, pending.Status?.CompletionStatus);
+        Assert.Equal("first failure", pending.Status?.LastFailureReason);
+
+        testScheduler.Advance(TimeSpan.FromSeconds(6));
+        var second = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var secondNack = await extension.NackAsync(second, "second failure");
+        Assert.Equal(ReminderNackResponseCode.RetryScheduled, secondNack.ResponseCode);
+        Assert.Equal(2, secondNack.AttemptCount);
+
+        testScheduler.Advance(TimeSpan.FromSeconds(11));
+        var third = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var thirdNack = await extension.NackAsync(third, "final failure");
+        Assert.Equal(ReminderNackResponseCode.Failed, thirdNack.ResponseCode);
+        Assert.Equal(3, thirdNack.AttemptCount);
+
+        var failed = await extension.GetOccurrenceStatusAsync(third.Entity, third.Key, third.DueTimeUtc);
+        Assert.Equal(ReminderOccurrenceStatusResponseCode.Success, failed.ResponseCode);
+        Assert.Equal(ReminderCompletionStatus.Failed, failed.Status?.CompletionStatus);
+        Assert.Equal(3, failed.Status?.AttemptCount);
+        Assert.Equal("final failure", failed.Status?.LastFailureReason);
+    }
+
+    [Fact]
     public async Task CancelledReminder_ShouldNotFire()
     {
         // Arrange

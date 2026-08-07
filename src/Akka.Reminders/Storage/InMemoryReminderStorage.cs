@@ -9,12 +9,13 @@ namespace Akka.Reminders.Storage;
 /// Thread-safe implementation using concurrent collections. Suitable for testing and single-node scenarios.
 /// Not suitable for distributed scenarios as state is not shared across nodes.
 /// </remarks>
-public sealed class InMemoryReminderStorage : IReminderStorage
+public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurrenceStatusStorage
 {
     private readonly object _sync = new();
     private readonly ConcurrentDictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder> _pendingReminders = new();
     private readonly ConcurrentDictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), (ScheduledReminder Reminder, AwaitingAckReminder State)> _awaitingAckReminders = new();
     private readonly ConcurrentDictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), CompletedReminder> _completedReminders = new();
+    private readonly ConcurrentDictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder> _completedReminderDetails = new();
 
     private static (ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc) ToKey(ScheduledReminder reminder)
         => (reminder.Entity, reminder.Key, reminder.DueTimeUtc);
@@ -104,11 +105,16 @@ public sealed class InMemoryReminderStorage : IReminderStorage
                 pending[key] = reminder;
                 awaiting.Remove(key);
                 completed.Remove(key);
+                _completedReminderDetails.TryRemove(key, out _);
             }
 
             foreach (var reminder in mutationBatch.CompletedReminders)
             {
                 var key = ToKey(reminder);
+                if (pending.TryGetValue(key, out var pendingReminder))
+                    _completedReminderDetails[key] = pendingReminder;
+                else if (awaiting.TryGetValue(key, out var awaitingReminder))
+                    _completedReminderDetails[key] = awaitingReminder.Reminder;
                 pending.Remove(key);
                 awaiting.Remove(key);
                 completed[key] = reminder;
@@ -353,6 +359,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         foreach (var key in keysToRemove)
         {
             _completedReminders.TryRemove(key, out _);
+            _completedReminderDetails.TryRemove(key, out _);
         }
 
         return Task.FromResult(true);
@@ -512,6 +519,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
                     acknowledgement.DueTimeUtc,
                     acknowledgement.AckedAt,
                     ReminderCompletionStatus.Delivered);
+                _completedReminderDetails[reminderKey] = awaiting.Reminder;
 
                 results.Add(new AckResult(
                     acknowledgement.Entity,
@@ -522,6 +530,60 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         }
 
         return Task.FromResult<IReadOnlyList<AckResult>>(results);
+    }
+
+    /// <inheritdoc />
+    public Task<ReminderOccurrenceStatus?> GetReminderOccurrenceStatusAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default)
+    {
+        var occurrenceKey = (entity, key, dueTimeUtc.ToUniversalTime());
+        if (_pendingReminders.TryGetValue(occurrenceKey, out var pending))
+        {
+            return Task.FromResult<ReminderOccurrenceStatus?>(new ReminderOccurrenceStatus(
+                entity,
+                key,
+                occurrenceKey.Item3,
+                pending.When,
+                pending.AttemptCount,
+                pending.LastFailureReason,
+                ReminderCompletionStatus.Pending,
+                pending.DeliveryDeadlineUtc));
+        }
+
+        if (_awaitingAckReminders.TryGetValue(occurrenceKey, out var awaiting))
+        {
+            return Task.FromResult<ReminderOccurrenceStatus?>(new ReminderOccurrenceStatus(
+                entity,
+                key,
+                occurrenceKey.Item3,
+                awaiting.Reminder.When,
+                awaiting.Reminder.AttemptCount,
+                awaiting.Reminder.LastFailureReason,
+                ReminderCompletionStatus.AwaitingAck,
+                awaiting.Reminder.DeliveryDeadlineUtc,
+                awaiting.State.DeliveredAt,
+                awaiting.State.AckDeadline));
+        }
+
+        if (_completedReminders.TryGetValue(occurrenceKey, out var completed))
+        {
+            _completedReminderDetails.TryGetValue(occurrenceKey, out var details);
+            return Task.FromResult<ReminderOccurrenceStatus?>(new ReminderOccurrenceStatus(
+                entity,
+                key,
+                occurrenceKey.Item3,
+                details?.When ?? occurrenceKey.Item3,
+                details?.AttemptCount ?? 0,
+                details?.LastFailureReason,
+                completed.Status,
+                details?.DeliveryDeadlineUtc,
+                CompletedAtUtc: completed.CompletedAt));
+        }
+
+        return Task.FromResult<ReminderOccurrenceStatus?>(null);
     }
 
     private static void ReplaceContents<TValue>(

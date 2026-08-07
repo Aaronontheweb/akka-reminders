@@ -707,6 +707,59 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         Assert.Equal(ReminderAckStorageStatus.NotFound, results[1].Status); // stale/missing ack
     }
 
+    [Fact]
+    public async Task OccurrenceStatus_ShouldExposeActiveAndTerminalStates()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(5)) with
+        {
+            AttemptCount = 2,
+            LastFailureReason = "prior failure",
+            DeliveryDeadlineUtc = now.AddHours(1),
+            OccurrenceDueTimeUtc = now.AddMinutes(5)
+        };
+        await Storage!.ScheduleReminderAsync(reminder);
+        var statusStorage = Assert.IsAssignableFrom<IReminderOccurrenceStatusStorage>(Storage);
+
+        var pending = await statusStorage.GetReminderOccurrenceStatusAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc);
+        Assert.NotNull(pending);
+        Assert.Equal(ReminderCompletionStatus.Pending, pending.CompletionStatus);
+        Assert.Equal(2, pending.AttemptCount);
+        Assert.Equal("prior failure", pending.LastFailureReason);
+
+        await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
+            [],
+            [],
+            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+
+        var awaiting = await statusStorage.GetReminderOccurrenceStatusAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc);
+        Assert.NotNull(awaiting);
+        Assert.Equal(ReminderCompletionStatus.AwaitingAck, awaiting.CompletionStatus);
+        Assert.NotNull(awaiting.AckDeadlineUtc);
+        Assert.True(Math.Abs((awaiting.AckDeadlineUtc.Value - now.AddMinutes(1)).TotalMilliseconds) < 0.001);
+
+        var ack = await Storage.AcknowledgeReminderAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc,
+            now.AddSeconds(5));
+        Assert.True(ack.Success);
+
+        var delivered = await statusStorage.GetReminderOccurrenceStatusAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc);
+        Assert.NotNull(delivered);
+        Assert.Equal(ReminderCompletionStatus.Delivered, delivered.CompletionStatus);
+        Assert.Equal(2, delivered.AttemptCount);
+    }
+
     /// <summary>
     /// The scheduler uses event-driven ack-timeout checking. After delivering reminders,
     /// it queries storage for the earliest ack deadline to schedule a one-shot timer.

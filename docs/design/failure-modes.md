@@ -103,6 +103,33 @@ CheckAckTimeouts fires:
   -> Refresh ack-timeout schedule from storage
 ```
 
+### Negative acknowledgement handler
+
+Consumers call `IReminderDeliveryControl.NackAsync` when an attempt fails before `AckTimeout`.
+The scheduler flushes older buffered acknowledgements before it handles the negative acknowledgement.
+It then verifies that the exact occurrence still has `AwaitingAck` status.
+
+```text
+ReminderNack received:
+  -> Flush buffered ack writes
+  -> Find the AwaitingAck row by (Entity, Key, DueTimeUtc)
+  -> If retry is possible, persist Pending with the normal exponential backoff
+  -> Otherwise, persist Failed or Expired
+  -> Refresh the pending overview and ack-timeout timer
+  -> Return the durable result to the caller
+```
+
+The negative acknowledgement uses the same attempt count, deadline, and backoff policy as an ack timeout.
+It does not create a second retry budget.
+
+### Occurrence status query
+
+`GetOccurrenceStatusAsync` returns active and terminal state for one occurrence.
+The query includes the attempt count, failure reason, next attempt, deadlines, and completion state.
+Terminal results remain available until normal pruning removes the row.
+Official storage providers support this query through `IReminderOccurrenceStatusStorage`.
+Custom providers can retain the old storage contract and return `Unsupported` for the new query.
+
 ## Threat Model
 
 The primary threat is **asymmetric database failure**: reads succeed but writes fail.
@@ -159,6 +186,26 @@ Delivery-state writes now happen **before** user messages are sent.
 - The old occurrence is already expired or no longer AwaitingAck.
 - The scheduler returns `NotFound`.
 - The newer occurrence is unaffected.
+
+### Ack and negative acknowledgement race
+
+- The scheduler processes both commands through one mailbox.
+- A buffered ack that arrived first is flushed before the negative acknowledgement.
+- The first durable transition wins.
+- A stale ack or negative acknowledgement returns `NotFound`.
+- A newer occurrence with another `DueTimeUtc` remains unaffected.
+
+### Negative acknowledgement write fails
+
+- The scheduler returns `Error` to the caller.
+- The occurrence remains `AwaitingAck`.
+- The normal ack-timeout path will retry it later.
+
+### Restart after a negative acknowledgement
+
+- A retry remains `Pending` in durable storage.
+- A terminal result remains `Failed` or `Expired` until pruning.
+- Scheduler initialization restores the pending overview and next timers.
 
 ### Reminder becomes stale in the mailbox
 
@@ -225,3 +272,9 @@ Fetch and ack paths also enforce the deadline directly.
 ### Ack writes are eventually consistent
 
 Acks are buffered in memory and flushed in batches rather than written per-ack. This trades immediate durability for throughput. If the scheduler crashes between receiving an ack and flushing it, the occurrence stays `AwaitingAck` and will be retried after timeout — which is the same outcome as if the ack message had been lost in transit.
+
+### Custom storage providers opt in to status queries
+
+`IReminderStorage` remains unchanged for source and binary compatibility.
+Custom providers implement `IReminderOccurrenceStatusStorage` only when they need the new query.
+Negative acknowledgement uses the existing durable mutation contract.

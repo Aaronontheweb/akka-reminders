@@ -1,5 +1,6 @@
 using System.Text;
 using Akka.Actor;
+using Akka.Reminders.Storage;
 using Akka.Serialization;
 
 namespace Akka.Reminders.Serialization;
@@ -125,6 +126,10 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
     private const string ScheduleReminderManifest = "sr";
     private const string ReminderScheduledManifest = "rsd";
     private const string RemindersForEntityManifest = "rfe";
+    private const string ReminderNackManifest = "rn";
+    private const string ReminderNackResponseManifest = "rnr";
+    private const string GetReminderOccurrenceStatusManifest = "rosq";
+    private const string ReminderOccurrenceStatusResponseManifest = "rosr";
 
     private static readonly Type ReminderEnvelopeOpenGenericType = typeof(ReminderEnvelope<>);
 
@@ -156,6 +161,10 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         ReminderProtocol.ScheduleReminder => ScheduleReminderManifest,
         ReminderProtocol.ReminderScheduled => ReminderScheduledManifest,
         ReminderProtocol.RemindersForEntity => RemindersForEntityManifest,
+        ReminderProtocol.ReminderNack => ReminderNackManifest,
+        ReminderProtocol.ReminderNackResponse => ReminderNackResponseManifest,
+        ReminderProtocol.GetReminderOccurrenceStatus => GetReminderOccurrenceStatusManifest,
+        ReminderProtocol.ReminderOccurrenceStatusResponse => ReminderOccurrenceStatusResponseManifest,
         _ => throw new ArgumentException($"{nameof(ReminderSerializer)} does not support serializing [{o.GetType().FullName}]", nameof(o))
     };
 
@@ -168,6 +177,10 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         ReminderProtocol.ScheduleReminder cmd => SerializeScheduleReminder(cmd),
         ReminderProtocol.ReminderScheduled scheduled => SerializeReminderScheduled(scheduled),
         ReminderProtocol.RemindersForEntity reminders => SerializeRemindersForEntity(reminders),
+        ReminderProtocol.ReminderNack nack => SerializeReminderNack(nack),
+        ReminderProtocol.ReminderNackResponse nackResponse => SerializeReminderNackResponse(nackResponse),
+        ReminderProtocol.GetReminderOccurrenceStatus query => SerializeGetReminderOccurrenceStatus(query),
+        ReminderProtocol.ReminderOccurrenceStatusResponse statusResponse => SerializeReminderOccurrenceStatusResponse(statusResponse),
         _ => throw new ArgumentException($"{nameof(ReminderSerializer)} does not support serializing [{obj.GetType().FullName}]", nameof(obj))
     };
 
@@ -180,6 +193,10 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         ScheduleReminderManifest => DeserializeScheduleReminder(bytes),
         ReminderScheduledManifest => DeserializeReminderScheduled(bytes),
         RemindersForEntityManifest => DeserializeRemindersForEntity(bytes),
+        ReminderNackManifest => DeserializeReminderNack(bytes),
+        ReminderNackResponseManifest => DeserializeReminderNackResponse(bytes),
+        GetReminderOccurrenceStatusManifest => DeserializeGetReminderOccurrenceStatus(bytes),
+        ReminderOccurrenceStatusResponseManifest => DeserializeReminderOccurrenceStatusResponse(bytes),
         _ => throw new ArgumentException($"{nameof(ReminderSerializer)} does not recognize manifest [{manifest}]", nameof(manifest))
     };
 
@@ -310,6 +327,162 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
             responseCode,
             string.IsNullOrEmpty(message) ? null : message);
     }
+
+    private static byte[] SerializeReminderNack(ReminderProtocol.ReminderNack nack)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        WriteOccurrenceIdentity(writer, nack.Entity, nack.Key, nack.DueTimeUtc);
+        writer.Write(nack.Reason);
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static ReminderProtocol.ReminderNack DeserializeReminderNack(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+        var (entity, key, dueTimeUtc) = ReadOccurrenceIdentity(reader);
+        return new ReminderProtocol.ReminderNack(entity, key, dueTimeUtc, reader.ReadString());
+    }
+
+    private static byte[] SerializeReminderNackResponse(ReminderProtocol.ReminderNackResponse response)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        WriteOccurrenceIdentity(writer, response.Entity, response.Key, response.DueTimeUtc);
+        writer.Write((int)response.ResponseCode);
+        writer.Write(response.AttemptCount);
+        WriteNullableDateTimeOffset(writer, response.NextAttemptAtUtc);
+        writer.Write(response.Message ?? string.Empty);
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static ReminderProtocol.ReminderNackResponse DeserializeReminderNackResponse(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+        var (entity, key, dueTimeUtc) = ReadOccurrenceIdentity(reader);
+        var responseCode = (ReminderNackResponseCode)reader.ReadInt32();
+        var attemptCount = reader.ReadInt32();
+        var nextAttemptAtUtc = ReadNullableDateTimeOffset(reader);
+        var message = reader.ReadString();
+        return new ReminderProtocol.ReminderNackResponse(
+            entity,
+            key,
+            dueTimeUtc,
+            responseCode,
+            attemptCount,
+            nextAttemptAtUtc,
+            string.IsNullOrEmpty(message) ? null : message);
+    }
+
+    private static byte[] SerializeGetReminderOccurrenceStatus(ReminderProtocol.GetReminderOccurrenceStatus query)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        WriteOccurrenceIdentity(writer, query.Entity, query.Key, query.DueTimeUtc);
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static ReminderProtocol.GetReminderOccurrenceStatus DeserializeGetReminderOccurrenceStatus(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+        var (entity, key, dueTimeUtc) = ReadOccurrenceIdentity(reader);
+        return new ReminderProtocol.GetReminderOccurrenceStatus(entity, key, dueTimeUtc);
+    }
+
+    private static byte[] SerializeReminderOccurrenceStatusResponse(ReminderProtocol.ReminderOccurrenceStatusResponse response)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        WriteOccurrenceIdentity(writer, response.Entity, response.Key, response.DueTimeUtc);
+        writer.Write((int)response.ResponseCode);
+        writer.Write(response.Message ?? string.Empty);
+        writer.Write(response.Status is not null);
+        if (response.Status is { } status)
+        {
+            writer.Write(status.NextAttemptAtUtc.UtcTicks);
+            writer.Write(status.AttemptCount);
+            writer.Write(status.LastFailureReason ?? string.Empty);
+            writer.Write((int)status.CompletionStatus);
+            WriteNullableDateTimeOffset(writer, status.DeliveryDeadlineUtc);
+            WriteNullableDateTimeOffset(writer, status.DeliveredAtUtc);
+            WriteNullableDateTimeOffset(writer, status.AckDeadlineUtc);
+            WriteNullableDateTimeOffset(writer, status.CompletedAtUtc);
+        }
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static ReminderProtocol.ReminderOccurrenceStatusResponse DeserializeReminderOccurrenceStatusResponse(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+        var (entity, key, dueTimeUtc) = ReadOccurrenceIdentity(reader);
+        var responseCode = (ReminderOccurrenceStatusResponseCode)reader.ReadInt32();
+        var message = reader.ReadString();
+        ReminderOccurrenceStatus? status = null;
+        if (reader.ReadBoolean())
+        {
+            var nextAttemptAtUtc = new DateTimeOffset(reader.ReadInt64(), TimeSpan.Zero);
+            var attemptCount = reader.ReadInt32();
+            var lastFailureReason = reader.ReadString();
+            var completionStatus = (ReminderCompletionStatus)reader.ReadInt32();
+            status = new ReminderOccurrenceStatus(
+                entity,
+                key,
+                dueTimeUtc,
+                nextAttemptAtUtc,
+                attemptCount,
+                string.IsNullOrEmpty(lastFailureReason) ? null : lastFailureReason,
+                completionStatus,
+                ReadNullableDateTimeOffset(reader),
+                ReadNullableDateTimeOffset(reader),
+                ReadNullableDateTimeOffset(reader),
+                ReadNullableDateTimeOffset(reader));
+        }
+        return new ReminderProtocol.ReminderOccurrenceStatusResponse(
+            entity,
+            key,
+            dueTimeUtc,
+            responseCode,
+            status,
+            string.IsNullOrEmpty(message) ? null : message);
+    }
+
+    private static void WriteOccurrenceIdentity(
+        BinaryWriter writer,
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc)
+    {
+        writer.Write(entity.ShardRegionName);
+        writer.Write(entity.EntityId);
+        writer.Write(key.Name);
+        writer.Write(dueTimeUtc.UtcTicks);
+    }
+
+    private static (ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc) ReadOccurrenceIdentity(BinaryReader reader)
+        => (
+            new ReminderEntity(reader.ReadString(), reader.ReadString()),
+            new ReminderKey(reader.ReadString()),
+            new DateTimeOffset(reader.ReadInt64(), TimeSpan.Zero));
+
+    private static void WriteNullableDateTimeOffset(BinaryWriter writer, DateTimeOffset? value)
+    {
+        writer.Write(value.HasValue);
+        if (value.HasValue)
+            writer.Write(value.Value.UtcTicks);
+    }
+
+    private static DateTimeOffset? ReadNullableDateTimeOffset(BinaryReader reader)
+        => reader.ReadBoolean()
+            ? new DateTimeOffset(reader.ReadInt64(), TimeSpan.Zero)
+            : null;
 
     private byte[] SerializeScheduleReminder(ReminderProtocol.ScheduleReminder cmd)
     {
