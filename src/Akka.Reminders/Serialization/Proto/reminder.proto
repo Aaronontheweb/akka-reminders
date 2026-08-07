@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package akka.reminders.serialization;
+
+option csharp_namespace = "Akka.Reminders.Serialization.Proto";
+
+message ReminderEntityProto {
+  string shard_region_name = 1;
+  string entity_id = 2;
+}
+
+message SerializedPayloadProto {
+  int32 serializer_id = 1;
+  string manifest = 2;
+  bytes payload = 3;
+}
+
+message ReminderEnvelopeProto {
+  ReminderEntityProto entity = 1;
+  string key = 2;
+  int64 due_time_utc_ticks = 3;
+  int64 deadline_utc_ticks = 4;
+  SerializedPayloadProto message = 5;
+}
+
+message ReminderAckProto {
+  ReminderEntityProto entity = 1;
+  string key = 2;
+  int64 due_time_utc_ticks = 3;
+}
+
+enum ReminderAckResponseCodeProto {
+  REMINDER_ACK_RESPONSE_UNSPECIFIED = 0;
+  REMINDER_ACK_RESPONSE_SUCCESS = 1;
+  REMINDER_ACK_RESPONSE_NOT_FOUND = 2;
+  REMINDER_ACK_RESPONSE_ERROR = 3;
+}
+
+message ReminderAckResponseProto {
+  ReminderEntityProto entity = 1;
+  string key = 2;
+  int64 due_time_utc_ticks = 3;
+  ReminderAckResponseCodeProto response_code = 4;
+  optional string message = 5;
+}
+
+message ScheduleReminderProto {
+  ReminderEntityProto entity = 1;
+  string key = 2;
+  int64 when_utc_ticks = 3;
+  SerializedPayloadProto message = 4;
+  optional int64 repeat_interval_ticks = 5;
+  optional int64 max_delivery_window_ticks = 6;
+}
+
+enum ReminderScheduleResponseCodeProto {
+  REMINDER_SCHEDULE_RESPONSE_UNSPECIFIED = 0;
+  REMINDER_SCHEDULE_RESPONSE_SUCCESS = 1;
+  REMINDER_SCHEDULE_RESPONSE_SHARD_REGION_NOT_FOUND = 2;
+  REMINDER_SCHEDULE_RESPONSE_ERROR = 3;
+}
+
+message ReminderScheduledProto {
+  ScheduleReminderProto original_command = 1;
+  ReminderScheduleResponseCodeProto response_code = 2;
+  optional string message = 3;
+}
+
+message ScheduledReminderProto {
+  ReminderEntityProto entity = 1;
+  string key = 2;
+  int64 when_utc_ticks = 3;
+  SerializedPayloadProto message = 4;
+  optional int64 repeat_interval_ticks = 5;
+  int32 attempt_count = 6;
+  optional string last_failure_reason = 7;
+  optional int64 max_delivery_window_ticks = 8;
+  optional int64 delivery_deadline_utc_ticks = 9;
+  optional int64 occurrence_due_time_utc_ticks = 10;
+}
+
+enum FetchRemindersResponseCodeProto {
+  FETCH_REMINDERS_RESPONSE_UNSPECIFIED = 0;
+  FETCH_REMINDERS_RESPONSE_SUCCESS = 1;
+  FETCH_REMINDERS_RESPONSE_ERROR = 2;
+  FETCH_REMINDERS_RESPONSE_NOT_FOUND = 3;
+}
+
+message RemindersForEntityProto {
+  ReminderEntityProto entity = 1;
+  FetchRemindersResponseCodeProto response_code = 2;
+  repeated ScheduledReminderProto reminders = 3;
+  optional string message = 4;
+}

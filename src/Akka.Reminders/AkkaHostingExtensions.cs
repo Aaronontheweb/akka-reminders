@@ -10,16 +10,30 @@ namespace Akka.Reminders;
 /// </summary>
 public static class AkkaHostingExtensions
 {
+    private const string LegacySerializerWarning =
+        "Akka.Reminders uses the legacy wire serializer for new messages. " +
+        "Enable WithProtobufSerializer() after all cluster nodes support the Protobuf reader.";
+
+    internal static void WarnIfLegacySerializerWrites(ActorSystem system, bool useProtobufSerializer)
+    {
+        if (!useProtobufSerializer)
+            Logging.GetLogger(system, typeof(AkkaHostingExtensions)).Warning(LegacySerializerWarning);
+    }
+
     /// <summary>
-    /// Registers the <see cref="Serialization.ReminderSerializer"/> for all
-    /// <see cref="IReminderWireMessage"/> types using the Akka.Hosting serializer API.
+    /// Registers both reminder serializers and selects the serializer for new writes.
     /// </summary>
-    private static void RegisterReminderSerializer(AkkaConfigurationBuilder builder)
+    private static void RegisterReminderSerializers(AkkaConfigurationBuilder builder, bool useProtobufSerializer)
     {
         builder.WithCustomSerializer(
             "reminder-serializer",
-            [typeof(IReminderWireMessage)],
+            useProtobufSerializer ? [] : [typeof(IReminderWireMessage)],
             system => new Serialization.ReminderSerializer(system));
+
+        builder.WithCustomSerializer(
+            "reminder-protobuf-serializer",
+            useProtobufSerializer ? [typeof(IReminderWireMessage)] : [],
+            system => new Serialization.ProtobufReminderSerializer(system));
     }
 
     /// <summary>
@@ -49,8 +63,7 @@ public static class AkkaHostingExtensions
         configure?.Invoke(reminderBuilder);
         var setup = reminderBuilder.Build();
 
-        // Register the reminder serializer for all IReminderWireMessage types.
-        RegisterReminderSerializer(builder);
+        RegisterReminderSerializers(builder, setup.UseProtobufSerializer);
 
         // Add the setup to the actor system
         builder.AddSetup(setup);
@@ -60,6 +73,8 @@ public static class AkkaHostingExtensions
         {
             var extendedSystem = (ExtendedActorSystem)system;
             var log = Logging.GetLogger(system, typeof(AkkaHostingExtensions));
+
+            WarnIfLegacySerializerWrites(system, setup.UseProtobufSerializer);
 
             // Check if this node has the required role to host the singleton
             var nodeRoles = system.Settings.Config.GetStringList("akka.cluster.roles");
@@ -151,12 +166,13 @@ public static class AkkaHostingExtensions
         var localBuilder = new LocalReminderConfigurationBuilder();
         configure?.Invoke(localBuilder);
 
-        // Register the reminder serializer for all IReminderWireMessage types.
-        RegisterReminderSerializer(builder);
+        RegisterReminderSerializers(builder, localBuilder.GetUseProtobufSerializer());
 
         builder.WithActors((system, registry) =>
         {
             var extendedSystem = (ExtendedActorSystem)system;
+
+            WarnIfLegacySerializerWrites(system, localBuilder.GetUseProtobufSerializer());
 
             // Create the storage and resolver instances from the local builder
             var storage = localBuilder.GetStorageFactory()(system);

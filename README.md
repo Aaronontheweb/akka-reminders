@@ -190,6 +190,31 @@ public class MyEntityActor : ReceiveActor
 
 ## Configuration
 
+### Protobuf Wire Serializer
+
+Akka.Reminders registers both wire serializers on every node. The legacy serializer remains the default writer during the compatibility rollout.
+
+Enable Protobuf writes after every cluster node runs a version that contains the Protobuf reader:
+
+```csharp
+.WithReminders("reminder-host", reminders => reminders
+    .WithStorage(_ => new InMemoryReminderStorage())
+    .WithProtobufSerializer())
+```
+
+The same option is available on `WithLocalReminders()`.
+
+The rollout has two phases:
+
+1. Upgrade every node while legacy writes remain active. Both serializer IDs can read messages.
+2. Enable `WithProtobufSerializer()` on every node. New reminder messages then use Protobuf.
+
+The library logs a startup warning while the legacy serializer owns the write binding. Serializer ID `22550` remains available for legacy reads. Serializer ID `22551` identifies Protobuf messages.
+
+The flag does not rewrite existing SQLite rows. A payload keeps its old serializer metadata until an upsert rewrites that payload. The upsert replaces the serializer ID, manifest, and payload with the active serializer output. User payloads keep their own Akka.NET serializer bindings.
+
+> **Warning:** Do not roll back to a release that lacks the Protobuf reader after you enable Protobuf writes. A durable payload can retain serializer ID `22551`. You can disable new Protobuf writes only while all nodes keep the Protobuf reader installed.
+
 ### SQL Server Storage
 
 `using Akka.Reminders.SqlServer.Hosting;`

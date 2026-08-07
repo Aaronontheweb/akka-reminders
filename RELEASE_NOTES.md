@@ -1,3 +1,18 @@
+#### Next ####
+
+**New Features**
+
+- Added an opt-in Protobuf wire serializer for reminder protocol messages.
+- Kept serializer ID `22550` as a permanent legacy reader.
+- Added a startup warning that directs users to `WithProtobufSerializer()`.
+
+**Upgrade Order**
+
+1. Upgrade every cluster node while legacy writes remain active.
+2. Enable `WithProtobufSerializer()` on every node after the first step is complete.
+
+Do not roll back to a release that lacks the Protobuf reader after step 2. Durable payloads can retain serializer ID `22551`.
+
 #### 0.6.0 May 28th 2026 ####
 
 **Bug Fixes**

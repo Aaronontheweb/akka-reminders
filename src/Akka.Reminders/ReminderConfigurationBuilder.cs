@@ -13,6 +13,7 @@ public sealed class ReminderConfigurationBuilder
     private Func<ActorSystem, IShardRegionResolver>? _resolverFactory;
     private ReminderSettings _settings = new();
     private string? _role;
+    private bool _useProtobufSerializer;
 
     /// <summary>
     /// Configures the storage backend using a factory function.
@@ -85,6 +86,18 @@ public sealed class ReminderConfigurationBuilder
     }
 
     /// <summary>
+    /// Uses Protobuf for new reminder protocol messages.
+    /// </summary>
+    /// <remarks>
+    /// Upgrade all nodes to a version that contains the Protobuf reader before you enable this option.
+    /// </remarks>
+    public ReminderConfigurationBuilder WithProtobufSerializer()
+    {
+        _useProtobufSerializer = true;
+        return this;
+    }
+
+    /// <summary>
     /// Builds the internal <see cref="ReminderSetup"/> from the configured options.
     /// </summary>
     internal ReminderSetup Build()
@@ -101,6 +114,9 @@ public sealed class ReminderConfigurationBuilder
 
         if (_role != null)
             setup = setup.WithRole(_role);
+
+        if (_useProtobufSerializer)
+            setup = setup.WithProtobufSerializer();
 
         return setup;
     }
