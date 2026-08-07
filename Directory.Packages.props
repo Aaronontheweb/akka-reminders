@@ -2,7 +2,7 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <!-- Akka.Hosting packages (github.com/akkadotnet/Akka.Hosting) -->
-    <AkkaHostingVersion>1.5.62</AkkaHostingVersion>
+    <AkkaHostingVersion>1.5.68</AkkaHostingVersion>
   </PropertyGroup>
   <!-- Akka.Hosting packages - brings in core Akka transitively -->
   <ItemGroup>
