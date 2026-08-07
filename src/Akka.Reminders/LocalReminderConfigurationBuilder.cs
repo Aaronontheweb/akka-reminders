@@ -18,6 +18,7 @@ public sealed class LocalReminderConfigurationBuilder
     private Func<ActorSystem, IReminderStorage>? _storageFactory;
     private Func<ActorSystem, IShardRegionResolver>? _resolver;
     private ReminderSettings _settings = new();
+    private bool _useProtobufSerializer;
 
     /// <summary>
     /// Registers a shard region that reminders can be delivered to during testing.
@@ -124,12 +125,21 @@ public sealed class LocalReminderConfigurationBuilder
         return this;
     }
 
+    /// <summary>
+    /// Uses Protobuf for new reminder protocol messages.
+    /// </summary>
+    public LocalReminderConfigurationBuilder WithProtobufSerializer()
+    {
+        _useProtobufSerializer = true;
+        return this;
+    }
+
     internal Func<ActorSystem, IReminderStorage> GetStorageFactory()
     {
         return _storageFactory ?? (_ => new InMemoryReminderStorage());
     }
 
-    internal Func<ActorSystem,IShardRegionResolver> GetResolver()
+    internal Func<ActorSystem, IShardRegionResolver> GetResolver()
     {
         return _resolver ?? (_ => new TestShardRegionResolver(_shardRegions));
     }
@@ -137,5 +147,10 @@ public sealed class LocalReminderConfigurationBuilder
     internal ReminderSettings GetSettings()
     {
         return _settings;
+    }
+
+    internal bool GetUseProtobufSerializer()
+    {
+        return _useProtobufSerializer;
     }
 }

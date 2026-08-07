@@ -5,11 +5,14 @@ using Akka.Serialization;
 namespace Akka.Reminders.Serialization;
 
 /// <summary>
-/// Custom Akka serializer for all <see cref="IReminderWireMessage"/> types. Handles cross-node
-/// serialization for Akka.Remote and Akka.Cluster deployments. Registered via
-/// <c>WithCustomSerializer</c> in <see cref="AkkaHostingExtensions"/>.
+/// Reads and writes the legacy reminder wire format.
 /// </summary>
 /// <remarks>
+/// <para>
+/// Serializer ID 22550 and its manifests are permanent compatibility contracts.
+/// Do not add new protocol messages to this format. Use <see cref="ProtobufReminderSerializer"/>.
+/// </para>
+///
 /// <para>
 /// Uses a hand-rolled binary format via <see cref="BinaryWriter"/>/<see cref="BinaryReader"/>.
 /// Strings are length-prefixed UTF-8 (BinaryWriter's default string encoding). Timestamps are

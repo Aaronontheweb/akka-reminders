@@ -16,6 +16,15 @@
 
     <ItemGroup>
       <PackageReference Include="Akka.Cluster.Hosting" />
+      <PackageReference Include="Google.Protobuf" />
+      <PackageReference Include="Grpc.Tools">
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        <PrivateAssets>all</PrivateAssets>
+      </PackageReference>
+    </ItemGroup>
+
+    <ItemGroup>
+      <Protobuf Include="Serialization/Proto/reminder.proto" GrpcServices="None" Access="Internal" />
     </ItemGroup>
 
 </Project>

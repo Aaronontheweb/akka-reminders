@@ -1,22 +1,24 @@
 using Akka.Hosting;
 using Akka.Hosting.TestKit;
 using Akka.Reminders.Serialization;
+using Akka.Reminders.Serialization.Proto;
 using Akka.Serialization;
+using Google.Protobuf;
 using Xunit.Abstractions;
 
 namespace Akka.Reminders.Tests.Serialization;
 
 /// <summary>
-/// Round-trip serialization tests for <see cref="ReminderSerializer"/>.
+/// Defines round-trip tests for the Protobuf reminder serializer.
 ///
 /// Follows the core Akka.NET pattern (see ClusterMessageSerializerSpec):
 /// register the serializer via <see cref="AkkaConfigurationBuilder.WithCustomSerializer"/>,
 /// use a small <see cref="AssertAndReturn{T}"/> helper that verifies the correct serializer
 /// is resolved and the message survives a ToBinary → FromBinary cycle.
 /// </summary>
-public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
+public sealed class ProtobufReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
 {
-    public ReminderSerializerSpecs(ITestOutputHelper output)
+    public ProtobufReminderSerializerSpecs(ITestOutputHelper output)
         : base(output: output)
     {
     }
@@ -26,17 +28,17 @@ public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
         builder.WithCustomSerializer(
             "reminder-serializer",
             [typeof(IReminderWireMessage)],
-            system => new ReminderSerializer(system));
+            system => new ProtobufReminderSerializer(system));
     }
 
     /// <summary>
-    /// Serializes and deserializes a message, asserting that <see cref="ReminderSerializer"/>
+    /// Serializes and deserializes a message, asserting that <see cref="ProtobufReminderSerializer"/>
     /// is the resolved serializer. Returns the deserialized instance for further assertions.
     /// </summary>
     private T AssertAndReturn<T>(T message) where T : notnull
     {
         var serializer = (SerializerWithStringManifest)Sys.Serialization.FindSerializerFor(message);
-        Assert.IsType<ReminderSerializer>(serializer);
+        Assert.IsType<ProtobufReminderSerializer>(serializer);
 
         var bytes = serializer.ToBinary(message);
         var manifest = serializer.Manifest(message);
@@ -494,6 +496,95 @@ public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
     }
 
     #endregion
+
+    [Fact]
+    public void Legacy_wire_contracts_stay_frozen_and_readable()
+    {
+        var serializer = new ReminderSerializer((Akka.Actor.ExtendedActorSystem)Sys);
+        var entity = new ReminderEntity("region", "entity");
+        var key = new ReminderKey("key");
+        var time = new DateTimeOffset(2026, 8, 7, 13, 0, 0, TimeSpan.Zero);
+        var command = new ReminderProtocol.ScheduleReminder(entity, key, time, "payload");
+        (string Manifest, string Base64, object Message)[] fixtures =
+        [
+            ("re", "BnJlZ2lvbgZlbnRpdHkDa2V5AMj+yYP03ggADsLtg/TeCAEAAAAACQAAACJwYXlsb2FkIg==",
+                new ReminderEnvelope<string>(entity, key, time, new ReminderDeadline(time.AddMinutes(1)), "payload")),
+            ("ra", "BnJlZ2lvbgZlbnRpdHkDa2V5AMj+yYP03gg=",
+                new ReminderProtocol.ReminderAck(entity, key, time)),
+            ("rar", "BnJlZ2lvbgZlbnRpdHkDa2V5AMj+yYP03ggCAAAABWVycm9y",
+                new ReminderProtocol.ReminderAckResponse(entity, key, time, ReminderAckResponseCode.Error, "error")),
+            ("sr", "BnJlZ2lvbgZlbnRpdHkDa2V5AMj+yYP03ggAAAEAAAAACQAAACJwYXlsb2FkIg==", command),
+            ("rsd", "BnJlZ2lvbgZlbnRpdHkDa2V5AMj+yYP03ggAAAEAAAAACQAAACJwYXlsb2FkIgIAAAAFZXJyb3I=",
+                new ReminderProtocol.ReminderScheduled(command, ReminderScheduleResponseCode.Error, "error")),
+            ("rfe", "BnJlZ2lvbgZlbnRpdHkAAAAAAAEAAAADa2V5AMj+yYP03ggAAAAAAAAAAAABAAAAAAkAAAAicGF5bG9hZCI=",
+                new ReminderProtocol.RemindersForEntity(
+                    entity,
+                    FetchRemindersResponseCode.Success,
+                    [new ScheduledReminder(entity, key, time, "payload")]))
+        ];
+
+        foreach (var fixture in fixtures)
+        {
+            Assert.Equal(fixture.Manifest, serializer.Manifest(fixture.Message));
+            Assert.Equal(fixture.Base64, Convert.ToBase64String(serializer.ToBinary(fixture.Message)));
+            AssertLegacyEquivalent(
+                fixture.Message,
+                serializer.FromBinary(Convert.FromBase64String(fixture.Base64), fixture.Manifest));
+        }
+    }
+
+    [Fact]
+    public void Reader_ignores_unknown_fields()
+    {
+        var serializer = new ProtobufReminderSerializer((Akka.Actor.ExtendedActorSystem)Sys);
+        var message = new ReminderProtocol.ReminderAck(
+            new ReminderEntity("region", "entity"),
+            new ReminderKey("key"),
+            new DateTimeOffset(2026, 8, 7, 13, 0, 0, TimeSpan.Zero));
+        var bytes = serializer.ToBinary(message).Concat(new byte[] { 0x98, 0x06, 0x01 }).ToArray();
+
+        var result = serializer.FromBinary(bytes, serializer.Manifest(message));
+
+        Assert.Equal(message, Assert.IsType<ReminderProtocol.ReminderAck>(result));
+    }
+
+    [Fact]
+    public void Reader_rejects_an_unspecified_response_code()
+    {
+        var serializer = new ProtobufReminderSerializer((Akka.Actor.ExtendedActorSystem)Sys);
+        var response = new ReminderAckResponseProto
+        {
+            Entity = new ReminderEntityProto { ShardRegionName = "region", EntityId = "entity" },
+            Key = "key",
+            DueTimeUtcTicks = new DateTimeOffset(2026, 8, 7, 13, 0, 0, TimeSpan.Zero).UtcTicks
+        };
+
+        Assert.Throws<InvalidDataException>(() => serializer.FromBinary(response.ToByteArray(), "rar"));
+    }
+
+    private static void AssertLegacyEquivalent(object expected, object actual)
+    {
+        switch (expected, actual)
+        {
+            case (ReminderEnvelope expectedEnvelope, ReminderEnvelope actualEnvelope):
+                Assert.Equal(expectedEnvelope.Entity, actualEnvelope.Entity);
+                Assert.Equal(expectedEnvelope.Key, actualEnvelope.Key);
+                Assert.Equal(expectedEnvelope.DueTimeUtc, actualEnvelope.DueTimeUtc);
+                Assert.Equal(expectedEnvelope.Deadline, actualEnvelope.Deadline);
+                Assert.Equal(expectedEnvelope.Message, actualEnvelope.Message);
+                break;
+            case (ReminderProtocol.RemindersForEntity expectedReminders,
+                ReminderProtocol.RemindersForEntity actualReminders):
+                Assert.Equal(expectedReminders.Entity, actualReminders.Entity);
+                Assert.Equal(expectedReminders.ResponseCode, actualReminders.ResponseCode);
+                Assert.Equal(expectedReminders.Message, actualReminders.Message);
+                Assert.Equal(expectedReminders.Reminders, actualReminders.Reminders);
+                break;
+            default:
+                Assert.Equal(expected, actual);
+                break;
+        }
+    }
 }
 
 /// <summary>

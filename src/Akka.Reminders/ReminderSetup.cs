@@ -54,6 +54,14 @@ public sealed class ReminderSetup : Setup
     public string? Role { get; init; }
 
     /// <summary>
+    /// Gets a value that selects Protobuf for new reminder protocol messages.
+    /// </summary>
+    /// <remarks>
+    /// Both serializers remain available for reads. The default value keeps legacy writes.
+    /// </remarks>
+    public bool UseProtobufSerializer { get; init; }
+
+    /// <summary>
     /// Creates a copy of this setup with the specified storage factory.
     /// </summary>
     public ReminderSetup WithStorage(Func<ActorSystem, IReminderStorage> storageFactory)
@@ -63,7 +71,8 @@ public sealed class ReminderSetup : Setup
             StorageFactory = storageFactory,
             ShardRegionResolverFactory = ShardRegionResolverFactory,
             Settings = Settings,
-            Role = Role
+            Role = Role,
+            UseProtobufSerializer = UseProtobufSerializer
         };
     }
 
@@ -77,7 +86,8 @@ public sealed class ReminderSetup : Setup
             StorageFactory = StorageFactory,
             ShardRegionResolverFactory = resolverFactory,
             Settings = Settings,
-            Role = Role
+            Role = Role,
+            UseProtobufSerializer = UseProtobufSerializer
         };
     }
 
@@ -92,7 +102,8 @@ public sealed class ReminderSetup : Setup
             StorageFactory = StorageFactory,
             ShardRegionResolverFactory = ShardRegionResolverFactory,
             Settings = settings,
-            Role = Role
+            Role = Role,
+            UseProtobufSerializer = UseProtobufSerializer
         };
     }
 
@@ -106,7 +117,23 @@ public sealed class ReminderSetup : Setup
             StorageFactory = StorageFactory,
             ShardRegionResolverFactory = ShardRegionResolverFactory,
             Settings = Settings,
-            Role = role
+            Role = role,
+            UseProtobufSerializer = UseProtobufSerializer
+        };
+    }
+
+    /// <summary>
+    /// Creates a copy that uses Protobuf for new reminder protocol messages.
+    /// </summary>
+    public ReminderSetup WithProtobufSerializer()
+    {
+        return new ReminderSetup
+        {
+            StorageFactory = StorageFactory,
+            ShardRegionResolverFactory = ShardRegionResolverFactory,
+            Settings = Settings,
+            Role = Role,
+            UseProtobufSerializer = true
         };
     }
 }
