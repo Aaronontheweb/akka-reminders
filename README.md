@@ -551,6 +551,38 @@ Task<ReminderAckResponse> AckAsync(
 
 Acknowledges receipt of a delivered reminder. Must be called after processing a `ReminderEnvelope<T>`. If this call faults or times out, the scheduler will redeliver the reminder after `AckTimeout` elapses, subject to the occurrence deadline.
 
+#### Reject Reminder
+
+```csharp
+var nack = await client.NackAsync(envelope, "Downstream service was unavailable");
+if (nack.ResponseCode == ReminderNackResponseCode.RetryScheduled)
+{
+    Log.Info("Retry {0} is scheduled for {1}", nack.AttemptCount, nack.NextAttemptAtUtc);
+}
+```
+
+`NackAsync` uses the current retry budget, deadline, and exponential backoff.
+It returns `Failed` or `Expired` when the occurrence cannot retry.
+
+#### Get Occurrence Status
+
+```csharp
+var status = await client.GetOccurrenceStatusAsync(
+    envelope.Key,
+    envelope.DueTimeUtc);
+```
+
+The status query returns terminal rows until normal pruning removes them.
+Official storage providers support status queries without a schema migration.
+
+The new delivery-control messages use new serializer manifests. Upgrade the
+reminder scheduler before a consumer calls this API. A 0.6 scheduler cannot
+read the 0.7 negative acknowledgement or status messages.
+Custom providers must implement the new `IReminderStorage` query operations.
+
+`MaxDeliveryAttempts` applies to one occurrence. A recurring reminder creates a
+new occurrence with a new retry budget. A failed occurrence does not disable the recurring reminder.
+
 ### Acknowledgement Protocol
 
 Reminders are wrapped in `ReminderEnvelope<T>` before delivery. The envelope carries the original payload alongside the `ReminderEntity`, `ReminderKey`, occurrence `DueTimeUtc`, and a non-null `Deadline` value object.
@@ -594,6 +626,7 @@ ReceiveAsync<ReminderEnvelope<DoSomething>>(async envelope =>
 | Outcome | Scheduler behavior |
 |---------|-------------------|
 | `AckAsync` succeeds | Current occurrence marked Delivered |
+| `NackAsync` succeeds | Current attempt fails and the normal retry policy runs immediately |
 | `AckAsync` times out or returns Error | Reminder retried after `AckTimeout` (default: 10s) with exponential backoff while it is still before the occurrence deadline |
 | Retry attempts exhausted (`MaxDeliveryAttempts`) | Reminder marked Failed |
 | Reminder exceeds its deadline | Reminder marked Expired and will not be retried |

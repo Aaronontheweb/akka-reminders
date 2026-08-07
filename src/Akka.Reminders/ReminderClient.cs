@@ -219,6 +219,7 @@ internal sealed class ReminderClient : IReminderClient
         ReminderEnvelope envelope,
         CancellationToken ct = default)
     {
+        EnsureEnvelopeOwnership(envelope);
         var command = new ReminderProtocol.ReminderAck(envelope.Entity, envelope.Key, envelope.DueTimeUtc);
 
         try
@@ -245,6 +246,92 @@ internal sealed class ReminderClient : IReminderClient
                 envelope.DueTimeUtc,
                 ReminderAckResponseCode.Error,
                 $"Error acknowledging reminder: {ex.Message}");
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<ReminderProtocol.ReminderNackResponse> NackAsync(
+        ReminderEnvelope envelope,
+        string reason,
+        CancellationToken ct = default)
+    {
+        EnsureEnvelopeOwnership(envelope);
+        if (string.IsNullOrWhiteSpace(reason))
+            throw new ArgumentException("A negative acknowledgement requires a failure reason.", nameof(reason));
+
+        var command = new ReminderProtocol.ReminderNack(
+            envelope.Entity,
+            envelope.Key,
+            envelope.DueTimeUtc,
+            reason);
+
+        try
+        {
+            return await _schedulerProxy.Ask<ReminderProtocol.ReminderNackResponse>(
+                command, _ackTimeout, ct);
+        }
+        catch (AskTimeoutException)
+        {
+            return new ReminderProtocol.ReminderNackResponse(
+                envelope.Entity,
+                envelope.Key,
+                envelope.DueTimeUtc,
+                ReminderNackResponseCode.Error,
+                AttemptCount: 0,
+                Message: "Request timed out while rejecting reminder");
+        }
+        catch (Exception ex)
+        {
+            return new ReminderProtocol.ReminderNackResponse(
+                envelope.Entity,
+                envelope.Key,
+                envelope.DueTimeUtc,
+                ReminderNackResponseCode.Error,
+                AttemptCount: 0,
+                Message: $"Error rejecting reminder: {ex.Message}");
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<ReminderProtocol.ReminderOccurrenceStatusResponse> GetOccurrenceStatusAsync(
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default)
+    {
+        var query = new ReminderProtocol.GetReminderOccurrenceStatus(Entity, key, dueTimeUtc);
+
+        try
+        {
+            return await _schedulerProxy.Ask<ReminderProtocol.ReminderOccurrenceStatusResponse>(
+                query, _defaultTimeout, ct);
+        }
+        catch (AskTimeoutException)
+        {
+            return new ReminderProtocol.ReminderOccurrenceStatusResponse(
+                Entity,
+                key,
+                dueTimeUtc,
+                ReminderOccurrenceStatusResponseCode.Error,
+                Message: "Request timed out while fetching reminder occurrence status");
+        }
+        catch (Exception ex)
+        {
+            return new ReminderProtocol.ReminderOccurrenceStatusResponse(
+                Entity,
+                key,
+                dueTimeUtc,
+                ReminderOccurrenceStatusResponseCode.Error,
+                Message: $"Error fetching reminder occurrence status: {ex.Message}");
+        }
+    }
+
+    private void EnsureEnvelopeOwnership(ReminderEnvelope envelope)
+    {
+        if (envelope.Entity != Entity)
+        {
+            throw new ArgumentException(
+                $"The reminder envelope belongs to [{envelope.Entity}], but this client belongs to [{Entity}].",
+                nameof(envelope));
         }
     }
 }

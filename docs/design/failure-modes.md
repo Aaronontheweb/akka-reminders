@@ -8,13 +8,14 @@ Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
 - Consumers MUST be idempotent.
 - Each occurrence is identified by `(ReminderEntity, ReminderKey, DueTimeUtc)`.
 - The envelope exposes a non-null `Deadline` value object. Unbounded reminders use `ReminderDeadline.Infinite`.
-- Retries are bounded by both `MaxDeliveryAttempts` and the occurrence deadline.
+- Retries for each occurrence are bounded by `MaxDeliveryAttempts` and the occurrence deadline.
 
 ### Latest-only recurring reminders
 
 Recurring reminders are modeled as a stream of occurrences.
 
 - The next occurrence is persisted when the current occurrence is delivered.
+- Each occurrence starts with a new retry budget.
 - Each occurrence has its own absolute UTC deadline.
 - By default, a recurring occurrence expires when the next occurrence becomes due.
 - If `MaxDeliveryWindow` is configured, the effective deadline is `min(due + window, next due)`.
@@ -103,6 +104,32 @@ CheckAckTimeouts fires:
   -> Refresh ack-timeout schedule from storage
 ```
 
+### Negative acknowledgement handler
+
+Consumers call `IReminderClient.NackAsync` when an attempt fails before `AckTimeout`.
+The scheduler flushes older buffered acknowledgements before it handles the negative acknowledgement.
+It then verifies that the exact occurrence still has `AwaitingAck` status.
+
+```text
+ReminderNack received:
+  -> Flush buffered ack writes
+  -> Find the AwaitingAck row by (Entity, Key, DueTimeUtc)
+  -> If retry is possible, persist Pending with the normal exponential backoff
+  -> Otherwise, persist Failed or Expired
+  -> Refresh the pending overview and ack-timeout timer
+  -> Return the durable result to the caller
+```
+
+The negative acknowledgement uses the same attempt count, deadline, and backoff policy as an ack timeout.
+It does not create a second retry budget.
+
+### Occurrence status query
+
+`IReminderClient.GetOccurrenceStatusAsync` returns active and terminal state for one occurrence.
+The query includes the attempt count, failure reason, next attempt, deadlines, and completion state.
+Terminal results remain available until normal pruning removes the row.
+All `IReminderStorage` providers must support the query.
+
 ## Threat Model
 
 The primary threat is **asymmetric database failure**: reads succeed but writes fail.
@@ -159,6 +186,26 @@ Delivery-state writes now happen **before** user messages are sent.
 - The old occurrence is already expired or no longer AwaitingAck.
 - The scheduler returns `NotFound`.
 - The newer occurrence is unaffected.
+
+### Ack and negative acknowledgement race
+
+- The scheduler processes both commands through one mailbox.
+- A buffered ack that arrived first is flushed before the negative acknowledgement.
+- The first durable transition wins.
+- A stale ack or negative acknowledgement returns `NotFound`.
+- A newer occurrence with another `DueTimeUtc` remains unaffected.
+
+### Negative acknowledgement write fails
+
+- The scheduler returns `Error` to the caller.
+- The occurrence remains `AwaitingAck`.
+- The normal ack-timeout path will retry it later.
+
+### Restart after a negative acknowledgement
+
+- A retry remains `Pending` in durable storage.
+- A terminal result remains `Failed` or `Expired` until pruning.
+- Scheduler initialization restores the pending overview and next timers.
 
 ### Reminder becomes stale in the mailbox
 
@@ -225,3 +272,18 @@ Fetch and ack paths also enforce the deadline directly.
 ### Ack writes are eventually consistent
 
 Acks are buffered in memory and flushed in batches rather than written per-ack. This trades immediate durability for throughput. If the scheduler crashes between receiving an ack and flushing it, the occurrence stays `AwaitingAck` and will be retried after timeout — which is the same outcome as if the ack message had been lost in transit.
+
+### Custom storage provider compatibility
+
+Version 0.7 extends `IReminderStorage` with exact occurrence queries.
+Custom providers must implement these members before they upgrade.
+
+The new commands have new Akka serializer manifests. Existing manifests keep
+their 0.6 layouts. During an upgrade, deploy the 0.7 scheduler before consumers
+call `NackAsync` or `GetOccurrenceStatusAsync`.
+Negative acknowledgement uses the existing durable mutation contract.
+
+### Poison recurring reminders
+
+`MaxDeliveryAttempts` applies to one occurrence. Each recurring occurrence starts with zero attempts.
+A terminal occurrence does not cancel or disable the recurring reminder definition.

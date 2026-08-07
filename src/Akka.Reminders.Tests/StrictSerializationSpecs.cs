@@ -88,6 +88,33 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
     }
 
     [Fact]
+    public async Task StrictSerialization_ShouldAllowNackAndRetry()
+    {
+        var targetActor = CreateTestProbe("retry-actor");
+        _resolver.RegisterShardRegion("retry-shard", targetActor);
+
+        var extension = Sys.ReminderClient();
+        var client = extension.CreateClient("retry-shard", "entity-1");
+        var key = new ReminderKey("strict-retry");
+        var when = DateTimeOffset.UtcNow.AddMilliseconds(100);
+
+        var result = await client.ScheduleSingleReminderAsync(
+            key,
+            when,
+            new StrictSerialTestMsg("retry"));
+        result.ResponseCode.Should().Be(ReminderScheduleResponseCode.Success);
+
+        var first = await targetActor.ExpectMsgAsync<ReminderEnvelope<StrictSerialTestMsg>>(
+            TimeSpan.FromSeconds(2));
+        var nack = await client.NackAsync(first, "test failure");
+        nack.ResponseCode.Should().Be(ReminderNackResponseCode.RetryScheduled);
+
+        var retry = await targetActor.ExpectMsgAsync<ReminderEnvelope<StrictSerialTestMsg>>(
+            TimeSpan.FromSeconds(2));
+        retry.DueTimeUtc.Should().Be(first.DueTimeUtc);
+    }
+
+    [Fact]
     public async Task StrictSerialization_ShouldAllowCancelReminder()
     {
         // Arrange
