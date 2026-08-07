@@ -9,7 +9,7 @@ namespace Akka.Reminders.SqlServer;
 /// <summary>
 /// SQL Server implementation of <see cref="IReminderStorage"/>.
 /// </summary>
-public sealed class SqlServerReminderStorage : IReminderStorage, IReminderOccurrenceStatusStorage
+public sealed class SqlServerReminderStorage : IReminderStorage
 {
     private readonly SqlServerReminderStorageSettings _settings;
     private readonly ISqlDialect _dialect;
@@ -439,6 +439,36 @@ public sealed class SqlServerReminderStorage : IReminderStorage, IReminderOccurr
         return reminders;
     }
 
+    public async Task<ScheduledReminder?> GetAwaitingAckReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT TOP (1) *
+            FROM [{_settings.SchemaName}].[{_settings.TableName}]
+            WHERE ShardRegionName = @ShardRegionName
+              AND EntityId = @EntityId
+              AND ReminderKey = @ReminderKey
+              AND DueTimeUtc = @DueTimeUtc
+              AND CompletionStatus = 'AwaitingAck'
+              AND IsCompleted = 0;
+            """;
+        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+        _dialect.AddParameter(command, "@ShardRegionName", entity.ShardRegionName);
+        _dialect.AddParameter(command, "@EntityId", entity.EntityId);
+        _dialect.AddParameter(command, "@ReminderKey", key.Name);
+        _dialect.AddParameter(command, "@DueTimeUtc", dueTimeUtc.ToUniversalTime().UtcDateTime);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadReminderFromReader(reader) : null;
+    }
+
     public async Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
@@ -517,7 +547,7 @@ public sealed class SqlServerReminderStorage : IReminderStorage, IReminderOccurr
             entity,
             key,
             dueTimeUtc.ToUniversalTime(),
-            ReadUtc(reader, "WhenUtc")!.Value,
+            completionStatus == ReminderCompletionStatus.Pending ? ReadUtc(reader, "WhenUtc") : null,
             reader.GetInt32(reader.GetOrdinal("AttemptCount")),
             ReadString(reader, "LastFailureReason"),
             completionStatus,

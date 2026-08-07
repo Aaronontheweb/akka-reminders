@@ -119,6 +119,39 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
 
     #endregion
 
+    #region Delivery Outcome Tests
+
+    [Fact]
+    public async Task NackAsync_ShouldRejectBlankReason()
+    {
+        var client = Sys.ReminderClient().CreateClient("test-region", "entity-1");
+        var envelope = new ReminderEnvelope(
+            client.Entity,
+            new ReminderKey("test-reminder"),
+            DateTimeOffset.UtcNow,
+            ReminderDeadline.Infinite,
+            "payload");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => client.NackAsync(envelope, " "));
+    }
+
+    [Fact]
+    public async Task AckAndNackAsync_ShouldRejectEnvelopeForDifferentEntity()
+    {
+        var client = Sys.ReminderClient().CreateClient("test-region", "entity-1");
+        var envelope = new ReminderEnvelope(
+            new ReminderEntity("test-region", "entity-2"),
+            new ReminderKey("test-reminder"),
+            DateTimeOffset.UtcNow,
+            ReminderDeadline.Infinite,
+            "payload");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => client.AckAsync(envelope));
+        await Assert.ThrowsAsync<ArgumentException>(() => client.NackAsync(envelope, "failed"));
+    }
+
+    #endregion
+
     #region Basic Scheduling Tests
 
     [Fact]

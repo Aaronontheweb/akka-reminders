@@ -236,6 +236,28 @@ public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
                 CompletedAtUtc: null)));
     }
 
+    [Fact]
+    public void Can_serialize_TerminalReminderOccurrenceStatusResponse()
+    {
+        var entity = new ReminderEntity("region", "entity");
+        var key = new ReminderKey("key");
+        var dueTime = new DateTimeOffset(2026, 8, 7, 13, 0, 0, TimeSpan.Zero);
+        AssertEqual(new ReminderProtocol.ReminderOccurrenceStatusResponse(
+            entity,
+            key,
+            dueTime,
+            ReminderOccurrenceStatusResponseCode.Success,
+            new ReminderOccurrenceStatus(
+                entity,
+                key,
+                dueTime,
+                NextAttemptAtUtc: null,
+                AttemptCount: 3,
+                LastFailureReason: "session recovery failed",
+                ReminderCompletionStatus.Failed,
+                CompletedAtUtc: dueTime.AddMinutes(3))));
+    }
+
     #endregion
 
     #region ReminderAck

@@ -8,13 +8,14 @@ Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
 - Consumers MUST be idempotent.
 - Each occurrence is identified by `(ReminderEntity, ReminderKey, DueTimeUtc)`.
 - The envelope exposes a non-null `Deadline` value object. Unbounded reminders use `ReminderDeadline.Infinite`.
-- Retries are bounded by both `MaxDeliveryAttempts` and the occurrence deadline.
+- Retries for each occurrence are bounded by `MaxDeliveryAttempts` and the occurrence deadline.
 
 ### Latest-only recurring reminders
 
 Recurring reminders are modeled as a stream of occurrences.
 
 - The next occurrence is persisted when the current occurrence is delivered.
+- Each occurrence starts with a new retry budget.
 - Each occurrence has its own absolute UTC deadline.
 - By default, a recurring occurrence expires when the next occurrence becomes due.
 - If `MaxDeliveryWindow` is configured, the effective deadline is `min(due + window, next due)`.
@@ -105,7 +106,7 @@ CheckAckTimeouts fires:
 
 ### Negative acknowledgement handler
 
-Consumers call `IReminderDeliveryControl.NackAsync` when an attempt fails before `AckTimeout`.
+Consumers call `IReminderClient.NackAsync` when an attempt fails before `AckTimeout`.
 The scheduler flushes older buffered acknowledgements before it handles the negative acknowledgement.
 It then verifies that the exact occurrence still has `AwaitingAck` status.
 
@@ -124,11 +125,10 @@ It does not create a second retry budget.
 
 ### Occurrence status query
 
-`GetOccurrenceStatusAsync` returns active and terminal state for one occurrence.
+`IReminderClient.GetOccurrenceStatusAsync` returns active and terminal state for one occurrence.
 The query includes the attempt count, failure reason, next attempt, deadlines, and completion state.
 Terminal results remain available until normal pruning removes the row.
-Official storage providers support this query through `IReminderOccurrenceStatusStorage`.
-Custom providers can retain the old storage contract and return `Unsupported` for the new query.
+All `IReminderStorage` providers must support the query.
 
 ## Threat Model
 
@@ -273,12 +273,17 @@ Fetch and ack paths also enforce the deadline directly.
 
 Acks are buffered in memory and flushed in batches rather than written per-ack. This trades immediate durability for throughput. If the scheduler crashes between receiving an ack and flushing it, the occurrence stays `AwaitingAck` and will be retried after timeout — which is the same outcome as if the ack message had been lost in transit.
 
-### Custom storage providers opt in to status queries
+### Custom storage provider compatibility
 
-`IReminderStorage` remains unchanged for source and binary compatibility.
+Version 0.7 extends `IReminderStorage` with exact occurrence queries.
+Custom providers must implement these members before they upgrade.
 
 The new commands have new Akka serializer manifests. Existing manifests keep
 their 0.6 layouts. During an upgrade, deploy the 0.7 scheduler before consumers
 call `NackAsync` or `GetOccurrenceStatusAsync`.
-Custom providers implement `IReminderOccurrenceStatusStorage` only when they need the new query.
 Negative acknowledgement uses the existing durable mutation contract.
+
+### Poison recurring reminders
+
+`MaxDeliveryAttempts` applies to one occurrence. Each recurring occurrence starts with zero attempts.
+A terminal occurrence does not cancel or disable the recurring reminder definition.

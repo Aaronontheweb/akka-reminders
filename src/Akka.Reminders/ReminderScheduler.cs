@@ -364,15 +364,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         DateTimeOffset dueTimeUtc)
     {
         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-        var awaiting = await Storage.GetTimedOutAckRemindersAsync(
-            DateTimeOffset.MaxValue,
-            new ReminderBatchSize(int.MaxValue),
-            cts.Token);
-
-        return awaiting.FirstOrDefault(reminder =>
-            reminder.Entity.Equals(entity)
-            && reminder.Key.Equals(key)
-            && reminder.DueTimeUtc == dueTimeUtc.ToUniversalTime());
+        return await Storage.GetAwaitingAckReminderAsync(entity, key, dueTimeUtc, cts.Token);
     }
 
     private async Task HandleNackAsync(ReminderProtocol.ReminderNack nack, IActorRef replyTo)
@@ -408,11 +400,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
         else
         {
-            var terminalAttempt = reminder with
-            {
-                AttemptCount = reminder.AttemptCount + 1,
-                LastFailureReason = nack.Reason
-            };
+            var terminalAttempt = CreateTerminalAttempt(reminder, nack.Reason);
             pendingUpserts.Add(terminalAttempt);
             completions.Add(new CompletedReminder(
                 reminder.Entity,
@@ -743,21 +731,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 var replyTo = Sender;
                 RunTask(async () =>
                 {
-                    if (Storage is not IReminderOccurrenceStatusStorage statusStorage)
-                    {
-                        replyTo.Tell(new ReminderProtocol.ReminderOccurrenceStatusResponse(
-                            query.Entity,
-                            query.Key,
-                            query.DueTimeUtc,
-                            ReminderOccurrenceStatusResponseCode.Unsupported,
-                            Message: "The configured reminder storage does not support occurrence status queries."), ActorRefs.NoSender);
-                        return;
-                    }
-
                     try
                     {
                         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-                        var status = await statusStorage.GetReminderOccurrenceStatusAsync(
+                        var status = await Storage.GetReminderOccurrenceStatusAsync(
                             query.Entity,
                             query.Key,
                             query.DueTimeUtc,
@@ -1160,11 +1137,19 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         return true;
     }
 
+    private static ScheduledReminder CreateTerminalAttempt(ScheduledReminder reminder, string failureReason)
+        => reminder with
+        {
+            AttemptCount = reminder.AttemptCount + 1,
+            LastFailureReason = failureReason
+        };
+
     private async Task ProcessAckTimeouts()
     {
         var totalRetried = 0;
         var totalFailed = 0;
         var totalExpired = 0;
+        var processingFailed = false;
 
         while (true)
         {
@@ -1180,6 +1165,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             catch (Exception ex)
             {
                 _log.Error(ex, "Failed to read timed-out awaiting-ack reminders from storage");
+                processingFailed = true;
                 break;
             }
 
@@ -1189,16 +1175,21 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             var occurrencesToUpsert = new List<ScheduledReminder>();
             var terminalReminders = new List<CompletedReminder>();
             var now = TimeProvider.Now;
+            var batchRetried = 0;
+            var batchFailed = 0;
+            var batchExpired = 0;
 
             foreach (var reminder in timedOut)
             {
-                if (TryCreateRetryReminder(reminder, now, "Ack timeout", out var retryReminder, out var terminalStatus))
+                const string failureReason = "Ack timeout";
+                if (TryCreateRetryReminder(reminder, now, failureReason, out var retryReminder, out var terminalStatus))
                 {
                     occurrencesToUpsert.Add(retryReminder);
-                    totalRetried += 1;
+                    batchRetried += 1;
                 }
                 else
                 {
+                    occurrencesToUpsert.Add(CreateTerminalAttempt(reminder, failureReason));
                     terminalReminders.Add(new CompletedReminder(
                         reminder.Entity,
                         reminder.Key,
@@ -1207,9 +1198,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         terminalStatus));
 
                     if (terminalStatus == ReminderCompletionStatus.Expired)
-                        totalExpired += 1;
+                        batchExpired += 1;
                     else
-                        totalFailed += 1;
+                        batchFailed += 1;
                 }
             }
 
@@ -1243,9 +1234,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             if (writeFailed)
             {
                 _writeCircuitOpen = true;
+                processingFailed = true;
                 _log.Warning("Write circuit OPEN — ack-timeout processing encountered storage write failures.");
                 break;
             }
+
+            totalRetried += batchRetried;
+            totalFailed += batchFailed;
+            totalExpired += batchExpired;
 
             if (timedOut.Count < Settings.MaxBatchSize)
                 break;
@@ -1257,7 +1253,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             TryScheduleFetchReminders();
         }
 
-        await RefreshAckTimeoutScheduleFromStorageAsync();
+        if (processingFailed)
+            ScheduleAckTimeoutCheck(TimeProvider.Now.Add(Settings.StorageTimeout * 2));
+        else
+            await RefreshAckTimeoutScheduleFromStorageAsync();
 
         if (totalRetried > 0 || totalFailed > 0 || totalExpired > 0)
         {
@@ -1334,6 +1333,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 var terminalReminders = new List<CompletedReminder>();
                 var remindersToAwaitAck = new List<AwaitingAckReminder>();
                 var deliveries = new List<(IActorRef ShardRegion, ScheduledReminder Reminder, DateTimeOffset AckDeadline)>();
+                var chunkRetried = 0;
+                var chunkFailed = 0;
+                var chunkExpired = 0;
 
                 foreach (var reminder in chunk)
                 {
@@ -1345,29 +1347,31 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             reminder.DueTimeUtc,
                             completedAt,
                             ReminderCompletionStatus.Expired));
-                        totalExpired += 1;
+                        chunkExpired += 1;
                         continue;
                     }
 
                     var shardRegion = ShardRegionResolver.TryResolve(reminder.Entity);
                     if (shardRegion is null)
                     {
+                        var failureReason = $"ShardRegion [{reminder.Entity.ShardRegionName}] not found";
                         _log.Warning("Reminder {0} could not be resolved to a ShardRegion. Attempt {1} of {2}",
                             reminder, reminder.AttemptCount + 1, Settings.MaxDeliveryAttempts);
 
                         if (TryCreateRetryReminder(
                                 reminder,
                                 TimeProvider.Now,
-                                $"ShardRegion [{reminder.Entity.ShardRegionName}] not found",
+                                failureReason,
                                 out var retryReminder,
                                 out var terminalStatus))
                         {
                             occurrencesToUpsert.Add(retryReminder);
                             _log.Info("Scheduling retry for reminder {0} at {1}", reminder.Key, retryReminder.When);
-                            totalRetried += 1;
+                            chunkRetried += 1;
                         }
                         else
                         {
+                            occurrencesToUpsert.Add(CreateTerminalAttempt(reminder, failureReason));
                             terminalReminders.Add(new CompletedReminder(
                                 reminder.Entity,
                                 reminder.Key,
@@ -1376,9 +1380,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                                 terminalStatus));
 
                             if (terminalStatus == ReminderCompletionStatus.Expired)
-                                totalExpired += 1;
+                                chunkExpired += 1;
                             else
-                                totalFailed += 1;
+                                chunkFailed += 1;
                         }
                     }
                     else
@@ -1446,6 +1450,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     stopProcessing = true;
                     break;
                 }
+
+                totalRetried += chunkRetried;
+                totalFailed += chunkFailed;
+                totalExpired += chunkExpired;
 
                 // Update the in-memory overview incrementally from upserted reminders
                 // (next recurring occurrences, retries). Avoids an extra storage query

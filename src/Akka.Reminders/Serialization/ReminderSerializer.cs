@@ -405,7 +405,7 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         writer.Write(response.Status is not null);
         if (response.Status is { } status)
         {
-            writer.Write(status.NextAttemptAtUtc.UtcTicks);
+            WriteNullableDateTimeOffset(writer, status.NextAttemptAtUtc);
             writer.Write(status.AttemptCount);
             writer.Write(status.LastFailureReason ?? string.Empty);
             writer.Write((int)status.CompletionStatus);
@@ -428,7 +428,7 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
         ReminderOccurrenceStatus? status = null;
         if (reader.ReadBoolean())
         {
-            var nextAttemptAtUtc = new DateTimeOffset(reader.ReadInt64(), TimeSpan.Zero);
+            var nextAttemptAtUtc = ReadNullableDateTimeOffset(reader);
             var attemptCount = reader.ReadInt32();
             var lastFailureReason = reader.ReadString();
             var completionStatus = (ReminderCompletionStatus)reader.ReadInt32();

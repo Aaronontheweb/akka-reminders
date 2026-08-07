@@ -2,13 +2,15 @@
 
 **New Features**
 
-- Added `IReminderDeliveryControl.NackAsync` for immediate failure reports that use the existing retry policy.
+- Added `IReminderClient.NackAsync` for immediate failure reports that use the existing retry policy.
 - Added durable occurrence status queries for active and terminal delivery states.
 - Added occurrence status support for the in-memory, SQLite, PostgreSQL, and SQL Server providers.
 
 **Compatibility**
 
-- Kept `IReminderClient` and `IReminderStorage` unchanged.
+- **Breaking:** Extended `IReminderClient` with negative acknowledgement and occurrence status operations.
+- **Breaking:** Extended `IReminderStorage` with exact awaiting-ack and occurrence status queries.
+- Custom client mocks and storage providers must implement the new members.
 - Reused the 0.6.0 storage schema, so this release needs no new database migration.
 - Require the scheduler to run 0.7.0 before consumers use the new delivery-control messages.
 

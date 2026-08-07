@@ -9,7 +9,7 @@ namespace Akka.Reminders;
 /// <see cref="IExtension"/> for creating <see cref="IReminderClient"/> instances
 /// that communicate with the reminder scheduler singleton.
 /// </summary>
-public sealed class ReminderClientExtension : IExtension, IReminderDeliveryControl
+public sealed class ReminderClientExtension : IExtension
 {
     private readonly ExtendedActorSystem _system;
     private readonly Lazy<IActorRef> _schedulerProxy;
@@ -266,52 +266,6 @@ public sealed class ReminderClientExtension : IExtension, IReminderDeliveryContr
                 ReminderAckResponseCode.Error,
                 errorMessage),
             AckTimeout);
-    }
-
-    /// <inheritdoc />
-    public Task<ReminderProtocol.ReminderNackResponse> NackAsync(
-        ReminderEnvelope envelope,
-        string reason,
-        CancellationToken ct = default)
-    {
-        if (string.IsNullOrWhiteSpace(reason))
-            throw new ArgumentException("A negative acknowledgement requires a failure reason.", nameof(reason));
-
-        var command = new ReminderProtocol.ReminderNack(
-            envelope.Entity,
-            envelope.Key,
-            envelope.DueTimeUtc,
-            reason);
-        return SendToSchedulerAsync<ReminderProtocol.ReminderNack, ReminderProtocol.ReminderNackResponse>(
-            command,
-            ct,
-            errorMessage => new ReminderProtocol.ReminderNackResponse(
-                envelope.Entity,
-                envelope.Key,
-                envelope.DueTimeUtc,
-                ReminderNackResponseCode.Error,
-                AttemptCount: 0,
-                Message: errorMessage),
-            AckTimeout);
-    }
-
-    /// <inheritdoc />
-    public Task<ReminderProtocol.ReminderOccurrenceStatusResponse> GetOccurrenceStatusAsync(
-        ReminderEntity entity,
-        ReminderKey key,
-        DateTimeOffset dueTimeUtc,
-        CancellationToken ct = default)
-    {
-        var command = new ReminderProtocol.GetReminderOccurrenceStatus(entity, key, dueTimeUtc);
-        return SendToSchedulerAsync<ReminderProtocol.GetReminderOccurrenceStatus, ReminderProtocol.ReminderOccurrenceStatusResponse>(
-            command,
-            ct,
-            errorMessage => new ReminderProtocol.ReminderOccurrenceStatusResponse(
-                entity,
-                key,
-                dueTimeUtc,
-                ReminderOccurrenceStatusResponseCode.Error,
-                Message: errorMessage));
     }
 
     /// <summary>

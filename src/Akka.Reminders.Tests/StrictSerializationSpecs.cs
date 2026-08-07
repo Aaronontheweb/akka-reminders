@@ -106,7 +106,7 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
 
         var first = await targetActor.ExpectMsgAsync<ReminderEnvelope<StrictSerialTestMsg>>(
             TimeSpan.FromSeconds(2));
-        var nack = await extension.NackAsync(first, "test failure");
+        var nack = await client.NackAsync(first, "test failure");
         nack.ResponseCode.Should().Be(ReminderNackResponseCode.RetryScheduled);
 
         var retry = await targetActor.ExpectMsgAsync<ReminderEnvelope<StrictSerialTestMsg>>(

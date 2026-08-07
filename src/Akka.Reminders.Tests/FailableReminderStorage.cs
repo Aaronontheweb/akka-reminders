@@ -9,6 +9,12 @@ namespace Akka.Reminders.Tests;
 internal sealed class FailableReminderStorage : IReminderStorage
 {
     private readonly IReminderStorage _inner;
+    private readonly TaskCompletionSource _firstCommitMutationFailure = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _commitMutationAttempts;
+
+    public int CommitMutationAttempts => Volatile.Read(ref _commitMutationAttempts);
+
+    public Task FirstCommitMutationFailure => _firstCommitMutationFailure.Task;
 
     /// <summary>
     /// When true, all write operations (MarkRemindersAsCompleted, ScheduleReminder) throw.
@@ -62,8 +68,12 @@ internal sealed class FailableReminderStorage : IReminderStorage
 
     public Task<bool> CommitReminderMutationsAsync(ReminderMutationBatch mutationBatch, CancellationToken ct = default)
     {
+        Interlocked.Increment(ref _commitMutationAttempts);
         if (FailWrites || FailScheduleWrites || FailMarkCompletedWrites)
+        {
+            _firstCommitMutationFailure.TrySetResult();
             throw new TimeoutException("Simulated database write timeout");
+        }
         return _inner.CommitReminderMutationsAsync(mutationBatch, ct);
     }
 
@@ -127,11 +137,33 @@ internal sealed class FailableReminderStorage : IReminderStorage
         return _inner.GetTimedOutAckRemindersAsync(now, maxCount, ct);
     }
 
+    public Task<ScheduledReminder?> GetAwaitingAckReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default)
+    {
+        if (FailReads)
+            throw new TimeoutException("Simulated database read timeout");
+        return _inner.GetAwaitingAckReminderAsync(entity, key, dueTimeUtc, ct);
+    }
+
     public Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken ct = default)
     {
         if (FailReads)
             throw new TimeoutException("Simulated database read timeout");
         return _inner.GetNextAwaitingAckDeadlineAsync(ct);
+    }
+
+    public Task<ReminderOccurrenceStatus?> GetReminderOccurrenceStatusAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default)
+    {
+        if (FailReads)
+            throw new TimeoutException("Simulated database read timeout");
+        return _inner.GetReminderOccurrenceStatusAsync(entity, key, dueTimeUtc, ct);
     }
 
     public Task<AckResult> AcknowledgeReminderAsync(ReminderEntity entity, ReminderKey key, DateTimeOffset dueTimeUtc, DateTimeOffset ackedAt, CancellationToken ct = default)

@@ -10,7 +10,7 @@ namespace Akka.Reminders.Sqlite;
 /// <summary>
 /// SQLite implementation of <see cref="IReminderStorage"/>.
 /// </summary>
-public sealed class SqliteReminderStorage : IReminderStorage, IReminderOccurrenceStatusStorage
+public sealed class SqliteReminderStorage : IReminderStorage
 {
     private readonly SqliteReminderStorageSettings _settings;
     private readonly ISqlDialect _dialect;
@@ -484,6 +484,37 @@ public sealed class SqliteReminderStorage : IReminderStorage, IReminderOccurrenc
         return reminders;
     }
 
+    public async Task<ScheduledReminder?> GetAwaitingAckReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT *
+            FROM "{_settings.TableName}"
+            WHERE shard_region_name = @ShardRegionName
+              AND entity_id = @EntityId
+              AND reminder_key = @ReminderKey
+              AND due_time_utc = @DueTimeUtc
+              AND completion_status = 'AwaitingAck'
+              AND is_completed = 0
+            LIMIT 1;
+            """;
+        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+        _dialect.AddParameter(command, "@ShardRegionName", entity.ShardRegionName);
+        _dialect.AddParameter(command, "@EntityId", entity.EntityId);
+        _dialect.AddParameter(command, "@ReminderKey", key.Name);
+        _dialect.AddParameter(command, "@DueTimeUtc", dueTimeUtc.ToUniversalTime().UtcDateTime);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadReminderFromReader(reader) : null;
+    }
+
     public async Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
@@ -577,7 +608,9 @@ public sealed class SqliteReminderStorage : IReminderStorage, IReminderOccurrenc
             entity,
             key,
             dueTimeUtc.ToUniversalTime(),
-            ParseDateTimeOffset(reader.GetValue(reader.GetOrdinal("when_utc"))),
+            completionStatus == ReminderCompletionStatus.Pending
+                ? ParseDateTimeOffset(reader.GetValue(reader.GetOrdinal("when_utc")))
+                : null,
             Convert.ToInt32(reader.GetValue(reader.GetOrdinal("attempt_count")), CultureInfo.InvariantCulture),
             ReadNullableString(reader, "last_failure_reason"),
             completionStatus,

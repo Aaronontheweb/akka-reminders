@@ -9,7 +9,7 @@ namespace Akka.Reminders.Storage;
 /// Thread-safe implementation using concurrent collections. Suitable for testing and single-node scenarios.
 /// Not suitable for distributed scenarios as state is not shared across nodes.
 /// </remarks>
-public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurrenceStatusStorage
+public sealed class InMemoryReminderStorage : IReminderStorage
 {
     private readonly object _sync = new();
     private readonly ConcurrentDictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder> _pendingReminders = new();
@@ -38,7 +38,8 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
                 .ToList();
             foreach (var key in matchingPending)
             {
-                _pendingReminders.TryRemove(key, out _);
+                if (_pendingReminders.TryRemove(key, out var pending))
+                    _completedReminderDetails[key] = pending;
                 _completedReminders[key] = new CompletedReminder(
                     key.Entity,
                     key.Key,
@@ -52,7 +53,8 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
                 .ToList();
             foreach (var key in matchingAwaiting)
             {
-                _awaitingAckReminders.TryRemove(key, out _);
+                if (_awaitingAckReminders.TryRemove(key, out var awaiting))
+                    _completedReminderDetails[key] = awaiting.Reminder;
                 _completedReminders[key] = new CompletedReminder(
                     key.Entity,
                     key.Key,
@@ -61,7 +63,10 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
                     ReminderCompletionStatus.Cancelled);
             }
 
-            _pendingReminders[ToKey(reminder)] = reminder;
+            var reminderKey = ToKey(reminder);
+            _completedReminders.TryRemove(reminderKey, out _);
+            _completedReminderDetails.TryRemove(reminderKey, out _);
+            _pendingReminders[reminderKey] = reminder;
         }
 
         return Task.FromResult(new ReminderProtocol.ReminderScheduled(
@@ -98,6 +103,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
             var pending = new Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder>(_pendingReminders);
             var awaiting = new Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), (ScheduledReminder Reminder, AwaitingAckReminder State)>(_awaitingAckReminders);
             var completed = new Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), CompletedReminder>(_completedReminders);
+            var completedDetails = new Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder>(_completedReminderDetails);
 
             foreach (var reminder in mutationBatch.PendingUpserts)
             {
@@ -105,16 +111,16 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
                 pending[key] = reminder;
                 awaiting.Remove(key);
                 completed.Remove(key);
-                _completedReminderDetails.TryRemove(key, out _);
+                completedDetails.Remove(key);
             }
 
             foreach (var reminder in mutationBatch.CompletedReminders)
             {
                 var key = ToKey(reminder);
                 if (pending.TryGetValue(key, out var pendingReminder))
-                    _completedReminderDetails[key] = pendingReminder;
+                    completedDetails[key] = pendingReminder;
                 else if (awaiting.TryGetValue(key, out var awaitingReminder))
-                    _completedReminderDetails[key] = awaitingReminder.Reminder;
+                    completedDetails[key] = awaitingReminder.Reminder;
                 pending.Remove(key);
                 awaiting.Remove(key);
                 completed[key] = reminder;
@@ -133,6 +139,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
             ReplaceContents(_pendingReminders, pending);
             ReplaceContents(_awaitingAckReminders, awaiting);
             ReplaceContents(_completedReminders, completed);
+            ReplaceContents(_completedReminderDetails, completedDetails);
         }
 
         return Task.FromResult(true);
@@ -153,8 +160,9 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
                 .ToList();
             foreach (var activeKey in pendingKeys)
             {
-                if (_pendingReminders.TryRemove(activeKey, out _))
+                if (_pendingReminders.TryRemove(activeKey, out var pending))
                 {
+                    _completedReminderDetails[activeKey] = pending;
                     _completedReminders[activeKey] = new CompletedReminder(
                         entity,
                         key,
@@ -170,8 +178,9 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
                 .ToList();
             foreach (var activeKey in awaitingKeys)
             {
-                if (_awaitingAckReminders.TryRemove(activeKey, out _))
+                if (_awaitingAckReminders.TryRemove(activeKey, out var awaiting))
                 {
+                    _completedReminderDetails[activeKey] = awaiting.Reminder;
                     _completedReminders[activeKey] = new CompletedReminder(
                         entity,
                         key,
@@ -211,8 +220,9 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
                 .ToList();
             foreach (var activeKey in pendingKeys)
             {
-                if (_pendingReminders.TryRemove(activeKey, out _))
+                if (_pendingReminders.TryRemove(activeKey, out var pending))
                 {
+                    _completedReminderDetails[activeKey] = pending;
                     _completedReminders[activeKey] = new CompletedReminder(
                         activeKey.Entity,
                         activeKey.Key,
@@ -228,8 +238,9 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
                 .ToList();
             foreach (var activeKey in awaitingKeys)
             {
-                if (_awaitingAckReminders.TryRemove(activeKey, out _))
+                if (_awaitingAckReminders.TryRemove(activeKey, out var awaiting))
                 {
+                    _completedReminderDetails[activeKey] = awaiting.Reminder;
                     _completedReminders[activeKey] = new CompletedReminder(
                         activeKey.Entity,
                         activeKey.Key,
@@ -337,8 +348,10 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
             foreach (var completed in completedReminders)
             {
                 var key = ToKey(completed);
-                _pendingReminders.TryRemove(key, out _);
-                _awaitingAckReminders.TryRemove(key, out _);
+                if (_pendingReminders.TryRemove(key, out var pending))
+                    _completedReminderDetails[key] = pending;
+                else if (_awaitingAckReminders.TryRemove(key, out var awaiting))
+                    _completedReminderDetails[key] = awaiting.Reminder;
                 _completedReminders[key] = completed;
             }
         }
@@ -374,8 +387,9 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
         {
             if (kvp.Value.Deadline.IsExpired(now))
             {
-                if (_pendingReminders.TryRemove(kvp.Key, out _))
+                if (_pendingReminders.TryRemove(kvp.Key, out var pending))
                 {
+                    _completedReminderDetails[kvp.Key] = pending;
                     _completedReminders[kvp.Key] = new CompletedReminder(
                         kvp.Value.Entity,
                         kvp.Value.Key,
@@ -391,8 +405,9 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
         {
             if (kvp.Value.Reminder.Deadline.IsExpired(now))
             {
-                if (_awaitingAckReminders.TryRemove(kvp.Key, out _))
+                if (_awaitingAckReminders.TryRemove(kvp.Key, out var awaiting))
                 {
+                    _completedReminderDetails[kvp.Key] = awaiting.Reminder;
                     _completedReminders[kvp.Key] = new CompletedReminder(
                         kvp.Value.Reminder.Entity,
                         kvp.Value.Reminder.Key,
@@ -449,6 +464,20 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
     }
 
     /// <inheritdoc />
+    public Task<ScheduledReminder?> GetAwaitingAckReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default)
+    {
+        var occurrenceKey = (entity, key, dueTimeUtc.ToUniversalTime());
+        return Task.FromResult(
+            _awaitingAckReminders.TryGetValue(occurrenceKey, out var awaiting)
+                ? awaiting.Reminder
+                : null);
+    }
+
+    /// <inheritdoc />
     public Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken ct = default)
     {
         DateTimeOffset? nextDeadline;
@@ -498,6 +527,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
 
                 if (awaiting.Reminder.Deadline.IsExpired(acknowledgement.AckedAt))
                 {
+                    _completedReminderDetails[reminderKey] = awaiting.Reminder;
                     _completedReminders[reminderKey] = new CompletedReminder(
                         acknowledgement.Entity,
                         acknowledgement.Key,
@@ -559,7 +589,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
                 entity,
                 key,
                 occurrenceKey.Item3,
-                awaiting.Reminder.When,
+                null,
                 awaiting.Reminder.AttemptCount,
                 awaiting.Reminder.LastFailureReason,
                 ReminderCompletionStatus.AwaitingAck,
@@ -575,7 +605,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage, IReminderOccurre
                 entity,
                 key,
                 occurrenceKey.Item3,
-                details?.When ?? occurrenceKey.Item3,
+                null,
                 details?.AttemptCount ?? 0,
                 details?.LastFailureReason,
                 completed.Status,

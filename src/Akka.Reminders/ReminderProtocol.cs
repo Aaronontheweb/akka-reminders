@@ -244,8 +244,7 @@ public enum ReminderOccurrenceStatusResponseCode
 {
     Success = 0,
     NotFound = 1,
-    Unsupported = 2,
-    Error = 3
+    Error = 2
 }
 
 public static class ReminderProtocol
@@ -384,7 +383,7 @@ public sealed record ReminderOccurrenceStatus(
     ReminderEntity Entity,
     ReminderKey Key,
     DateTimeOffset DueTimeUtc,
-    DateTimeOffset NextAttemptAtUtc,
+    DateTimeOffset? NextAttemptAtUtc,
     int AttemptCount,
     string? LastFailureReason,
     ReminderCompletionStatus CompletionStatus,

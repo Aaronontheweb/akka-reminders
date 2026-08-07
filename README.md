@@ -551,34 +551,37 @@ Task<ReminderAckResponse> AckAsync(
 
 Acknowledges receipt of a delivered reminder. Must be called after processing a `ReminderEnvelope<T>`. If this call faults or times out, the scheduler will redeliver the reminder after `AckTimeout` elapses, subject to the occurrence deadline.
 
-### IReminderDeliveryControl
-
-`ReminderClientExtension` implements `IReminderDeliveryControl` for failure reports and occurrence diagnostics.
+#### Reject Reminder
 
 ```csharp
-var reminders = Context.System.ReminderClient();
-
-var nack = await reminders.NackAsync(envelope, "Downstream service was unavailable");
+var nack = await client.NackAsync(envelope, "Downstream service was unavailable");
 if (nack.ResponseCode == ReminderNackResponseCode.RetryScheduled)
 {
     Log.Info("Retry {0} is scheduled for {1}", nack.AttemptCount, nack.NextAttemptAtUtc);
 }
-
-var status = await reminders.GetOccurrenceStatusAsync(
-    envelope.Entity,
-    envelope.Key,
-    envelope.DueTimeUtc);
 ```
 
 `NackAsync` uses the current retry budget, deadline, and exponential backoff.
 It returns `Failed` or `Expired` when the occurrence cannot retry.
+
+#### Get Occurrence Status
+
+```csharp
+var status = await client.GetOccurrenceStatusAsync(
+    envelope.Key,
+    envelope.DueTimeUtc);
+```
+
 The status query returns terminal rows until normal pruning removes them.
 Official storage providers support status queries without a schema migration.
 
 The new delivery-control messages use new serializer manifests. Upgrade the
 reminder scheduler before a consumer calls this API. A 0.6 scheduler cannot
 read the 0.7 negative acknowledgement or status messages.
-Custom providers can implement `IReminderOccurrenceStatusStorage` to enable the query.
+Custom providers must implement the new `IReminderStorage` query operations.
+
+`MaxDeliveryAttempts` applies to one occurrence. A recurring reminder creates a
+new occurrence with a new retry budget. A failed occurrence does not disable the recurring reminder.
 
 ### Acknowledgement Protocol
 

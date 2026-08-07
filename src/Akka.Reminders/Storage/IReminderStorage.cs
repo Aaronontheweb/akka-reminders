@@ -170,21 +170,6 @@ public sealed record AckResult(
 }
 
 /// <summary>
-/// Optional storage capability for occurrence status queries.
-/// </summary>
-public interface IReminderOccurrenceStatusStorage
-{
-    /// <summary>
-    /// Gets one active or terminal reminder occurrence by its durable identity.
-    /// </summary>
-    Task<ReminderOccurrenceStatus?> GetReminderOccurrenceStatusAsync(
-        ReminderEntity entity,
-        ReminderKey key,
-        DateTimeOffset dueTimeUtc,
-        CancellationToken ct = default);
-}
-
-/// <summary>
 /// Storage implementation for reminders.
 /// </summary>
 public interface IReminderStorage
@@ -268,6 +253,24 @@ public interface IReminderStorage
     Task<IReadOnlyList<ScheduledReminder>> GetTimedOutAckRemindersAsync(
         DateTimeOffset now,
         ReminderBatchSize maxCount,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Gets one reminder occurrence only when it awaits an acknowledgement.
+    /// </summary>
+    Task<ScheduledReminder?> GetAwaitingAckReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Gets one active or terminal reminder occurrence by its durable identity.
+    /// </summary>
+    Task<ReminderOccurrenceStatus?> GetReminderOccurrenceStatusAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
         CancellationToken ct = default);
 
     /// <summary>

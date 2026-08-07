@@ -43,11 +43,28 @@ public interface IReminderClient
     /// Acknowledge receipt of a reminder. Returns when the scheduler confirms.
     /// If this Task faults or times out, a duplicate delivery may occur.
     /// </summary>
-    /// <param name="envelope">The envelope received when the reminder fired.</param>
+    /// <param name="envelope">The envelope received for <see cref="Entity"/> when the reminder fired.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>
     /// A task containing the scheduler's acknowledgement response.
     /// Check <see cref="ReminderProtocol.ReminderAckResponse.ResponseCode"/> to determine success.
     /// </returns>
     Task<ReminderProtocol.ReminderAckResponse> AckAsync(ReminderEnvelope envelope, CancellationToken ct = default);
+
+    /// <summary>
+    /// Reports a failed delivery attempt and applies the configured retry policy.
+    /// The envelope must belong to <see cref="Entity"/>.
+    /// </summary>
+    Task<ReminderProtocol.ReminderNackResponse> NackAsync(
+        ReminderEnvelope envelope,
+        string reason,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Gets the durable state for one reminder occurrence for <see cref="Entity"/>.
+    /// </summary>
+    Task<ReminderProtocol.ReminderOccurrenceStatusResponse> GetOccurrenceStatusAsync(
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default);
 }
