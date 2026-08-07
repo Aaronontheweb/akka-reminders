@@ -437,6 +437,37 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
         return reminders;
     }
 
+    public async Task<ScheduledReminder?> GetAwaitingAckReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT *
+            FROM "{_settings.SchemaName}"."{_settings.TableName}"
+            WHERE shard_region_name = @ShardRegionName
+              AND entity_id = @EntityId
+              AND reminder_key = @ReminderKey
+              AND due_time_utc = @DueTimeUtc
+              AND completion_status = 'AwaitingAck'
+              AND is_completed = FALSE
+            LIMIT 1;
+            """;
+        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+        _dialect.AddParameter(command, "@ShardRegionName", entity.ShardRegionName);
+        _dialect.AddParameter(command, "@EntityId", entity.EntityId);
+        _dialect.AddParameter(command, "@ReminderKey", key.Name);
+        _dialect.AddParameter(command, "@DueTimeUtc", TruncateToMicroseconds(dueTimeUtc));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadReminderFromReader(reader) : null;
+    }
+
     public async Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
@@ -476,6 +507,68 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
         }
 
         return results;
+    }
+
+    public async Task<ReminderOccurrenceStatus?> GetReminderOccurrenceStatusAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT when_utc, attempt_count, last_failure_reason, completion_status,
+                   delivery_deadline_utc, delivered_at_utc, ack_deadline_utc, completed_at_utc
+            FROM "{_settings.SchemaName}"."{_settings.TableName}"
+            WHERE shard_region_name = @ShardRegionName
+              AND entity_id = @EntityId
+              AND reminder_key = @ReminderKey
+              AND due_time_utc = @DueTimeUtc
+            LIMIT 1;
+            """;
+        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+        _dialect.AddParameter(command, "@ShardRegionName", entity.ShardRegionName);
+        _dialect.AddParameter(command, "@EntityId", entity.EntityId);
+        _dialect.AddParameter(command, "@ReminderKey", key.Name);
+        _dialect.AddParameter(command, "@DueTimeUtc", dueTimeUtc.ToUniversalTime().UtcDateTime);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            return null;
+
+        var statusText = reader.GetString(reader.GetOrdinal("completion_status"));
+        if (!Enum.TryParse<ReminderCompletionStatus>(statusText, out var completionStatus))
+            throw new InvalidOperationException($"Unknown reminder completion status '{statusText}'.");
+
+        return new ReminderOccurrenceStatus(
+            entity,
+            key,
+            dueTimeUtc.ToUniversalTime(),
+            completionStatus == ReminderCompletionStatus.Pending ? ReadUtc(reader, "when_utc") : null,
+            reader.GetInt32(reader.GetOrdinal("attempt_count")),
+            ReadString(reader, "last_failure_reason"),
+            completionStatus,
+            ReadUtc(reader, "delivery_deadline_utc"),
+            ReadUtc(reader, "delivered_at_utc"),
+            ReadUtc(reader, "ack_deadline_utc"),
+            ReadUtc(reader, "completed_at_utc"));
+    }
+
+    private static string? ReadString(IDataReader reader, string name)
+    {
+        var ordinal = reader.GetOrdinal(name);
+        return reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+    }
+
+    private static DateTimeOffset? ReadUtc(IDataReader reader, string name)
+    {
+        var ordinal = reader.GetOrdinal(name);
+        return reader.IsDBNull(ordinal)
+            ? null
+            : new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(ordinal), DateTimeKind.Utc));
     }
 
     private Task EnsureInitializedAsync(CancellationToken cancellationToken)

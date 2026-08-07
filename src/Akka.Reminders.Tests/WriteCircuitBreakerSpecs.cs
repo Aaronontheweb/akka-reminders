@@ -32,16 +32,21 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
             HoconAddMode.Prepend);
     }
 
-    private IActorRef CreateScheduler(int maxBatchSize = 1000, int deliveryCommitChunkSize = 100)
+    private IActorRef CreateScheduler(
+        int maxBatchSize = 1000,
+        int deliveryCommitChunkSize = 100,
+        TimeSpan? storageTimeout = null,
+        TimeSpan? ackTimeout = null)
     {
         var settings = new ReminderSettings
         {
             MaxSlippage = TimeSpan.FromSeconds(1),
-            StorageTimeout = TimeSpan.FromSeconds(30),
+            StorageTimeout = storageTimeout ?? TimeSpan.FromSeconds(30),
             MaxDeliveryAttempts = 3,
             RetryBackoffBase = TimeSpan.FromSeconds(5),
             MaxBatchSize = maxBatchSize,
-            DeliveryCommitChunkSize = deliveryCommitChunkSize
+            DeliveryCommitChunkSize = deliveryCommitChunkSize,
+            AckTimeout = ackTimeout ?? ReminderSettings.DefaultAckTimeout
         };
 
         return Sys.ActorOf(
@@ -169,5 +174,86 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
         await CollectMessages(testProbe, 6, TimeSpan.FromSeconds(5));
         await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task AckTimeoutWriteFailure_ShouldUseBoundedRecoveryDelay()
+    {
+        var target = CreateTestProbe();
+        var responseProbe = CreateTestProbe();
+        _resolver.RegisterShardRegion("test-region", target);
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var now = testScheduler.Now;
+        var entity = new ReminderEntity("test-region", "ack-timeout");
+        var key = new ReminderKey("bounded-recovery");
+        var dueTime = now.AddSeconds(1);
+        var scheduler = CreateScheduler(
+            storageTimeout: TimeSpan.FromMilliseconds(100),
+            ackTimeout: TimeSpan.FromMilliseconds(50));
+        await WaitForSchedulerReady(scheduler);
+
+        scheduler.Tell(new ReminderProtocol.ScheduleReminder(entity, key, dueTime, "payload"), responseProbe.Ref);
+        var scheduled = await responseProbe.ExpectMsgAsync<ReminderProtocol.ReminderScheduled>(TimeSpan.FromSeconds(1));
+        Assert.Equal(ReminderScheduleResponseCode.Success, scheduled.ResponseCode);
+
+        testScheduler.Advance(TimeSpan.FromSeconds(2));
+        await target.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        _storage.FailWrites = true;
+        testScheduler.Advance(TimeSpan.FromMilliseconds(100));
+
+        await _storage.FirstCommitMutationFailure.WaitAsync(TimeSpan.FromSeconds(5));
+        var attemptsAfterFailure = _storage.CommitMutationAttempts;
+        await target.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(100));
+        Assert.Equal(attemptsAfterFailure, _storage.CommitMutationAttempts);
+
+        _storage.FailWrites = false;
+        testScheduler.Advance(TimeSpan.FromMilliseconds(250));
+        await AwaitAssertAsync(async () =>
+        {
+            var status = await _innerStorage.GetReminderOccurrenceStatusAsync(entity, key, dueTime);
+            Assert.NotNull(status);
+            Assert.Equal(ReminderCompletionStatus.Pending, status.CompletionStatus);
+            Assert.Equal(1, status.AttemptCount);
+            Assert.Equal("Ack timeout", status.LastFailureReason);
+        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50));
+    }
+
+    [Fact]
+    public async Task DeliveryOutcomeReads_ShouldReturnErrorWithoutChangingOccurrence()
+    {
+        var testScheduler = (TestScheduler)Sys.Scheduler;
+        var now = testScheduler.Now;
+        var entity = new ReminderEntity("test-region", "read-failure");
+        var key = new ReminderKey("read-failure");
+        var reminder = new ScheduledReminder(entity, key, now.AddHours(1), "payload");
+        await _innerStorage.ScheduleReminderAsync(reminder);
+        await _innerStorage.CommitReminderMutationsAsync(new ReminderMutationBatch(
+            [],
+            [],
+            [new AwaitingAckReminder(entity, key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+
+        var scheduler = CreateScheduler();
+        await WaitForSchedulerReady(scheduler);
+        var client = new ReminderClient(scheduler, entity);
+        var envelope = new ReminderEnvelope(
+            entity,
+            key,
+            reminder.DueTimeUtc,
+            ReminderDeadline.Infinite,
+            "payload");
+        _storage.FailReads = true;
+
+        var nack = await client.NackAsync(envelope, "failed");
+        var status = await client.GetOccurrenceStatusAsync(key, reminder.DueTimeUtc);
+
+        Assert.Equal(ReminderNackResponseCode.Error, nack.ResponseCode);
+        Assert.Equal(ReminderOccurrenceStatusResponseCode.Error, status.ResponseCode);
+
+        _storage.FailReads = false;
+        var unchanged = await _innerStorage.GetReminderOccurrenceStatusAsync(entity, key, reminder.DueTimeUtc);
+        Assert.NotNull(unchanged);
+        Assert.Equal(ReminderCompletionStatus.AwaitingAck, unchanged.CompletionStatus);
+        Assert.Equal(0, unchanged.AttemptCount);
+        Assert.Null(unchanged.LastFailureReason);
     }
 }

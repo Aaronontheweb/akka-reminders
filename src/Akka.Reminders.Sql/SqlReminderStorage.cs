@@ -98,6 +98,13 @@ public sealed class SqlReminderStorage : IReminderStorage
         CancellationToken ct = default)
         => _storage.GetTimedOutAckRemindersAsync(now, maxCount, ct);
 
+    public Task<ScheduledReminder?> GetAwaitingAckReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default)
+        => _storage.GetAwaitingAckReminderAsync(entity, key, dueTimeUtc, ct);
+
     public Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken ct = default)
         => _storage.GetNextAwaitingAckDeadlineAsync(ct);
 
@@ -113,4 +120,11 @@ public sealed class SqlReminderStorage : IReminderStorage
         IEnumerable<ReminderAcknowledgement> acknowledgements,
         CancellationToken ct = default)
         => _storage.AcknowledgeRemindersAsync(acknowledgements, ct);
+
+    public Task<ReminderOccurrenceStatus?> GetReminderOccurrenceStatusAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default)
+        => _storage.GetReminderOccurrenceStatusAsync(entity, key, dueTimeUtc, ct);
 }

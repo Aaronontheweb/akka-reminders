@@ -707,6 +707,216 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         Assert.Equal(ReminderAckStorageStatus.NotFound, results[1].Status); // stale/missing ack
     }
 
+    [Fact]
+    public async Task OccurrenceStatus_ShouldExposeActiveAndTerminalStates()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(5)) with
+        {
+            AttemptCount = 2,
+            LastFailureReason = "prior failure",
+            DeliveryDeadlineUtc = now.AddHours(1),
+            OccurrenceDueTimeUtc = now.AddMinutes(5)
+        };
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        var pending = await Storage.GetReminderOccurrenceStatusAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc);
+        Assert.NotNull(pending);
+        Assert.Equal(ReminderCompletionStatus.Pending, pending.CompletionStatus);
+        Assert.Equal(2, pending.AttemptCount);
+        Assert.Equal("prior failure", pending.LastFailureReason);
+        Assert.NotNull(pending.NextAttemptAtUtc);
+
+        await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
+            [],
+            [],
+            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+
+        var awaiting = await Storage.GetReminderOccurrenceStatusAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc);
+        Assert.NotNull(awaiting);
+        Assert.Equal(ReminderCompletionStatus.AwaitingAck, awaiting.CompletionStatus);
+        Assert.Null(awaiting.NextAttemptAtUtc);
+        Assert.NotNull(awaiting.AckDeadlineUtc);
+        Assert.True(Math.Abs((awaiting.AckDeadlineUtc.Value - now.AddMinutes(1)).TotalMilliseconds) < 0.001);
+
+        var ack = await Storage.AcknowledgeReminderAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc,
+            now.AddSeconds(5));
+        Assert.True(ack.Success);
+
+        var delivered = await Storage.GetReminderOccurrenceStatusAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc);
+        Assert.NotNull(delivered);
+        Assert.Equal(ReminderCompletionStatus.Delivered, delivered.CompletionStatus);
+        Assert.Null(delivered.NextAttemptAtUtc);
+        Assert.Equal(2, delivered.AttemptCount);
+    }
+
+    [Fact]
+    public async Task GetAwaitingAckReminderAsync_ShouldMatchExactActiveOccurrence()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(5)) with
+        {
+            AttemptCount = 2,
+            LastFailureReason = "prior failure",
+            DeliveryDeadlineUtc = now.AddHours(1),
+            OccurrenceDueTimeUtc = now.AddMinutes(5)
+        };
+        await Storage!.ScheduleReminderAsync(reminder);
+
+        var missingBeforeDelivery = await Storage.GetAwaitingAckReminderAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc);
+        Assert.Null(missingBeforeDelivery);
+
+        await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
+            [],
+            [],
+            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+
+        var found = await Storage.GetAwaitingAckReminderAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc);
+        Assert.NotNull(found);
+        Assert.Equal(2, found.AttemptCount);
+        Assert.Equal("prior failure", found.LastFailureReason);
+        Assert.NotNull(found.DeliveryDeadlineUtc);
+        Assert.True(Math.Abs(
+            (reminder.DeliveryDeadlineUtc!.Value - found.DeliveryDeadlineUtc.Value).TotalMilliseconds) < 0.001);
+
+        var stale = await Storage.GetAwaitingAckReminderAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc.AddSeconds(1));
+        Assert.Null(stale);
+    }
+
+    [Fact]
+    public async Task TerminalStatus_ShouldPreserveFailureDetails()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(5)) with
+        {
+            AttemptCount = 3,
+            LastFailureReason = "final failure",
+            DeliveryDeadlineUtc = now.AddHours(1)
+        };
+        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage.MarkRemindersAsCompletedAsync([
+            new CompletedReminder(
+                reminder.Entity,
+                reminder.Key,
+                reminder.DueTimeUtc,
+                now,
+                ReminderCompletionStatus.Failed)
+        ]);
+
+        var status = await Storage.GetReminderOccurrenceStatusAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc);
+
+        Assert.NotNull(status);
+        Assert.Equal(ReminderCompletionStatus.Failed, status.CompletionStatus);
+        Assert.Equal(3, status.AttemptCount);
+        Assert.Equal("final failure", status.LastFailureReason);
+        Assert.NotNull(status.DeliveryDeadlineUtc);
+        Assert.True(Math.Abs(
+            (reminder.DeliveryDeadlineUtc!.Value - status.DeliveryDeadlineUtc.Value).TotalMilliseconds) < 0.001);
+        Assert.Null(status.NextAttemptAtUtc);
+    }
+
+    [Fact]
+    public async Task CancelledStatus_ShouldPreserveOccurrenceDetails()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(5)) with
+        {
+            AttemptCount = 2,
+            LastFailureReason = "prior failure"
+        };
+        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage.CancelReminderAsync(reminder.Entity, reminder.Key);
+
+        var status = await Storage.GetReminderOccurrenceStatusAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc);
+
+        Assert.NotNull(status);
+        Assert.Equal(ReminderCompletionStatus.Cancelled, status.CompletionStatus);
+        Assert.Equal(2, status.AttemptCount);
+        Assert.Equal("prior failure", status.LastFailureReason);
+        Assert.Null(status.NextAttemptAtUtc);
+    }
+
+    [Fact]
+    public async Task ExpiredStatus_ShouldPreserveOccurrenceDetails()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var reminder = CreateTestReminder(when: now.AddMinutes(-2)) with
+        {
+            AttemptCount = 2,
+            LastFailureReason = "prior failure",
+            DeliveryDeadlineUtc = now.AddMinutes(-1)
+        };
+        await Storage!.ScheduleReminderAsync(reminder);
+        Assert.Equal(1, await Storage.ExpireRemindersAsync(now));
+
+        var status = await Storage.GetReminderOccurrenceStatusAsync(
+            reminder.Entity,
+            reminder.Key,
+            reminder.DueTimeUtc);
+
+        Assert.NotNull(status);
+        Assert.Equal(ReminderCompletionStatus.Expired, status.CompletionStatus);
+        Assert.Equal(2, status.AttemptCount);
+        Assert.Equal("prior failure", status.LastFailureReason);
+        Assert.Null(status.NextAttemptAtUtc);
+    }
+
+    [Fact]
+    public async Task ReplacementStatus_ShouldPreserveCancelledOccurrenceDetails()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var original = CreateTestReminder(when: now.AddMinutes(5)) with
+        {
+            AttemptCount = 2,
+            LastFailureReason = "prior failure"
+        };
+        await Storage!.ScheduleReminderAsync(original);
+        await Storage.ScheduleReminderAsync(original with
+        {
+            When = now.AddMinutes(10),
+            OccurrenceDueTimeUtc = now.AddMinutes(10),
+            AttemptCount = 0,
+            LastFailureReason = null
+        });
+
+        var status = await Storage.GetReminderOccurrenceStatusAsync(
+            original.Entity,
+            original.Key,
+            original.DueTimeUtc);
+
+        Assert.NotNull(status);
+        Assert.Equal(ReminderCompletionStatus.Cancelled, status.CompletionStatus);
+        Assert.Equal(2, status.AttemptCount);
+        Assert.Equal("prior failure", status.LastFailureReason);
+    }
+
     /// <summary>
     /// The scheduler uses event-driven ack-timeout checking. After delivering reminders,
     /// it queries storage for the earliest ack deadline to schedule a one-shot timer.

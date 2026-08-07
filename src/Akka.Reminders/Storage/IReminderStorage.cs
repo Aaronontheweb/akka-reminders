@@ -256,6 +256,24 @@ public interface IReminderStorage
         CancellationToken ct = default);
 
     /// <summary>
+    /// Gets one reminder occurrence only when it awaits an acknowledgement.
+    /// </summary>
+    Task<ScheduledReminder?> GetAwaitingAckReminderAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Gets one active or terminal reminder occurrence by its durable identity.
+    /// </summary>
+    Task<ReminderOccurrenceStatus?> GetReminderOccurrenceStatusAsync(
+        ReminderEntity entity,
+        ReminderKey key,
+        DateTimeOffset dueTimeUtc,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Gets the earliest acknowledgement deadline currently persisted in storage.
     /// Returns <c>null</c> when there are no reminders awaiting acknowledgement.
     /// </summary>

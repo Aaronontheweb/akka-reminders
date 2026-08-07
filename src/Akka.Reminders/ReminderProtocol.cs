@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Akka.Actor;
+using Akka.Reminders.Storage;
 
 namespace Akka.Reminders;
 
@@ -224,6 +225,28 @@ public enum ReminderAckResponseCode
     Error = 2
 }
 
+/// <summary>
+/// Response codes for a negative acknowledgement operation.
+/// </summary>
+public enum ReminderNackResponseCode
+{
+    RetryScheduled = 0,
+    Failed = 1,
+    Expired = 2,
+    NotFound = 3,
+    Error = 4
+}
+
+/// <summary>
+/// Response codes for an occurrence status query.
+/// </summary>
+public enum ReminderOccurrenceStatusResponseCode
+{
+    Success = 0,
+    NotFound = 1,
+    Error = 2
+}
+
 public static class ReminderProtocol
 {
     public sealed record ScheduleReminder(
@@ -298,6 +321,46 @@ public static class ReminderProtocol
         DateTimeOffset DueTimeUtc,
         ReminderAckResponseCode ResponseCode,
         string? Message = null) : IReminderResponse, IReminderWireMessage;
+
+    /// <summary>
+    /// Reports a failed reminder delivery attempt.
+    /// </summary>
+    public sealed record ReminderNack(
+        ReminderEntity Entity,
+        ReminderKey Key,
+        DateTimeOffset DueTimeUtc,
+        string Reason) : IReminderCommand, IReminderWireMessage;
+
+    /// <summary>
+    /// Returns the retry or terminal result for a negative acknowledgement.
+    /// </summary>
+    public sealed record ReminderNackResponse(
+        ReminderEntity Entity,
+        ReminderKey Key,
+        DateTimeOffset DueTimeUtc,
+        ReminderNackResponseCode ResponseCode,
+        int AttemptCount,
+        DateTimeOffset? NextAttemptAtUtc = null,
+        string? Message = null) : IReminderResponse, IReminderWireMessage;
+
+    /// <summary>
+    /// Queries one reminder occurrence by its durable identity.
+    /// </summary>
+    public sealed record GetReminderOccurrenceStatus(
+        ReminderEntity Entity,
+        ReminderKey Key,
+        DateTimeOffset DueTimeUtc) : IReminderQuery, IReminderWireMessage;
+
+    /// <summary>
+    /// Returns the durable state for one reminder occurrence.
+    /// </summary>
+    public sealed record ReminderOccurrenceStatusResponse(
+        ReminderEntity Entity,
+        ReminderKey Key,
+        DateTimeOffset DueTimeUtc,
+        ReminderOccurrenceStatusResponseCode ResponseCode,
+        ReminderOccurrenceStatus? Status = null,
+        string? Message = null) : IReminderResponse, IReminderWireMessage;
 }
 
 /// <summary>
@@ -312,6 +375,22 @@ public readonly record struct ReminderKey(string Name);
 /// <param name="ShardRegionName">The name of the entity type - this is part of the ShardRegion's configuration.</param>
 /// <param name="EntityId">The id of the entity performing the scheduling.</param>
 public readonly record struct ReminderEntity(string ShardRegionName, string EntityId);
+
+/// <summary>
+/// Durable status for one reminder occurrence.
+/// </summary>
+public sealed record ReminderOccurrenceStatus(
+    ReminderEntity Entity,
+    ReminderKey Key,
+    DateTimeOffset DueTimeUtc,
+    DateTimeOffset? NextAttemptAtUtc,
+    int AttemptCount,
+    string? LastFailureReason,
+    ReminderCompletionStatus CompletionStatus,
+    DateTimeOffset? DeliveryDeadlineUtc = null,
+    DateTimeOffset? DeliveredAtUtc = null,
+    DateTimeOffset? AckDeadlineUtc = null,
+    DateTimeOffset? CompletedAtUtc = null);
 
 /// <summary>
 /// Represents a scheduled reminder to be executed in the future.
