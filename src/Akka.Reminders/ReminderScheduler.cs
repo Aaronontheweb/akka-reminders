@@ -173,7 +173,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
     public IStash Stash { get; set; } = null!;
 
-    private sealed class RestartBackoffTimer
+    private sealed class RestartBackoffTimer : INoSerializationVerificationNeeded
     {
         public static readonly RestartBackoffTimer Instance = new();
 
@@ -185,7 +185,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// <summary>
     /// Time to fetch reminders
     /// </summary>
-    private sealed class FetchReminders
+    private sealed class FetchReminders : INoSerializationVerificationNeeded
     {
         public static readonly FetchReminders Instance = new();
 
@@ -194,7 +194,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
-    private sealed class FetchRemindersCompleted
+    private sealed class FetchRemindersCompleted : INoSerializationVerificationNeeded
     {
         public static readonly FetchRemindersCompleted Instance = new();
 
@@ -206,7 +206,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// <summary>
     /// Time to prune completed reminders
     /// </summary>
-    private sealed class PruneCompletedReminders
+    private sealed class PruneCompletedReminders : INoSerializationVerificationNeeded
     {
         public static readonly PruneCompletedReminders Instance = new();
 
@@ -219,7 +219,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// Periodic timer message that triggers a storage-backed scan for reminders whose ack deadline
     /// has elapsed and either retries or permanently completes them.
     /// </summary>
-    private sealed class CheckAckTimeouts
+    private sealed class CheckAckTimeouts : INoSerializationVerificationNeeded
     {
         public static readonly CheckAckTimeouts Instance = new();
 
@@ -228,7 +228,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
-    private sealed class CheckAckTimeoutsCompleted
+    private sealed class CheckAckTimeoutsCompleted : INoSerializationVerificationNeeded
     {
         public static readonly CheckAckTimeoutsCompleted Instance = new();
 
@@ -237,7 +237,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
-    private sealed class FlushBufferedAcks
+    private sealed class FlushBufferedAcks : INoSerializationVerificationNeeded
     {
         public static readonly FlushBufferedAcks Instance = new();
 
