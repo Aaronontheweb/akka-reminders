@@ -193,17 +193,17 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         await WaitForSchedulerReady(scheduler);
 
         scheduler.Tell(new ReminderProtocol.ScheduleReminder(entity, key, dueTime, "payload"), responseProbe.Ref);
-        var scheduled = await responseProbe.ExpectMsgAsync<ReminderProtocol.ReminderScheduled>(TimeSpan.FromSeconds(1));
+        var scheduled = await responseProbe.ExpectMsgAsync<ReminderProtocol.ReminderScheduled>(TimeSpan.FromSeconds(1), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderScheduleResponseCode.Success, scheduled.ResponseCode);
 
         testScheduler.Advance(TimeSpan.FromSeconds(2));
-        await target.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        await target.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         _storage.FailWrites = true;
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
 
-        await _storage.FirstCommitMutationFailure.WaitAsync(TimeSpan.FromSeconds(5));
+        await _storage.FirstCommitMutationFailure.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var attemptsAfterFailure = _storage.CommitMutationAttempts;
-        await target.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(100));
+        await target.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
         Assert.Equal(attemptsAfterFailure, _storage.CommitMutationAttempts);
 
         _storage.FailWrites = false;
@@ -215,7 +215,7 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
             Assert.Equal(ReminderCompletionStatus.Pending, status.CompletionStatus);
             Assert.Equal(1, status.AttemptCount);
             Assert.Equal("Ack timeout", status.LastFailureReason);
-        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50));
+        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -226,11 +226,11 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         var entity = new ReminderEntity("test-region", "read-failure");
         var key = new ReminderKey("read-failure");
         var reminder = new ScheduledReminder(entity, key, now.AddHours(1), "payload");
-        await _innerStorage.ScheduleReminderAsync(reminder);
+        await _innerStorage.ScheduleReminderAsync(reminder, ct: TestContext.Current.CancellationToken);
         await _innerStorage.CommitReminderMutationsAsync(new ReminderMutationBatch(
             [],
             [],
-            [new AwaitingAckReminder(entity, key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+            [new AwaitingAckReminder(entity, key, reminder.DueTimeUtc, now, now.AddMinutes(1))]), ct: TestContext.Current.CancellationToken);
 
         var scheduler = CreateScheduler();
         await WaitForSchedulerReady(scheduler);
@@ -243,14 +243,14 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
             "payload");
         _storage.FailReads = true;
 
-        var nack = await client.NackAsync(envelope, "failed");
-        var status = await client.GetOccurrenceStatusAsync(key, reminder.DueTimeUtc);
+        var nack = await client.NackAsync(envelope, "failed", ct: TestContext.Current.CancellationToken);
+        var status = await client.GetOccurrenceStatusAsync(key, reminder.DueTimeUtc, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderNackResponseCode.Error, nack.ResponseCode);
         Assert.Equal(ReminderOccurrenceStatusResponseCode.Error, status.ResponseCode);
 
         _storage.FailReads = false;
-        var unchanged = await _innerStorage.GetReminderOccurrenceStatusAsync(entity, key, reminder.DueTimeUtc);
+        var unchanged = await _innerStorage.GetReminderOccurrenceStatusAsync(entity, key, reminder.DueTimeUtc, ct: TestContext.Current.CancellationToken);
         Assert.NotNull(unchanged);
         Assert.Equal(ReminderCompletionStatus.AwaitingAck, unchanged.CompletionStatus);
         Assert.Equal(0, unchanged.AttemptCount);

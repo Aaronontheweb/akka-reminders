@@ -718,12 +718,13 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             DeliveryDeadlineUtc = now.AddHours(1),
             OccurrenceDueTimeUtc = now.AddMinutes(5)
         };
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, ct: TestContext.Current.CancellationToken);
 
         var pending = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
         Assert.NotNull(pending);
         Assert.Equal(ReminderCompletionStatus.Pending, pending.CompletionStatus);
         Assert.Equal(2, pending.AttemptCount);
@@ -733,12 +734,13 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
             [],
             [],
-            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]), ct: TestContext.Current.CancellationToken);
 
         var awaiting = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
         Assert.NotNull(awaiting);
         Assert.Equal(ReminderCompletionStatus.AwaitingAck, awaiting.CompletionStatus);
         Assert.Null(awaiting.NextAttemptAtUtc);
@@ -749,13 +751,15 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             reminder.Entity,
             reminder.Key,
             reminder.DueTimeUtc,
-            now.AddSeconds(5));
+            now.AddSeconds(5),
+            ct: TestContext.Current.CancellationToken);
         Assert.True(ack.Success);
 
         var delivered = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
         Assert.NotNull(delivered);
         Assert.Equal(ReminderCompletionStatus.Delivered, delivered.CompletionStatus);
         Assert.Null(delivered.NextAttemptAtUtc);
@@ -773,23 +777,25 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             DeliveryDeadlineUtc = now.AddHours(1),
             OccurrenceDueTimeUtc = now.AddMinutes(5)
         };
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, ct: TestContext.Current.CancellationToken);
 
         var missingBeforeDelivery = await Storage.GetAwaitingAckReminderAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
         Assert.Null(missingBeforeDelivery);
 
         await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
             [],
             [],
-            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]), ct: TestContext.Current.CancellationToken);
 
         var found = await Storage.GetAwaitingAckReminderAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
         Assert.NotNull(found);
         Assert.Equal(2, found.AttemptCount);
         Assert.Equal("prior failure", found.LastFailureReason);
@@ -800,7 +806,8 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var stale = await Storage.GetAwaitingAckReminderAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc.AddSeconds(1));
+            reminder.DueTimeUtc.AddSeconds(1),
+            ct: TestContext.Current.CancellationToken);
         Assert.Null(stale);
     }
 
@@ -814,7 +821,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             LastFailureReason = "final failure",
             DeliveryDeadlineUtc = now.AddHours(1)
         };
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, ct: TestContext.Current.CancellationToken);
         await Storage.MarkRemindersAsCompletedAsync([
             new CompletedReminder(
                 reminder.Entity,
@@ -822,12 +829,13 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
                 reminder.DueTimeUtc,
                 now,
                 ReminderCompletionStatus.Failed)
-        ]);
+        ], ct: TestContext.Current.CancellationToken);
 
         var status = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
 
         Assert.NotNull(status);
         Assert.Equal(ReminderCompletionStatus.Failed, status.CompletionStatus);
@@ -848,13 +856,14 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             AttemptCount = 2,
             LastFailureReason = "prior failure"
         };
-        await Storage!.ScheduleReminderAsync(reminder);
-        await Storage.CancelReminderAsync(reminder.Entity, reminder.Key);
+        await Storage!.ScheduleReminderAsync(reminder, ct: TestContext.Current.CancellationToken);
+        await Storage.CancelReminderAsync(reminder.Entity, reminder.Key, ct: TestContext.Current.CancellationToken);
 
         var status = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
 
         Assert.NotNull(status);
         Assert.Equal(ReminderCompletionStatus.Cancelled, status.CompletionStatus);
@@ -873,13 +882,14 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             LastFailureReason = "prior failure",
             DeliveryDeadlineUtc = now.AddMinutes(-1)
         };
-        await Storage!.ScheduleReminderAsync(reminder);
-        Assert.Equal(1, await Storage.ExpireRemindersAsync(now));
+        await Storage!.ScheduleReminderAsync(reminder, ct: TestContext.Current.CancellationToken);
+        Assert.Equal(1, await Storage.ExpireRemindersAsync(now, ct: TestContext.Current.CancellationToken));
 
         var status = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
 
         Assert.NotNull(status);
         Assert.Equal(ReminderCompletionStatus.Expired, status.CompletionStatus);
@@ -897,19 +907,20 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             AttemptCount = 2,
             LastFailureReason = "prior failure"
         };
-        await Storage!.ScheduleReminderAsync(original);
+        await Storage!.ScheduleReminderAsync(original, ct: TestContext.Current.CancellationToken);
         await Storage.ScheduleReminderAsync(original with
         {
             When = now.AddMinutes(10),
             OccurrenceDueTimeUtc = now.AddMinutes(10),
             AttemptCount = 0,
             LastFailureReason = null
-        });
+        }, ct: TestContext.Current.CancellationToken);
 
         var status = await Storage.GetReminderOccurrenceStatusAsync(
             original.Entity,
             original.Key,
-            original.DueTimeUtc);
+            original.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
 
         Assert.NotNull(status);
         Assert.Equal(ReminderCompletionStatus.Cancelled, status.CompletionStatus);

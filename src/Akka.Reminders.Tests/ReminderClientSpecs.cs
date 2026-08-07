@@ -131,7 +131,7 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
             ReminderDeadline.Infinite,
             "payload");
 
-        await Assert.ThrowsAsync<ArgumentException>(() => client.NackAsync(envelope, " "));
+        await Assert.ThrowsAsync<ArgumentException>(() => client.NackAsync(envelope, " ", ct: TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -145,8 +145,8 @@ public class ReminderClientSpecs : Akka.Hosting.TestKit.TestKit
             ReminderDeadline.Infinite,
             "payload");
 
-        await Assert.ThrowsAsync<ArgumentException>(() => client.AckAsync(envelope));
-        await Assert.ThrowsAsync<ArgumentException>(() => client.NackAsync(envelope, "failed"));
+        await Assert.ThrowsAsync<ArgumentException>(() => client.AckAsync(envelope, ct: TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<ArgumentException>(() => client.NackAsync(envelope, "failed", ct: TestContext.Current.CancellationToken));
     }
 
     #endregion

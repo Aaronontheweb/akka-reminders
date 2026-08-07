@@ -431,33 +431,33 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var dueTime = testScheduler.Now.AddSeconds(5);
         var key = new ReminderKey("nack-retry");
 
-        var scheduled = await client.ScheduleSingleReminderAsync(key, dueTime, "retry me");
+        var scheduled = await client.ScheduleSingleReminderAsync(key, dueTime, "retry me", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderScheduleResponseCode.Success, scheduled.ResponseCode);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var first = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        var firstNack = await client.NackAsync(first, "first failure");
+        var first = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        var firstNack = await client.NackAsync(first, "first failure", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderNackResponseCode.RetryScheduled, firstNack.ResponseCode);
         Assert.Equal(1, firstNack.AttemptCount);
 
-        var pending = await client.GetOccurrenceStatusAsync(first.Key, first.DueTimeUtc);
+        var pending = await client.GetOccurrenceStatusAsync(first.Key, first.DueTimeUtc, ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderOccurrenceStatusResponseCode.Success, pending.ResponseCode);
         Assert.Equal(ReminderCompletionStatus.Pending, pending.Status?.CompletionStatus);
         Assert.Equal("first failure", pending.Status?.LastFailureReason);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var second = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        var secondNack = await client.NackAsync(second, "second failure");
+        var second = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        var secondNack = await client.NackAsync(second, "second failure", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderNackResponseCode.RetryScheduled, secondNack.ResponseCode);
         Assert.Equal(2, secondNack.AttemptCount);
 
         testScheduler.Advance(TimeSpan.FromSeconds(11));
-        var third = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        var thirdNack = await client.NackAsync(third, "final failure");
+        var third = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        var thirdNack = await client.NackAsync(third, "final failure", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderNackResponseCode.Failed, thirdNack.ResponseCode);
         Assert.Equal(3, thirdNack.AttemptCount);
 
-        var failed = await client.GetOccurrenceStatusAsync(third.Key, third.DueTimeUtc);
+        var failed = await client.GetOccurrenceStatusAsync(third.Key, third.DueTimeUtc, ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderOccurrenceStatusResponseCode.Success, failed.ResponseCode);
         Assert.Equal(ReminderCompletionStatus.Failed, failed.Status?.CompletionStatus);
         Assert.Equal(3, failed.Status?.AttemptCount);
@@ -470,16 +470,16 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
         var client = Sys.ReminderClient().CreateClient("test-region", "ack-first");
-        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync()).ResponseCode);
+        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync(TestContext.Current.CancellationToken)).ResponseCode);
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var dueTime = testScheduler.Now.AddSeconds(5);
 
-        await client.ScheduleSingleReminderAsync(new ReminderKey("ack-first"), dueTime, "payload");
+        await client.ScheduleSingleReminderAsync(new ReminderKey("ack-first"), dueTime, "payload", ct: TestContext.Current.CancellationToken);
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
 
-        var ack = await client.AckAsync(envelope);
-        var nack = await client.NackAsync(envelope, "too late");
+        var ack = await client.AckAsync(envelope, ct: TestContext.Current.CancellationToken);
+        var nack = await client.NackAsync(envelope, "too late", ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderAckResponseCode.Success, ack.ResponseCode);
         Assert.Equal(ReminderNackResponseCode.NotFound, nack.ResponseCode);
@@ -491,16 +491,16 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
         var client = Sys.ReminderClient().CreateClient("test-region", "nack-first");
-        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync()).ResponseCode);
+        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync(TestContext.Current.CancellationToken)).ResponseCode);
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var dueTime = testScheduler.Now.AddSeconds(5);
 
-        await client.ScheduleSingleReminderAsync(new ReminderKey("nack-first"), dueTime, "payload");
+        await client.ScheduleSingleReminderAsync(new ReminderKey("nack-first"), dueTime, "payload", ct: TestContext.Current.CancellationToken);
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
 
-        var nack = await client.NackAsync(envelope, "failed");
-        var ack = await client.AckAsync(envelope);
+        var nack = await client.NackAsync(envelope, "failed", ct: TestContext.Current.CancellationToken);
+        var ack = await client.AckAsync(envelope, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderNackResponseCode.RetryScheduled, nack.ResponseCode);
         Assert.Equal(ReminderAckResponseCode.NotFound, ack.ResponseCode);
@@ -512,13 +512,13 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("missing-region", testProbe);
         var client = Sys.ReminderClient().CreateClient("missing-region", "poison");
-        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync()).ResponseCode);
+        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync(TestContext.Current.CancellationToken)).ResponseCode);
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var dueTime = testScheduler.Now.AddSeconds(5);
         var key = new ReminderKey("missing-shard");
         const string failureReason = "ShardRegion [missing-region] not found";
 
-        var scheduled = await client.ScheduleSingleReminderAsync(key, dueTime, "payload");
+        var scheduled = await client.ScheduleSingleReminderAsync(key, dueTime, "payload", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderScheduleResponseCode.Success, scheduled.ResponseCode);
         Assert.True(_resolver.UnregisterShardRegion("missing-region"));
 
@@ -527,14 +527,14 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         {
             var status = await client.GetOccurrenceStatusAsync(key, dueTime);
             Assert.Equal(1, status.Status?.AttemptCount);
-        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50));
+        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50), cancellationToken: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
         await AwaitAssertAsync(async () =>
         {
             var status = await client.GetOccurrenceStatusAsync(key, dueTime);
             Assert.Equal(2, status.Status?.AttemptCount);
-        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50));
+        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50), cancellationToken: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(11));
         await AwaitAssertAsync(async () =>
@@ -544,7 +544,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
             Assert.Equal(3, status.Status?.AttemptCount);
             Assert.Equal(failureReason, status.Status?.LastFailureReason);
             Assert.Null(status.Status?.NextAttemptAtUtc);
-        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50));
+        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50), cancellationToken: TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -553,7 +553,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
         var client = Sys.ReminderClient().CreateClient("test-region", "recurring-poison");
-        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync()).ResponseCode);
+        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync(TestContext.Current.CancellationToken)).ResponseCode);
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var dueTime = testScheduler.Now.AddSeconds(5);
         var key = new ReminderKey("recurring-poison");
@@ -562,22 +562,22 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
             key,
             dueTime,
             TimeSpan.FromSeconds(60),
-            "payload");
+            "payload", ct: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var first = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        await client.NackAsync(first, "first failure");
+        var first = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        await client.NackAsync(first, "first failure", ct: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var second = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        await client.NackAsync(second, "second failure");
+        var second = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        await client.NackAsync(second, "second failure", ct: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(11));
-        var third = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        var terminal = await client.NackAsync(third, "final failure");
+        var third = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        var terminal = await client.NackAsync(third, "final failure", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderNackResponseCode.Failed, terminal.ResponseCode);
 
-        var reminders = await client.ListRemindersAsync();
+        var reminders = await client.ListRemindersAsync(TestContext.Current.CancellationToken);
         Assert.Contains(reminders.Reminders, reminder => reminder.DueTimeUtc == dueTime.AddSeconds(60));
     }
 
