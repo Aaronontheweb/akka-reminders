@@ -3,7 +3,6 @@ using Akka.Hosting.TestKit;
 using Akka.Reminders.Serialization;
 using Akka.Reminders.Storage;
 using Akka.Serialization;
-using Xunit.Abstractions;
 
 namespace Akka.Reminders.Tests.Serialization;
 
@@ -575,6 +574,67 @@ public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal(payload.AmountDue, deserialized.AmountDue);
         Assert.Equal(payload.Currency, deserialized.Currency);
         Assert.Equal(payload.CustomerEmail, deserialized.CustomerEmail);
+    }
+
+    #endregion
+
+    #region Cancel and query commands
+
+    [Fact]
+    public void Can_serialize_CancelReminder()
+    {
+        AssertEqual(new ReminderProtocol.CancelReminder(
+            new ReminderEntity("orders", "order-123"),
+            new ReminderKey("payment-reminder")));
+    }
+
+    [Fact]
+    public void Can_serialize_CancelAllReminders()
+    {
+        AssertEqual(new ReminderProtocol.CancelAllReminders(
+            new ReminderEntity("orders", "order-123")));
+    }
+
+    [Fact]
+    public void Can_serialize_GetReminders()
+    {
+        AssertEqual(new ReminderProtocol.GetReminders(
+            new ReminderEntity("orders", "order-123")));
+    }
+
+    [Fact]
+    public void Can_serialize_RemindersCancelled_with_keys()
+    {
+        var entity = new ReminderEntity("orders", "order-123");
+        var msg = new ReminderProtocol.RemindersCancelled(
+            entity,
+            ReminderCancelResponseCode.Success,
+            [new ReminderKey("reminder-1"), new ReminderKey("reminder-2")],
+            "cancelled 2 reminders");
+
+        var result = AssertAndReturn(msg);
+
+        Assert.Equal(entity, result.Entity);
+        Assert.Equal(ReminderCancelResponseCode.Success, result.ResponseCode);
+        Assert.Equal(msg.Keys, result.Keys);
+        Assert.Equal("cancelled 2 reminders", result.Message);
+    }
+
+    [Fact]
+    public void Can_serialize_RemindersCancelled_empty_not_found()
+    {
+        var entity = new ReminderEntity("orders", "order-123");
+        var msg = new ReminderProtocol.RemindersCancelled(
+            entity,
+            ReminderCancelResponseCode.NotFound,
+            []);
+
+        var result = AssertAndReturn(msg);
+
+        Assert.Equal(entity, result.Entity);
+        Assert.Equal(ReminderCancelResponseCode.NotFound, result.ResponseCode);
+        Assert.Empty(result.Keys);
+        Assert.Null(result.Message);
     }
 
     #endregion

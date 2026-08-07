@@ -4,7 +4,6 @@ using Akka.Hosting;
 using Akka.Reminders.Sharding;
 using FluentAssertions;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace Akka.Reminders.Tests;
 
@@ -43,6 +42,19 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
             .AddHocon(ConfigurationFactory.ParseString(@"
                 akka.actor.serialize-messages = on
                 akka.actor.serialization-settings.allow-unregistered-types = off
+                akka.actor.serialization-bindings {
+                    # TestKit-internal control messages (not part of the system under test).
+                    # Akka.Hosting.TestKit 1.5.70 sends Akka.Actor.Identify (ResolveOne during
+                    # shard-region resolution) and StableTestProbeRef+UpdateTarget (probe retargeting
+                    # across host startup). Bind both to the built-in json serializer so strict mode
+                    # (allow-unregistered-types = off) has a serializer for them.
+                    ""Akka.Actor.Identify"" = json
+                    ""Akka.Hosting.TestKit.TestKit+StableTestProbeRef+UpdateTarget, Akka.Hosting.TestKit"" = json
+                    # The user-supplied reminder payload used by these specs. A real app running
+                    # strict serialization would register a serializer for its own payload types;
+                    # bind it to json here so the reminder can round-trip through delivery.
+                    ""Akka.Reminders.Tests.StrictSerializationSpecs+StrictSerialTestMsg, Akka.Reminders.Tests"" = json
+                }
             "), HoconAddMode.Prepend);
     }
 
@@ -76,14 +88,14 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
         // Act - if internal messages aren't marked INoSerializationVerificationNeeded,
         // this ScheduleSingleReminderAsync call will throw SerializationException
         // because InitResult is returned via Tell to the caller.
-        var result = await client.ScheduleSingleReminderAsync(key, when, message);
+        var result = await client.ScheduleSingleReminderAsync(key, when, message, ct: TestContext.Current.CancellationToken);
 
         // Assert
         result.ResponseCode.Should().Be(ReminderScheduleResponseCode.Success);
 
         // The reminder should be delivered through the scheduler pipeline
         // without any serialization errors
-        var envelope = await targetActor.ExpectMsgAsync<ReminderEnvelope<StrictSerialTestMsg>>(TimeSpan.FromSeconds(2));
+        var envelope = await targetActor.ExpectMsgAsync<ReminderEnvelope<StrictSerialTestMsg>>(TimeSpan.FromSeconds(2), cancellationToken: TestContext.Current.CancellationToken);
         envelope.Message.Content.Should().Be("hello");
     }
 
@@ -101,16 +113,16 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
         var result = await client.ScheduleSingleReminderAsync(
             key,
             when,
-            new StrictSerialTestMsg("retry"));
+            new StrictSerialTestMsg("retry"), ct: TestContext.Current.CancellationToken);
         result.ResponseCode.Should().Be(ReminderScheduleResponseCode.Success);
 
         var first = await targetActor.ExpectMsgAsync<ReminderEnvelope<StrictSerialTestMsg>>(
-            TimeSpan.FromSeconds(2));
-        var nack = await client.NackAsync(first, "test failure");
+            TimeSpan.FromSeconds(2), cancellationToken: TestContext.Current.CancellationToken);
+        var nack = await client.NackAsync(first, "test failure", ct: TestContext.Current.CancellationToken);
         nack.ResponseCode.Should().Be(ReminderNackResponseCode.RetryScheduled);
 
         var retry = await targetActor.ExpectMsgAsync<ReminderEnvelope<StrictSerialTestMsg>>(
-            TimeSpan.FromSeconds(2));
+            TimeSpan.FromSeconds(2), cancellationToken: TestContext.Current.CancellationToken);
         retry.DueTimeUtc.Should().Be(first.DueTimeUtc);
     }
 
@@ -128,10 +140,10 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
         var message = new StrictSerialTestMsg("cancel");
         var when = DateTimeOffset.UtcNow.AddMilliseconds(200);
 
-        await client.ScheduleSingleReminderAsync(key, when, message);
+        await client.ScheduleSingleReminderAsync(key, when, message, ct: TestContext.Current.CancellationToken);
 
         // Act - CancelReminder is also internal and should not break strict serialization
-        var cancelResult = await client.CancelReminderAsync(key);
+        var cancelResult = await client.CancelReminderAsync(key, TestContext.Current.CancellationToken);
 
         // Assert
         cancelResult.ResponseCode.Should().Be(ReminderCancelResponseCode.Success);
@@ -148,7 +160,7 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
         var client = extension.CreateClient("billing-shard", "customer-123");
 
         // Act
-        var result = await client.CancelAllRemindersAsync();
+        var result = await client.CancelAllRemindersAsync(TestContext.Current.CancellationToken);
 
         // Assert - CancelAllReminders is internal, should not break
         // NotFound is fine since there are no reminders to cancel

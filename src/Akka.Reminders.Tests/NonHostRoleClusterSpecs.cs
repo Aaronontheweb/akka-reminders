@@ -6,7 +6,6 @@ using Akka.Hosting.TestKit;
 using Akka.Reminders.Sharding;
 using Akka.Reminders.Storage;
 using FluentAssertions;
-using Xunit.Abstractions;
 
 namespace Akka.Reminders.Tests;
 
@@ -90,7 +89,7 @@ public class NonHostRoleClusterSpecs : Akka.Hosting.TestKit.TestKit
         // Assert - The actor should not exist (will throw or return ActorNotFound)
         var probe = CreateTestProbe();
         selection.Tell(new Identify("test"), probe);
-        var identity = probe.ExpectMsg<ActorIdentity>(TimeSpan.FromSeconds(3));
+        var identity = probe.ExpectMsg<ActorIdentity>(TimeSpan.FromSeconds(3), cancellationToken: TestContext.Current.CancellationToken);
 
         // ActorRef should be null since the singleton manager wasn't created
         identity.Subject.Should().BeNull("the singleton manager should not be created on non-host nodes");
@@ -119,7 +118,7 @@ public class NonHostRoleClusterSpecs : Akka.Hosting.TestKit.TestKit
 
         // Act
         selection.Tell(new Identify("test"), probe);
-        var identity = probe.ExpectMsg<ActorIdentity>(TimeSpan.FromSeconds(3));
+        var identity = probe.ExpectMsg<ActorIdentity>(TimeSpan.FromSeconds(3), cancellationToken: TestContext.Current.CancellationToken);
 
         // Assert
         identity.Subject.Should().NotBeNull("the proxy actor should exist on non-host nodes");

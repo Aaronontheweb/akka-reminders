@@ -27,12 +27,12 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
 
     protected IReminderStorage? Storage { get; private set; }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         Storage = await CreateStorage();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (Storage != null)
         {
@@ -72,7 +72,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var reminder = CreateTestReminder();
 
         // Act
-        var result = await Storage!.ScheduleReminderAsync(reminder);
+        var result = await Storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
@@ -92,16 +92,16 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var reminder1 = CreateTestReminder(entity, key, DateTimeOffset.UtcNow.AddMinutes(5), "message1");
         var reminder2 = CreateTestReminder(entity, key, DateTimeOffset.UtcNow.AddMinutes(10), "message2");
 
-        await Storage!.ScheduleReminderAsync(reminder1);
+        await Storage!.ScheduleReminderAsync(reminder1, TestContext.Current.CancellationToken);
 
         // Act - schedule different reminder with same entity and key (should overwrite)
-        var result = await Storage.ScheduleReminderAsync(reminder2);
+        var result = await Storage.ScheduleReminderAsync(reminder2, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         // Verify only the new reminder exists
-        var reminders = await Storage.GetRemindersForEntityAsync(entity);
+        var reminders = await Storage.GetRemindersForEntityAsync(entity, ct: TestContext.Current.CancellationToken);
         Assert.Single(reminders);
         // Allow for microsecond precision differences (PostgreSQL has 6 decimals, .NET has 7)
         var timeDiff = Math.Abs((reminder2.When - reminders[0].When).TotalMilliseconds);
@@ -118,8 +118,8 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var reminder2 = CreateTestReminder(CreateTestEntity("type2", "id2"), key);
 
         // Act
-        var result1 = await Storage!.ScheduleReminderAsync(reminder1);
-        var result2 = await Storage.ScheduleReminderAsync(reminder2);
+        var result1 = await Storage!.ScheduleReminderAsync(reminder1, TestContext.Current.CancellationToken);
+        var result2 = await Storage.ScheduleReminderAsync(reminder2, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderScheduleResponseCode.Success, result1.ResponseCode);
@@ -140,13 +140,13 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             RepeatInterval: TimeSpan.FromHours(1));
 
         // Act
-        var result = await Storage!.ScheduleReminderAsync(recurringReminder);
+        var result = await Storage!.ScheduleReminderAsync(recurringReminder, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         // Verify the recurring reminder was stored with repeat interval
-        var reminders = await Storage.GetRemindersForEntityAsync(entity);
+        var reminders = await Storage.GetRemindersForEntityAsync(entity, ct: TestContext.Current.CancellationToken);
         Assert.Single(reminders);
         Assert.Equal(TimeSpan.FromHours(1), reminders[0].RepeatInterval);
     }
@@ -167,13 +167,13 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             LastFailureReason: "ShardRegion not found");
 
         // Act
-        var result = await Storage!.ScheduleReminderAsync(reminderWithRetry);
+        var result = await Storage!.ScheduleReminderAsync(reminderWithRetry, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         // Verify retry tracking was preserved
-        var reminders = await Storage.GetRemindersForEntityAsync(entity);
+        var reminders = await Storage.GetRemindersForEntityAsync(entity, ct: TestContext.Current.CancellationToken);
         Assert.Single(reminders);
         Assert.Equal(2, reminders[0].AttemptCount);
         Assert.Equal("ShardRegion not found", reminders[0].LastFailureReason);
@@ -188,10 +188,10 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     {
         // Arrange
         var reminder = CreateTestReminder();
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
 
         // Act
-        var result = await Storage.CancelReminderAsync(reminder.Entity, reminder.Key);
+        var result = await Storage.CancelReminderAsync(reminder.Entity, reminder.Key, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderCancelResponseCode.Success, result.ResponseCode);
@@ -206,7 +206,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var key = CreateTestKey();
 
         // Act
-        var result = await Storage!.CancelReminderAsync(entity, key);
+        var result = await Storage!.CancelReminderAsync(entity, key, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderCancelResponseCode.NotFound, result.ResponseCode);
@@ -220,14 +220,14 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var key1 = CreateTestKey("reminder1");
         var key2 = CreateTestKey("reminder2");
 
-        await Storage!.ScheduleReminderAsync(CreateTestReminder(entity, key1));
-        await Storage.ScheduleReminderAsync(CreateTestReminder(entity, key2));
+        await Storage!.ScheduleReminderAsync(CreateTestReminder(entity, key1), TestContext.Current.CancellationToken);
+        await Storage.ScheduleReminderAsync(CreateTestReminder(entity, key2), TestContext.Current.CancellationToken);
 
         // Act
-        await Storage.CancelReminderAsync(entity, key1);
+        await Storage.CancelReminderAsync(entity, key1, TestContext.Current.CancellationToken);
 
         // Assert - key2 should still exist
-        var reminders = await Storage.GetRemindersForEntityAsync(entity);
+        var reminders = await Storage.GetRemindersForEntityAsync(entity, ct: TestContext.Current.CancellationToken);
         Assert.Single(reminders);
         Assert.Equal(key2, reminders[0].Key);
     }
@@ -244,11 +244,11 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var key1 = CreateTestKey("reminder1");
         var key2 = CreateTestKey("reminder2");
 
-        await Storage!.ScheduleReminderAsync(CreateTestReminder(entity, key1));
-        await Storage.ScheduleReminderAsync(CreateTestReminder(entity, key2));
+        await Storage!.ScheduleReminderAsync(CreateTestReminder(entity, key1), TestContext.Current.CancellationToken);
+        await Storage.ScheduleReminderAsync(CreateTestReminder(entity, key2), TestContext.Current.CancellationToken);
 
         // Act
-        var result = await Storage.CancelAllRemindersForEntityAsync(entity);
+        var result = await Storage.CancelAllRemindersForEntityAsync(entity, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderCancelResponseCode.Success, result.ResponseCode);
@@ -264,7 +264,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var entity = CreateTestEntity();
 
         // Act
-        var result = await Storage!.CancelAllRemindersForEntityAsync(entity);
+        var result = await Storage!.CancelAllRemindersForEntityAsync(entity, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderCancelResponseCode.NotFound, result.ResponseCode);
@@ -277,14 +277,14 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var entity1 = CreateTestEntity("type1", "id1");
         var entity2 = CreateTestEntity("type2", "id2");
 
-        await Storage!.ScheduleReminderAsync(CreateTestReminder(entity1));
-        await Storage.ScheduleReminderAsync(CreateTestReminder(entity2));
+        await Storage!.ScheduleReminderAsync(CreateTestReminder(entity1), TestContext.Current.CancellationToken);
+        await Storage.ScheduleReminderAsync(CreateTestReminder(entity2), TestContext.Current.CancellationToken);
 
         // Act
-        await Storage.CancelAllRemindersForEntityAsync(entity1);
+        await Storage.CancelAllRemindersForEntityAsync(entity1, TestContext.Current.CancellationToken);
 
         // Assert - entity2 reminders should still exist
-        var reminders = await Storage.GetRemindersForEntityAsync(entity2);
+        var reminders = await Storage.GetRemindersForEntityAsync(entity2, ct: TestContext.Current.CancellationToken);
         Assert.Single(reminders);
     }
 
@@ -299,7 +299,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var entity = CreateTestEntity();
 
         // Act
-        var result = await Storage!.GetRemindersForEntityAsync(entity);
+        var result = await Storage!.GetRemindersForEntityAsync(entity, ct: TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Empty(result);
@@ -313,11 +313,11 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var reminder1 = CreateTestReminder(entity, CreateTestKey("r1"));
         var reminder2 = CreateTestReminder(entity, CreateTestKey("r2"));
 
-        await Storage!.ScheduleReminderAsync(reminder1);
-        await Storage.ScheduleReminderAsync(reminder2);
+        await Storage!.ScheduleReminderAsync(reminder1, TestContext.Current.CancellationToken);
+        await Storage.ScheduleReminderAsync(reminder2, TestContext.Current.CancellationToken);
 
         // Act
-        var result = await Storage.GetRemindersForEntityAsync(entity);
+        var result = await Storage.GetRemindersForEntityAsync(entity, ct: TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -330,11 +330,11 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var entity1 = CreateTestEntity("type1", "id1");
         var entity2 = CreateTestEntity("type2", "id2");
 
-        await Storage!.ScheduleReminderAsync(CreateTestReminder(entity1));
-        await Storage.ScheduleReminderAsync(CreateTestReminder(entity2));
+        await Storage!.ScheduleReminderAsync(CreateTestReminder(entity1), TestContext.Current.CancellationToken);
+        await Storage.ScheduleReminderAsync(CreateTestReminder(entity2), TestContext.Current.CancellationToken);
 
         // Act
-        var result = await Storage.GetRemindersForEntityAsync(entity1);
+        var result = await Storage.GetRemindersForEntityAsync(entity1, ct: TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Single(result);
@@ -349,12 +349,12 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         for (int i = 0; i < 20; i++)
         {
             await Storage!.ScheduleReminderAsync(
-                CreateTestReminder(entity, CreateTestKey($"reminder-{i}")));
+                CreateTestReminder(entity, CreateTestKey($"reminder-{i}")), TestContext.Current.CancellationToken);
         }
 
         // Act
-        var page1 = await Storage!.GetRemindersForEntityAsync(entity, take: 10, skip: 0);
-        var page2 = await Storage.GetRemindersForEntityAsync(entity, take: 10, skip: 10);
+        var page1 = await Storage!.GetRemindersForEntityAsync(entity, take: 10, skip: 0, TestContext.Current.CancellationToken);
+        var page2 = await Storage.GetRemindersForEntityAsync(entity, take: 10, skip: 10, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(10, page1.Count);
@@ -373,7 +373,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     public async Task GetRemindersOverview_ShouldReturnZero_WhenNoRemindersExist()
     {
         // Act
-        var overview = await Storage!.GetRemindersOverviewAsync(DateTimeOffset.UtcNow);
+        var overview = await Storage!.GetRemindersOverviewAsync(DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(0, overview.TotalPendingReminders);
@@ -390,7 +390,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
 
         // Arrange - get overview from empty database
         var now = DateTimeOffset.UtcNow;
-        var emptyOverview = await Storage!.GetRemindersOverviewAsync(now);
+        var emptyOverview = await Storage!.GetRemindersOverviewAsync(now, TestContext.Current.CancellationToken);
 
         // Act - apply a new reminder scheduled for 5 minutes in the future
         var futureReminder = CreateTestReminder(when: now.AddMinutes(5));
@@ -412,11 +412,11 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             await Storage!.ScheduleReminderAsync(
                 CreateTestReminder(
                     CreateTestEntity("type", $"id-{i}"),
-                    CreateTestKey($"key-{i}")));
+                    CreateTestKey($"key-{i}")), TestContext.Current.CancellationToken);
         }
 
         // Act
-        var overview = await Storage!.GetRemindersOverviewAsync(DateTimeOffset.UtcNow);
+        var overview = await Storage!.GetRemindersOverviewAsync(DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(5, overview.TotalPendingReminders);
@@ -430,11 +430,11 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var nearFuture = now.AddMinutes(5);
         var farFuture = now.AddHours(1);
 
-        await Storage!.ScheduleReminderAsync(CreateTestReminder(when: farFuture));
-        await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("type2", "id2"), when: nearFuture));
+        await Storage!.ScheduleReminderAsync(CreateTestReminder(when: farFuture), TestContext.Current.CancellationToken);
+        await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("type2", "id2"), when: nearFuture), TestContext.Current.CancellationToken);
 
         // Act
-        var overview = await Storage.GetRemindersOverviewAsync(DateTimeOffset.UtcNow);
+        var overview = await Storage.GetRemindersOverviewAsync(DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(overview.TimeUntilNext <= TimeSpan.FromMinutes(6));
@@ -450,11 +450,11 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     {
         // Arrange
         var futureTime = DateTimeOffset.UtcNow.AddHours(1);
-        await Storage!.ScheduleReminderAsync(CreateTestReminder(when: futureTime));
+        await Storage!.ScheduleReminderAsync(CreateTestReminder(when: futureTime), TestContext.Current.CancellationToken);
 
         // Act
         var now = DateTimeOffset.UtcNow;
-        var result = await Storage.GetNextRemindersAsync(now, now, DefaultBatchSize);
+        var result = await Storage.GetNextRemindersAsync(now, now, DefaultBatchSize, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Empty(result.Reminders);
@@ -470,12 +470,12 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var nearFuture = now.AddMinutes(5);
         var farFuture = now.AddHours(1);
 
-        await Storage!.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("t1", "i1"), when: past));
-        await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("t2", "i2"), when: nearFuture));
-        await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("t3", "i3"), when: farFuture));
+        await Storage!.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("t1", "i1"), when: past), TestContext.Current.CancellationToken);
+        await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("t2", "i2"), when: nearFuture), TestContext.Current.CancellationToken);
+        await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("t3", "i3"), when: farFuture), TestContext.Current.CancellationToken);
 
         // Act - get reminders due up until nearFuture
-        var result = await Storage.GetNextRemindersAsync(nearFuture, nearFuture, DefaultBatchSize);
+        var result = await Storage.GetNextRemindersAsync(nearFuture, nearFuture, DefaultBatchSize, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(2, result.Reminders.Count); // past and nearFuture
@@ -487,12 +487,12 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     {
         // Arrange
         var now = DateTimeOffset.UtcNow;
-        await Storage!.ScheduleReminderAsync(CreateTestReminder(when: now.AddMinutes(1)));
-        await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("t2", "i2"), when: now.AddMinutes(10)));
+        await Storage!.ScheduleReminderAsync(CreateTestReminder(when: now.AddMinutes(1)), TestContext.Current.CancellationToken);
+        await Storage.ScheduleReminderAsync(CreateTestReminder(CreateTestEntity("t2", "i2"), when: now.AddMinutes(10)), TestContext.Current.CancellationToken);
 
         // Act
         var deadline = now.AddMinutes(5);
-        var result = await Storage.GetNextRemindersAsync(deadline, deadline, DefaultBatchSize);
+        var result = await Storage.GetNextRemindersAsync(deadline, deadline, DefaultBatchSize, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Single(result.Reminders);
@@ -515,11 +515,11 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
                 CreateTestReminder(
                     CreateTestEntity($"batch-type", $"batch-id-{i}"),
                     CreateTestKey($"batch-key-{i}"),
-                    when: past));
+                    when: past), TestContext.Current.CancellationToken);
         }
 
         // Act - fetch with maxCount
-        var result = await Storage!.GetNextRemindersAsync(now, now, maxCount: new ReminderBatchSize(maxCount));
+        var result = await Storage!.GetNextRemindersAsync(now, now, maxCount: new ReminderBatchSize(maxCount), TestContext.Current.CancellationToken);
 
         // Assert - should only return maxCount reminders
         Assert.Equal(maxCount, result.Reminders.Count);
@@ -542,7 +542,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     {
         var now = DateTimeOffset.UtcNow;
         var reminder = CreateTestReminder(when: now.AddMinutes(5));
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
 
         // Transition to AwaitingAck — simulates what the scheduler does after delivering
         // the reminder via Tell. The ackDeadline is when the scheduler will retry if no
@@ -554,12 +554,12 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             now,           // deliveredAt
             now.AddMinutes(1)); // ackDeadline
 
-        var result = await Storage.MarkRemindersAsAwaitingAckAsync([awaitingAck]);
+        var result = await Storage.MarkRemindersAsAwaitingAckAsync([awaitingAck], TestContext.Current.CancellationToken);
         Assert.True(result);
 
         // The overview only counts Pending rows. AwaitingAck rows are invisible to the
         // fetch loop — they're tracked by the ack-timeout checker instead.
-        var overview = await Storage.GetRemindersOverviewAsync(now);
+        var overview = await Storage.GetRemindersOverviewAsync(now, TestContext.Current.CancellationToken);
         Assert.Equal(0, overview.TotalPendingReminders);
     }
 
@@ -574,7 +574,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     {
         var now = DateTimeOffset.UtcNow;
         var reminder = CreateTestReminder(when: now.AddMinutes(5));
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
 
         var awaitingAck = new AwaitingAckReminder(
             reminder.Entity,
@@ -582,7 +582,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             reminder.DueTimeUtc,
             now,
             now.AddMinutes(1));
-        await Storage.MarkRemindersAsAwaitingAckAsync([awaitingAck]);
+        await Storage.MarkRemindersAsAwaitingAckAsync([awaitingAck], TestContext.Current.CancellationToken);
 
         // Ack with wrong DueTimeUtc — off by 1 second. This simulates a late ack
         // arriving for a superseded occurrence of a recurring reminder.
@@ -590,7 +590,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             reminder.Entity,
             reminder.Key,
             reminder.DueTimeUtc.AddSeconds(1), // wrong occurrence
-            now.AddSeconds(10));
+            now.AddSeconds(10), TestContext.Current.CancellationToken);
 
         Assert.False(wrongAck.Success);
         Assert.Equal(ReminderAckStorageStatus.NotFound, wrongAck.Status);
@@ -600,7 +600,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             reminder.Entity,
             reminder.Key,
             reminder.DueTimeUtc,
-            now.AddSeconds(10));
+            now.AddSeconds(10), TestContext.Current.CancellationToken);
 
         Assert.True(correctAck.Success);
         Assert.Equal(ReminderAckStorageStatus.Success, correctAck.Status);
@@ -630,7 +630,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             RepeatInterval: TimeSpan.FromMinutes(1),
             OccurrenceDueTimeUtc: now.AddMinutes(1));
 
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
 
         // Create the next recurring occurrence — due 1 interval later.
         // In production, CreateNextRecurringOccurrence does this.
@@ -653,24 +653,24 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var result = await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
             [nextOccurrence],  // PendingUpserts: next recurring occurrence
             [],                // CompletedReminders: none
-            [awaiting]));      // AwaitingAckReminders: current occurrence
+            [awaiting]), TestContext.Current.CancellationToken);      // AwaitingAckReminders: current occurrence
 
         Assert.True(result);
 
         // Only the next occurrence is Pending — the current one is AwaitingAck
         // and excluded from the overview.
-        var overview = await Storage.GetRemindersOverviewAsync(now);
+        var overview = await Storage.GetRemindersOverviewAsync(now, TestContext.Current.CancellationToken);
         Assert.Equal(1, overview.TotalPendingReminders);
 
         // GetRemindersForEntityAsync returns both Pending and AwaitingAck rows,
         // so both occurrences should be visible (two different DueTimeUtc values).
-        var reminders = await Storage.GetRemindersForEntityAsync(reminder.Entity);
+        var reminders = await Storage.GetRemindersForEntityAsync(reminder.Entity, ct: TestContext.Current.CancellationToken);
         Assert.Equal(2, reminders.Count);
         Assert.Contains(reminders, r => Math.Abs((r.DueTimeUtc - reminder.DueTimeUtc).TotalMilliseconds) < 0.001);
         Assert.Contains(reminders, r => Math.Abs((r.DueTimeUtc - nextOccurrence.DueTimeUtc).TotalMilliseconds) < 0.001);
 
         // The AwaitingAck occurrence should be ackable by its original DueTimeUtc.
-        var ack = await Storage.AcknowledgeReminderAsync(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now.AddSeconds(5));
+        var ack = await Storage.AcknowledgeReminderAsync(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now.AddSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(ack.Success);
     }
 
@@ -685,13 +685,13 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     {
         var now = DateTimeOffset.UtcNow;
         var reminder = CreateTestReminder(when: now.AddMinutes(5));
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
 
         // Move to AwaitingAck so there's something to acknowledge.
         await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
             [],
             [],
-            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]), TestContext.Current.CancellationToken);
 
         // Ack two occurrences in a single batch: one that exists (correct DueTimeUtc)
         // and one that doesn't (DueTimeUtc + 1 minute — no such occurrence).
@@ -699,7 +699,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var results = await Storage.AcknowledgeRemindersAsync([
             new ReminderAcknowledgement(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now.AddSeconds(5)),
             new ReminderAcknowledgement(reminder.Entity, reminder.Key, missingDueTime, now.AddSeconds(5))
-        ]);
+        ], TestContext.Current.CancellationToken);
 
         // Results are positional — one per ack in the input batch.
         Assert.Equal(2, results.Count);
@@ -718,12 +718,13 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             DeliveryDeadlineUtc = now.AddHours(1),
             OccurrenceDueTimeUtc = now.AddMinutes(5)
         };
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, ct: TestContext.Current.CancellationToken);
 
         var pending = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
         Assert.NotNull(pending);
         Assert.Equal(ReminderCompletionStatus.Pending, pending.CompletionStatus);
         Assert.Equal(2, pending.AttemptCount);
@@ -733,12 +734,13 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
             [],
             [],
-            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]), ct: TestContext.Current.CancellationToken);
 
         var awaiting = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
         Assert.NotNull(awaiting);
         Assert.Equal(ReminderCompletionStatus.AwaitingAck, awaiting.CompletionStatus);
         Assert.Null(awaiting.NextAttemptAtUtc);
@@ -749,13 +751,15 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             reminder.Entity,
             reminder.Key,
             reminder.DueTimeUtc,
-            now.AddSeconds(5));
+            now.AddSeconds(5),
+            ct: TestContext.Current.CancellationToken);
         Assert.True(ack.Success);
 
         var delivered = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
         Assert.NotNull(delivered);
         Assert.Equal(ReminderCompletionStatus.Delivered, delivered.CompletionStatus);
         Assert.Null(delivered.NextAttemptAtUtc);
@@ -773,23 +777,25 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             DeliveryDeadlineUtc = now.AddHours(1),
             OccurrenceDueTimeUtc = now.AddMinutes(5)
         };
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, ct: TestContext.Current.CancellationToken);
 
         var missingBeforeDelivery = await Storage.GetAwaitingAckReminderAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
         Assert.Null(missingBeforeDelivery);
 
         await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch(
             [],
             [],
-            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]));
+            [new AwaitingAckReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, now.AddMinutes(1))]), ct: TestContext.Current.CancellationToken);
 
         var found = await Storage.GetAwaitingAckReminderAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
         Assert.NotNull(found);
         Assert.Equal(2, found.AttemptCount);
         Assert.Equal("prior failure", found.LastFailureReason);
@@ -800,7 +806,8 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var stale = await Storage.GetAwaitingAckReminderAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc.AddSeconds(1));
+            reminder.DueTimeUtc.AddSeconds(1),
+            ct: TestContext.Current.CancellationToken);
         Assert.Null(stale);
     }
 
@@ -814,7 +821,7 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             LastFailureReason = "final failure",
             DeliveryDeadlineUtc = now.AddHours(1)
         };
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, ct: TestContext.Current.CancellationToken);
         await Storage.MarkRemindersAsCompletedAsync([
             new CompletedReminder(
                 reminder.Entity,
@@ -822,12 +829,13 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
                 reminder.DueTimeUtc,
                 now,
                 ReminderCompletionStatus.Failed)
-        ]);
+        ], ct: TestContext.Current.CancellationToken);
 
         var status = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
 
         Assert.NotNull(status);
         Assert.Equal(ReminderCompletionStatus.Failed, status.CompletionStatus);
@@ -848,13 +856,14 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             AttemptCount = 2,
             LastFailureReason = "prior failure"
         };
-        await Storage!.ScheduleReminderAsync(reminder);
-        await Storage.CancelReminderAsync(reminder.Entity, reminder.Key);
+        await Storage!.ScheduleReminderAsync(reminder, ct: TestContext.Current.CancellationToken);
+        await Storage.CancelReminderAsync(reminder.Entity, reminder.Key, ct: TestContext.Current.CancellationToken);
 
         var status = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
 
         Assert.NotNull(status);
         Assert.Equal(ReminderCompletionStatus.Cancelled, status.CompletionStatus);
@@ -873,13 +882,14 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             LastFailureReason = "prior failure",
             DeliveryDeadlineUtc = now.AddMinutes(-1)
         };
-        await Storage!.ScheduleReminderAsync(reminder);
-        Assert.Equal(1, await Storage.ExpireRemindersAsync(now));
+        await Storage!.ScheduleReminderAsync(reminder, ct: TestContext.Current.CancellationToken);
+        Assert.Equal(1, await Storage.ExpireRemindersAsync(now, ct: TestContext.Current.CancellationToken));
 
         var status = await Storage.GetReminderOccurrenceStatusAsync(
             reminder.Entity,
             reminder.Key,
-            reminder.DueTimeUtc);
+            reminder.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
 
         Assert.NotNull(status);
         Assert.Equal(ReminderCompletionStatus.Expired, status.CompletionStatus);
@@ -897,19 +907,20 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             AttemptCount = 2,
             LastFailureReason = "prior failure"
         };
-        await Storage!.ScheduleReminderAsync(original);
+        await Storage!.ScheduleReminderAsync(original, ct: TestContext.Current.CancellationToken);
         await Storage.ScheduleReminderAsync(original with
         {
             When = now.AddMinutes(10),
             OccurrenceDueTimeUtc = now.AddMinutes(10),
             AttemptCount = 0,
             LastFailureReason = null
-        });
+        }, ct: TestContext.Current.CancellationToken);
 
         var status = await Storage.GetReminderOccurrenceStatusAsync(
             original.Entity,
             original.Key,
-            original.DueTimeUtc);
+            original.DueTimeUtc,
+            ct: TestContext.Current.CancellationToken);
 
         Assert.NotNull(status);
         Assert.Equal(ReminderCompletionStatus.Cancelled, status.CompletionStatus);
@@ -930,8 +941,8 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var first = CreateTestReminder(CreateTestEntity("a", "1"), CreateTestKey("first"), now.AddMinutes(1));
         var second = CreateTestReminder(CreateTestEntity("a", "2"), CreateTestKey("second"), now.AddMinutes(2));
 
-        await Storage!.ScheduleReminderAsync(first);
-        await Storage.ScheduleReminderAsync(second);
+        await Storage!.ScheduleReminderAsync(first, TestContext.Current.CancellationToken);
+        await Storage.ScheduleReminderAsync(second, TestContext.Current.CancellationToken);
 
         // Move both to AwaitingAck with different deadlines.
         // "first" has a later deadline (20s), "second" has an earlier one (10s).
@@ -942,9 +953,9 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             [
                 new AwaitingAckReminder(first.Entity, first.Key, first.DueTimeUtc, now, now.AddSeconds(20)),
                 new AwaitingAckReminder(second.Entity, second.Key, second.DueTimeUtc, now, now.AddSeconds(10))
-            ]));
+            ]), TestContext.Current.CancellationToken);
 
-        var deadline = await Storage.GetNextAwaitingAckDeadlineAsync();
+        var deadline = await Storage.GetNextAwaitingAckDeadlineAsync(TestContext.Current.CancellationToken);
 
         // Should be the earlier deadline (now + 10s), not the first-inserted one (now + 20s).
         Assert.NotNull(deadline);
@@ -975,18 +986,18 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
             DeliveryDeadlineUtc: dueTime.AddMinutes(1),           // deadline was 1 minute ago
             OccurrenceDueTimeUtc: dueTime);
 
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
 
         // Expire should find this reminder because now > dueTime + 1 minute.
-        var expiredCount = await Storage.ExpireRemindersAsync(now);
+        var expiredCount = await Storage.ExpireRemindersAsync(now, TestContext.Current.CancellationToken);
         Assert.True(expiredCount >= 1);
 
         // The reminder is gone from the pending set — it won't be fetched or delivered.
-        var overview = await Storage.GetRemindersOverviewAsync(now);
+        var overview = await Storage.GetRemindersOverviewAsync(now, TestContext.Current.CancellationToken);
         Assert.Equal(0, overview.TotalPendingReminders);
 
         // GetRemindersForEntityAsync also excludes expired reminders.
-        var reminders = await Storage.GetRemindersForEntityAsync(reminder.Entity);
+        var reminders = await Storage.GetRemindersForEntityAsync(reminder.Entity, ct: TestContext.Current.CancellationToken);
         Assert.Empty(reminders);
     }
 
@@ -999,12 +1010,12 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     {
         // Arrange
         var reminder = CreateTestReminder();
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
 
         var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, DateTimeOffset.UtcNow);
 
         // Act
-        var result = await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
+        var result = await Storage.MarkRemindersAsCompletedAsync(new[] { completed }, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(result);
@@ -1015,13 +1026,13 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     {
         // Arrange
         var reminder = CreateTestReminder();
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
 
         var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, DateTimeOffset.UtcNow);
-        await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
+        await Storage.MarkRemindersAsCompletedAsync(new[] { completed }, TestContext.Current.CancellationToken);
 
         // Act
-        var overview = await Storage.GetRemindersOverviewAsync(DateTimeOffset.UtcNow);
+        var overview = await Storage.GetRemindersOverviewAsync(DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(0, overview.TotalPendingReminders);
@@ -1035,18 +1046,18 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
         var reminder1 = CreateTestReminder(entity, CreateTestKey("r1"));
         var reminder2 = CreateTestReminder(entity, CreateTestKey("r2"));
 
-        await Storage!.ScheduleReminderAsync(reminder1);
-        await Storage.ScheduleReminderAsync(reminder2);
+        await Storage!.ScheduleReminderAsync(reminder1, TestContext.Current.CancellationToken);
+        await Storage.ScheduleReminderAsync(reminder2, TestContext.Current.CancellationToken);
 
         var completed1 = new CompletedReminder(reminder1.Entity, reminder1.Key, reminder1.DueTimeUtc, DateTimeOffset.UtcNow);
         var completed2 = new CompletedReminder(reminder2.Entity, reminder2.Key, reminder2.DueTimeUtc, DateTimeOffset.UtcNow);
 
         // Act
-        var result = await Storage.MarkRemindersAsCompletedAsync(new[] { completed1, completed2 });
+        var result = await Storage.MarkRemindersAsCompletedAsync(new[] { completed1, completed2 }, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(result);
-        var overview = await Storage.GetRemindersOverviewAsync(DateTimeOffset.UtcNow);
+        var overview = await Storage.GetRemindersOverviewAsync(DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
         Assert.Equal(0, overview.TotalPendingReminders);
     }
 
@@ -1059,14 +1070,14 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     {
         // Arrange
         var reminder = CreateTestReminder();
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
 
         var completedTime = DateTimeOffset.UtcNow.AddDays(-10);
         var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, completedTime);
-        await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
+        await Storage.MarkRemindersAsCompletedAsync(new[] { completed }, TestContext.Current.CancellationToken);
 
         // Act
-        var result = await Storage.CleanUpCompletedRemindersAsync(DateTimeOffset.UtcNow.AddDays(-5));
+        var result = await Storage.CleanUpCompletedRemindersAsync(DateTimeOffset.UtcNow.AddDays(-5), TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(result);
@@ -1077,14 +1088,14 @@ public abstract class ReminderStorageSpecBase : IAsyncLifetime
     {
         // Arrange
         var reminder = CreateTestReminder();
-        await Storage!.ScheduleReminderAsync(reminder);
+        await Storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
 
         var recentCompletedTime = DateTimeOffset.UtcNow.AddDays(-3);
         var completed = new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, recentCompletedTime);
-        await Storage.MarkRemindersAsCompletedAsync(new[] { completed });
+        await Storage.MarkRemindersAsCompletedAsync(new[] { completed }, TestContext.Current.CancellationToken);
 
         // Act - cleanup reminders older than 5 days
-        var result = await Storage.CleanUpCompletedRemindersAsync(DateTimeOffset.UtcNow.AddDays(-5));
+        var result = await Storage.CleanUpCompletedRemindersAsync(DateTimeOffset.UtcNow.AddDays(-5), TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(result);

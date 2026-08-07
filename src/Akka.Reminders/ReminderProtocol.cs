@@ -266,15 +266,15 @@ public static class ReminderProtocol
             MaxDeliveryWindow: MaxDeliveryWindow);
     }
 
-    public sealed record CancelReminder(ReminderEntity Entity, ReminderKey Key) : IReminderCommand;
+    public sealed record CancelReminder(ReminderEntity Entity, ReminderKey Key) : IReminderCommand, IReminderWireMessage;
 
-    public sealed record CancelAllReminders(ReminderEntity Entity) : IReminderCommand;
+    public sealed record CancelAllReminders(ReminderEntity Entity) : IReminderCommand, IReminderWireMessage;
 
     public sealed record RemindersCancelled(
         ReminderEntity Entity,
         ReminderCancelResponseCode ResponseCode,
         IReadOnlyList<ReminderKey> Keys,
-        string? Message = null) : IReminderResponse;
+        string? Message = null) : IReminderResponse, IReminderWireMessage;
 
     public sealed record ReminderScheduled(
         ScheduleReminder OriginalCommand,
@@ -295,7 +295,7 @@ public static class ReminderProtocol
         public DateTimeOffset When => OriginalCommand.When;
     }
 
-    public sealed record GetReminders(ReminderEntity Entity) : IReminderQuery;
+    public sealed record GetReminders(ReminderEntity Entity) : IReminderQuery, IReminderWireMessage;
 
     public sealed record RemindersForEntity(
         ReminderEntity Entity,

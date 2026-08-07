@@ -3,7 +3,6 @@ using Akka.Hosting;
 using Akka.Reminders.Sharding;
 using FluentAssertions;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace Akka.Reminders.Tests;
 
@@ -62,11 +61,11 @@ public class LocalReminderSpecs : Akka.Hosting.TestKit.TestKit
         var when = DateTimeOffset.UtcNow.AddMilliseconds(200);
 
         // Act - schedule a reminder
-        var scheduleResult = await client.ScheduleSingleReminderAsync(key, when, message);
+        var scheduleResult = await client.ScheduleSingleReminderAsync(key, when, message, ct: TestContext.Current.CancellationToken);
         scheduleResult.ResponseCode.Should().Be(ReminderScheduleResponseCode.Success);
 
         // Assert - the reminder should be delivered as a ReminderEnvelope
-        var envelope = await targetActor.ExpectMsgAsync<ReminderEnvelope<TestMessage>>(TimeSpan.FromSeconds(2));
+        var envelope = await targetActor.ExpectMsgAsync<ReminderEnvelope<TestMessage>>(TimeSpan.FromSeconds(2), cancellationToken: TestContext.Current.CancellationToken);
         envelope.Message.Content.Should().Be("Payment Retry");
 
         Output?.WriteLine($"Reminder delivered successfully to {targetActor.Ref.Path}");
@@ -90,18 +89,18 @@ public class LocalReminderSpecs : Akka.Hosting.TestKit.TestKit
         await billingClient.ScheduleSingleReminderAsync(
             new ReminderKey("billing-reminder"),
             DateTimeOffset.UtcNow.AddMilliseconds(100),
-            new TestMessage("Bill Customer"));
+            new TestMessage("Bill Customer"), ct: TestContext.Current.CancellationToken);
 
         await notificationClient.ScheduleSingleReminderAsync(
             new ReminderKey("notification-reminder"),
             DateTimeOffset.UtcNow.AddMilliseconds(100),
-            new TestMessage("Send Notification"));
+            new TestMessage("Send Notification"), ct: TestContext.Current.CancellationToken);
 
         // Assert - each reminder should be delivered as a ReminderEnvelope to its respective shard region
-        var billingEnvelope = await billingActor.ExpectMsgAsync<ReminderEnvelope<TestMessage>>(TimeSpan.FromSeconds(2));
+        var billingEnvelope = await billingActor.ExpectMsgAsync<ReminderEnvelope<TestMessage>>(TimeSpan.FromSeconds(2), cancellationToken: TestContext.Current.CancellationToken);
         billingEnvelope.Message.Content.Should().Be("Bill Customer");
 
-        var notificationEnvelope = await notificationActor.ExpectMsgAsync<ReminderEnvelope<TestMessage>>(TimeSpan.FromSeconds(2));
+        var notificationEnvelope = await notificationActor.ExpectMsgAsync<ReminderEnvelope<TestMessage>>(TimeSpan.FromSeconds(2), cancellationToken: TestContext.Current.CancellationToken);
         notificationEnvelope.Message.Content.Should().Be("Send Notification");
     }
 

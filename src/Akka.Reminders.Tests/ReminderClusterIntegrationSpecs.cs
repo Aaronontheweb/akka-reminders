@@ -6,7 +6,6 @@ using Akka.Hosting;
 using Akka.Hosting.TestKit;
 using Akka.Reminders.Sharding;
 using Akka.Reminders.Storage;
-using Xunit.Abstractions;
 
 namespace Akka.Reminders.Tests;
 
@@ -85,7 +84,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         await EnsureReminderSchedulerReady(client);
 
         // Get the shard region to observe messages
-        var shardRegion = await Sys.ActorSelection($"/system/sharding/{ShardRegionName}").ResolveOne(TimeSpan.FromSeconds(5));
+        var shardRegion = await Sys.ActorSelection($"/system/sharding/{ShardRegionName}").ResolveOne(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var probe = CreateTestProbe();
 
         // Subscribe to entity events
@@ -96,13 +95,13 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         var result = await client.ScheduleSingleReminderAsync(
             new ReminderKey("test-reminder"),
             DateTimeOffset.UtcNow.AddMilliseconds(100),
-            new EntityMessage("entity-1", "test message"));
+            new EntityMessage("entity-1", "test message"), ct: TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         // Wait for the reminder to be delivered
-        var received = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10));
+        var received = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("entity-1", received.EntityId);
         Assert.Equal("test message", received.Message);
     }
@@ -124,7 +123,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
             new ReminderKey("recurring-reminder"),
             DateTimeOffset.UtcNow.AddMilliseconds(100),
             TimeSpan.FromMilliseconds(500),
-            new EntityMessage("entity-2", "recurring message"));
+            new EntityMessage("entity-2", "recurring message"), ct: TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
@@ -132,20 +131,20 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         // Wait for multiple occurrences — first delivery traverses the full
         // cluster singleton → shard region → entity actor chain which has
         // higher latency on constrained CI runners.
-        var msg1 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10));
+        var msg1 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("entity-2", msg1.EntityId);
         Assert.Equal("recurring message", msg1.Message);
 
-        var msg2 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5));
+        var msg2 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("entity-2", msg2.EntityId);
         Assert.Equal("recurring message", msg2.Message);
 
-        var msg3 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5));
+        var msg3 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("entity-2", msg3.EntityId);
         Assert.Equal("recurring message", msg3.Message);
 
         // Cancel the reminder to stop it
-        await client.CancelReminderAsync(new ReminderKey("recurring-reminder"));
+        await client.CancelReminderAsync(new ReminderKey("recurring-reminder"), TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -165,17 +164,17 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         await client1.ScheduleSingleReminderAsync(
             new ReminderKey("reminder-1"),
             DateTimeOffset.UtcNow.AddMilliseconds(100),
-            new EntityMessage("entity-3", "message for entity-3"));
+            new EntityMessage("entity-3", "message for entity-3"), ct: TestContext.Current.CancellationToken);
 
         await client2.ScheduleSingleReminderAsync(
             new ReminderKey("reminder-2"),
             DateTimeOffset.UtcNow.AddMilliseconds(150),
-            new EntityMessage("entity-4", "message for entity-4"));
+            new EntityMessage("entity-4", "message for entity-4"), ct: TestContext.Current.CancellationToken);
 
         // Assert - Both entities should receive their messages
         var messages = new List<TestEntity.ReminderReceived>();
-        messages.Add(probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5)));
-        messages.Add(probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5)));
+        messages.Add(probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken));
+        messages.Add(probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken));
 
         // Verify both entities received their correct messages
         Assert.Contains(messages, m => m.EntityId == "entity-3" && m.Message == "message for entity-3");
@@ -200,15 +199,15 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         await client.ScheduleSingleReminderAsync(
             key,
             DateTimeOffset.UtcNow.AddSeconds(2),
-            new EntityMessage("entity-5", "should not be delivered"));
+            new EntityMessage("entity-5", "should not be delivered"), ct: TestContext.Current.CancellationToken);
 
-        var cancelResult = await client.CancelReminderAsync(key);
+        var cancelResult = await client.CancelReminderAsync(key, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(ReminderCancelResponseCode.Success, cancelResult.ResponseCode);
 
         // Wait longer than the reminder was scheduled for
-        probe.ExpectNoMsg(TimeSpan.FromSeconds(3));
+        probe.ExpectNoMsg(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
     }
 }
 

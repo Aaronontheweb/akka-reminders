@@ -12,10 +12,11 @@
     <PackageReference Include="Akka.Cluster.Hosting" />
     <PackageReference Include="Akka.Hosting.TestKit" />
     <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="FluentAssertions" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="Testcontainers.MsSql" />
     <PackageReference Include="Testcontainers.PostgreSql" />
-    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
 

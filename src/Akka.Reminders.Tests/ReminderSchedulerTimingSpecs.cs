@@ -5,7 +5,6 @@ using Akka.Hosting.TestKit;
 using Akka.Reminders.Sharding;
 using Akka.Reminders.Storage;
 using Akka.TestKit;
-using Xunit.Abstractions;
 
 namespace Akka.Reminders.Tests;
 
@@ -74,7 +73,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var result = await client.ScheduleSingleReminderAsync(
             new ReminderKey("test-reminder"),
             reminderTime,
-            "test message");
+            "test message", ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
@@ -84,7 +83,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"Advancing by 9 seconds...");
         testScheduler.Advance(TimeSpan.FromSeconds(9));
         Output?.WriteLine($"TestScheduler.Now after advance: {testScheduler.Now}");
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
+        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
 
         // Advance time by 2 more seconds (11 total) - reminder SHOULD fire now
         Output?.WriteLine($"Advancing by 2 more seconds...");
@@ -92,7 +91,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"TestScheduler.Now after second advance: {testScheduler.Now}");
 
         // Assert - Verify the reminder message was received
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("test message", envelope.Message);
     }
 
@@ -115,17 +114,17 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         await client.ScheduleSingleReminderAsync(
             new ReminderKey("reminder-3"),
             now.AddSeconds(30),
-            "third");
+            "third", ct: TestContext.Current.CancellationToken);
 
         await client.ScheduleSingleReminderAsync(
             new ReminderKey("reminder-1"),
             now.AddSeconds(10),
-            "first");
+            "first", ct: TestContext.Current.CancellationToken);
 
         await client.ScheduleSingleReminderAsync(
             new ReminderKey("reminder-2"),
             now.AddSeconds(20),
-            "second");
+            "second", ct: TestContext.Current.CancellationToken);
 
         Output?.WriteLine($"TestScheduler.Now after scheduling: {testScheduler.Now}");
 
@@ -133,28 +132,28 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"Advancing by 11 seconds...");
         testScheduler.Advance(TimeSpan.FromSeconds(11));
         Output?.WriteLine($"TestScheduler.Now after first advance: {testScheduler.Now}");
-        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("first", envelope1.Message);
         Output?.WriteLine($"Received first message");
 
         // Ack to prevent "first" from being re-delivered on the next fetch
-        await client.AckAsync(envelope1);
+        await client.AckAsync(envelope1, TestContext.Current.CancellationToken);
 
         // Wait for processing to complete and next timer to be scheduled
-        await AwaitConditionAsync(() => Task.FromResult(true), TimeSpan.FromMilliseconds(100));
+        await AwaitConditionAsync(() => Task.FromResult(true), TimeSpan.FromMilliseconds(100), cancellationToken: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(10));
-        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("second", envelope2.Message);
 
         // Ack to prevent "second" from being re-delivered on the next fetch
-        await client.AckAsync(envelope2);
+        await client.AckAsync(envelope2, TestContext.Current.CancellationToken);
 
         // Wait for processing to complete and next timer to be scheduled
-        await AwaitConditionAsync(() => Task.FromResult(true), TimeSpan.FromMilliseconds(100));
+        await AwaitConditionAsync(() => Task.FromResult(true), TimeSpan.FromMilliseconds(100), cancellationToken: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(10));
-        var envelope3 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope3 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("third", envelope3.Message);
     }
 
@@ -170,7 +169,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
 
         // Wait for scheduler to be initialized by sending a benign query
         // and verifying we get a proper response (not dead letter)
-        var initCheck = await client.ListRemindersAsync();
+        var initCheck = await client.ListRemindersAsync(TestContext.Current.CancellationToken);
         Assert.Equal(FetchRemindersResponseCode.Success, initCheck.ResponseCode);
 
         var testScheduler = (TestScheduler)Sys.Scheduler;
@@ -182,7 +181,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
             new ReminderKey("recurring-reminder"),
             now.AddSeconds(5),
             interval,
-            "recurring message");
+            "recurring message", ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
@@ -190,16 +189,16 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"Before first advance - TestScheduler.Now: {testScheduler.Now}");
         testScheduler.Advance(TimeSpan.FromSeconds(6));
         Output?.WriteLine($"After first advance - TestScheduler.Now: {testScheduler.Now}");
-        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("recurring message", envelope1.Message);
         Output?.WriteLine($"Received first recurring message");
 
         // Ack the first delivery so the scheduler schedules the next occurrence
-        await client.AckAsync(envelope1);
+        await client.AckAsync(envelope1, TestContext.Current.CancellationToken);
 
         // Allow async processing to complete, then verify the next occurrence is scheduled
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
-        var list1 = await client.ListRemindersAsync();
+        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+        var list1 = await client.ListRemindersAsync(TestContext.Current.CancellationToken);
         Assert.Single(list1.Reminders);
         Output?.WriteLine($"Next reminder scheduled for: {list1.Reminders[0].When}");
 
@@ -207,20 +206,20 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine($"Before second advance - TestScheduler.Now: {testScheduler.Now}");
         testScheduler.Advance(interval);
         Output?.WriteLine($"After second advance - TestScheduler.Now: {testScheduler.Now}");
-        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("recurring message", envelope2.Message);
 
         // Ack the second delivery
-        await client.AckAsync(envelope2);
+        await client.AckAsync(envelope2, TestContext.Current.CancellationToken);
 
         // Allow async processing to complete
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
-        var list2 = await client.ListRemindersAsync();
+        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+        var list2 = await client.ListRemindersAsync(TestContext.Current.CancellationToken);
         Assert.Single(list2.Reminders);
 
         // Verify third occurrence
         testScheduler.Advance(interval);
-        var envelope3 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope3 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("recurring message", envelope3.Message);
     }
 
@@ -238,12 +237,12 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
             new ReminderKey("deadline-reminder"),
             dueTime,
             "deadline message",
-            maxDeliveryWindow: TimeSpan.FromSeconds(2));
+            maxDeliveryWindow: TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(dueTime, envelope.DueTimeUtc);
         Assert.False(envelope.Deadline.IsInfinite);
@@ -269,12 +268,12 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
             new ReminderKey("ack-deadline-reminder"),
             dueTime,
             "ack deadline message",
-            maxDeliveryWindow: TimeSpan.FromSeconds(60));
+            maxDeliveryWindow: TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(dueTime, envelope.DueTimeUtc);
         Assert.False(envelope.Deadline.IsInfinite);
@@ -309,12 +308,12 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
             new ReminderKey("occurrence-deadline-reminder"),
             dueTime,
             "occurrence deadline message",
-            maxDeliveryWindow: TimeSpan.FromSeconds(2));
+            maxDeliveryWindow: TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(dueTime, envelope.DueTimeUtc);
         Assert.False(envelope.Deadline.IsInfinite);
@@ -340,12 +339,12 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var result = await client.ScheduleSingleReminderAsync(
             new ReminderKey("unbounded-reminder"),
             dueTime,
-            "unbounded message");
+            "unbounded message", ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(dueTime, envelope.DueTimeUtc);
         // Unbounded with more retries: deadline should be ack timeout, not infinite
@@ -368,16 +367,16 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
             new ReminderKey("latest-only-recurring"),
             now.AddSeconds(5),
             interval,
-            "recurring message");
+            "recurring message", ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(now.AddSeconds(5), envelope1.DueTimeUtc);
 
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
-        var reminders = await client.ListRemindersAsync();
+        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+        var reminders = await client.ListRemindersAsync(TestContext.Current.CancellationToken);
         Assert.Contains(reminders.Reminders, r => r.DueTimeUtc == now.AddSeconds(10));
     }
 
@@ -396,27 +395,27 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
             new ReminderKey("superseded-recurring"),
             now.AddSeconds(5),
             interval,
-            "recurring message");
+            "recurring message", ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope1 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
 
         // Let the scheduler finish persisting and timer-scheduling the superseding occurrence
         // before we advance virtual time again.
-        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
-        var reminders = await client.ListRemindersAsync();
+        testProbe.ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+        var reminders = await client.ListRemindersAsync(TestContext.Current.CancellationToken);
         Assert.Contains(reminders.Reminders, r => r.DueTimeUtc == now.AddSeconds(10));
 
         testScheduler.Advance(interval);
-        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope2 = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(now.AddSeconds(10), envelope2.DueTimeUtc);
 
-        var staleAck = await client.AckAsync(envelope1);
+        var staleAck = await client.AckAsync(envelope1, TestContext.Current.CancellationToken);
         Assert.Equal(ReminderAckResponseCode.NotFound, staleAck.ResponseCode);
 
-        var currentAck = await client.AckAsync(envelope2);
+        var currentAck = await client.AckAsync(envelope2, TestContext.Current.CancellationToken);
         Assert.Equal(ReminderAckResponseCode.Success, currentAck.ResponseCode);
     }
 
@@ -432,33 +431,33 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var dueTime = testScheduler.Now.AddSeconds(5);
         var key = new ReminderKey("nack-retry");
 
-        var scheduled = await client.ScheduleSingleReminderAsync(key, dueTime, "retry me");
+        var scheduled = await client.ScheduleSingleReminderAsync(key, dueTime, "retry me", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderScheduleResponseCode.Success, scheduled.ResponseCode);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var first = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        var firstNack = await client.NackAsync(first, "first failure");
+        var first = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        var firstNack = await client.NackAsync(first, "first failure", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderNackResponseCode.RetryScheduled, firstNack.ResponseCode);
         Assert.Equal(1, firstNack.AttemptCount);
 
-        var pending = await client.GetOccurrenceStatusAsync(first.Key, first.DueTimeUtc);
+        var pending = await client.GetOccurrenceStatusAsync(first.Key, first.DueTimeUtc, ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderOccurrenceStatusResponseCode.Success, pending.ResponseCode);
         Assert.Equal(ReminderCompletionStatus.Pending, pending.Status?.CompletionStatus);
         Assert.Equal("first failure", pending.Status?.LastFailureReason);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var second = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        var secondNack = await client.NackAsync(second, "second failure");
+        var second = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        var secondNack = await client.NackAsync(second, "second failure", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderNackResponseCode.RetryScheduled, secondNack.ResponseCode);
         Assert.Equal(2, secondNack.AttemptCount);
 
         testScheduler.Advance(TimeSpan.FromSeconds(11));
-        var third = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        var thirdNack = await client.NackAsync(third, "final failure");
+        var third = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        var thirdNack = await client.NackAsync(third, "final failure", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderNackResponseCode.Failed, thirdNack.ResponseCode);
         Assert.Equal(3, thirdNack.AttemptCount);
 
-        var failed = await client.GetOccurrenceStatusAsync(third.Key, third.DueTimeUtc);
+        var failed = await client.GetOccurrenceStatusAsync(third.Key, third.DueTimeUtc, ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderOccurrenceStatusResponseCode.Success, failed.ResponseCode);
         Assert.Equal(ReminderCompletionStatus.Failed, failed.Status?.CompletionStatus);
         Assert.Equal(3, failed.Status?.AttemptCount);
@@ -471,16 +470,16 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
         var client = Sys.ReminderClient().CreateClient("test-region", "ack-first");
-        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync()).ResponseCode);
+        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync(TestContext.Current.CancellationToken)).ResponseCode);
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var dueTime = testScheduler.Now.AddSeconds(5);
 
-        await client.ScheduleSingleReminderAsync(new ReminderKey("ack-first"), dueTime, "payload");
+        await client.ScheduleSingleReminderAsync(new ReminderKey("ack-first"), dueTime, "payload", ct: TestContext.Current.CancellationToken);
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
 
-        var ack = await client.AckAsync(envelope);
-        var nack = await client.NackAsync(envelope, "too late");
+        var ack = await client.AckAsync(envelope, ct: TestContext.Current.CancellationToken);
+        var nack = await client.NackAsync(envelope, "too late", ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderAckResponseCode.Success, ack.ResponseCode);
         Assert.Equal(ReminderNackResponseCode.NotFound, nack.ResponseCode);
@@ -492,16 +491,16 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
         var client = Sys.ReminderClient().CreateClient("test-region", "nack-first");
-        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync()).ResponseCode);
+        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync(TestContext.Current.CancellationToken)).ResponseCode);
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var dueTime = testScheduler.Now.AddSeconds(5);
 
-        await client.ScheduleSingleReminderAsync(new ReminderKey("nack-first"), dueTime, "payload");
+        await client.ScheduleSingleReminderAsync(new ReminderKey("nack-first"), dueTime, "payload", ct: TestContext.Current.CancellationToken);
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
 
-        var nack = await client.NackAsync(envelope, "failed");
-        var ack = await client.AckAsync(envelope);
+        var nack = await client.NackAsync(envelope, "failed", ct: TestContext.Current.CancellationToken);
+        var ack = await client.AckAsync(envelope, ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderNackResponseCode.RetryScheduled, nack.ResponseCode);
         Assert.Equal(ReminderAckResponseCode.NotFound, ack.ResponseCode);
@@ -513,13 +512,13 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("missing-region", testProbe);
         var client = Sys.ReminderClient().CreateClient("missing-region", "poison");
-        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync()).ResponseCode);
+        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync(TestContext.Current.CancellationToken)).ResponseCode);
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var dueTime = testScheduler.Now.AddSeconds(5);
         var key = new ReminderKey("missing-shard");
         const string failureReason = "ShardRegion [missing-region] not found";
 
-        var scheduled = await client.ScheduleSingleReminderAsync(key, dueTime, "payload");
+        var scheduled = await client.ScheduleSingleReminderAsync(key, dueTime, "payload", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderScheduleResponseCode.Success, scheduled.ResponseCode);
         Assert.True(_resolver.UnregisterShardRegion("missing-region"));
 
@@ -528,14 +527,14 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         {
             var status = await client.GetOccurrenceStatusAsync(key, dueTime);
             Assert.Equal(1, status.Status?.AttemptCount);
-        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50));
+        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50), cancellationToken: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
         await AwaitAssertAsync(async () =>
         {
             var status = await client.GetOccurrenceStatusAsync(key, dueTime);
             Assert.Equal(2, status.Status?.AttemptCount);
-        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50));
+        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50), cancellationToken: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(11));
         await AwaitAssertAsync(async () =>
@@ -545,7 +544,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
             Assert.Equal(3, status.Status?.AttemptCount);
             Assert.Equal(failureReason, status.Status?.LastFailureReason);
             Assert.Null(status.Status?.NextAttemptAtUtc);
-        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50));
+        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(50), cancellationToken: TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -554,7 +553,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var testProbe = CreateTestProbe();
         _resolver.RegisterShardRegion("test-region", testProbe);
         var client = Sys.ReminderClient().CreateClient("test-region", "recurring-poison");
-        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync()).ResponseCode);
+        Assert.Equal(FetchRemindersResponseCode.Success, (await client.ListRemindersAsync(TestContext.Current.CancellationToken)).ResponseCode);
         var testScheduler = (TestScheduler)Sys.Scheduler;
         var dueTime = testScheduler.Now.AddSeconds(5);
         var key = new ReminderKey("recurring-poison");
@@ -563,22 +562,22 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
             key,
             dueTime,
             TimeSpan.FromSeconds(60),
-            "payload");
+            "payload", ct: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var first = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        await client.NackAsync(first, "first failure");
+        var first = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        await client.NackAsync(first, "first failure", ct: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(6));
-        var second = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        await client.NackAsync(second, "second failure");
+        var second = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        await client.NackAsync(second, "second failure", ct: TestContext.Current.CancellationToken);
 
         testScheduler.Advance(TimeSpan.FromSeconds(11));
-        var third = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
-        var terminal = await client.NackAsync(third, "final failure");
+        var third = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        var terminal = await client.NackAsync(third, "final failure", ct: TestContext.Current.CancellationToken);
         Assert.Equal(ReminderNackResponseCode.Failed, terminal.ResponseCode);
 
-        var reminders = await client.ListRemindersAsync();
+        var reminders = await client.ListRemindersAsync(TestContext.Current.CancellationToken);
         Assert.Contains(reminders.Reminders, reminder => reminder.DueTimeUtc == dueTime.AddSeconds(60));
     }
 
@@ -600,17 +599,17 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         await client.ScheduleSingleReminderAsync(
             key,
             now.AddSeconds(10),
-            "test message");
+            "test message", ct: TestContext.Current.CancellationToken);
 
         // Act - Cancel the reminder before it fires
-        var cancelResult = await client.CancelReminderAsync(key);
+        var cancelResult = await client.CancelReminderAsync(key, TestContext.Current.CancellationToken);
         Assert.Equal(ReminderCancelResponseCode.Success, cancelResult.ResponseCode);
 
         // Advance time past when reminder should have fired
         testScheduler.Advance(TimeSpan.FromSeconds(15));
 
         // Assert - Verify no message was received
-        testProbe.ExpectNoMsg(TimeSpan.FromSeconds(1));
+        testProbe.ExpectNoMsg(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -630,7 +629,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         var result = await client.ScheduleSingleReminderAsync(
             new ReminderKey("immediate-reminder"),
             now.AddMilliseconds(500), // Within 1 second slippage
-            "immediate message");
+            "immediate message", ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
@@ -640,7 +639,7 @@ public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
         testScheduler.Advance(TimeSpan.FromSeconds(2));
 
         // Assert
-        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5));
+        var envelope = await testProbe.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("immediate message", envelope.Message);
     }
 }

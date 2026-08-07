@@ -11,7 +11,7 @@ public sealed class SqlCompatibilitySpecs : IAsyncLifetime
     private SqlReminderStorage? _storage;
     private string? _databasePath;
 
-    public Task InitializeAsync()
+    public ValueTask InitializeAsync()
     {
         _system = ActorSystem.Create("compatibility-system");
         _databasePath = Path.Combine(Path.GetTempPath(), $"akka-reminders-compat-{Guid.NewGuid():N}.db");
@@ -20,10 +20,10 @@ public sealed class SqlCompatibilitySpecs : IAsyncLifetime
         var settings = SqlReminderStorageSettings.CreateSqlite(connectionString);
 
         _storage = new SqlReminderStorage(settings, _system);
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_system != null)
         {
@@ -43,8 +43,8 @@ public sealed class SqlCompatibilitySpecs : IAsyncLifetime
         var key = new ReminderKey("compat-key");
         var reminder = new ScheduledReminder(entity, key, DateTimeOffset.UtcNow.AddMinutes(5), "hello");
 
-        var scheduled = await _storage!.ScheduleReminderAsync(reminder);
-        var reminders = await _storage.GetRemindersForEntityAsync(entity);
+        var scheduled = await _storage!.ScheduleReminderAsync(reminder, TestContext.Current.CancellationToken);
+        var reminders = await _storage.GetRemindersForEntityAsync(entity, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(ReminderScheduleResponseCode.Success, scheduled.ResponseCode);
         Assert.Single(reminders);
