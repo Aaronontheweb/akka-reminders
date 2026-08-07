@@ -6,12 +6,17 @@
 - Added durable occurrence status queries for active and terminal delivery states.
 - Added occurrence status support for the in-memory, SQLite, PostgreSQL, and SQL Server providers.
 
+**Bug Fixes**
+
+- All reminder protocol messages now serialize through the built-in reminder wire serializer. `CancelReminder`, `CancelAllReminders`, `RemindersCancelled`, and `GetReminders` previously fell back to the actor system's default serializer; they now use explicit wire manifests (`cr`, `car`, `rc`, `gr`).
+
 **Compatibility**
 
 - **Breaking:** Extended `IReminderClient` with negative acknowledgement and occurrence status operations.
 - **Breaking:** Extended `IReminderStorage` with exact awaiting-ack and occurrence status queries.
 - Custom client mocks and storage providers must implement the new members.
 - Reused the 0.6.0 storage schema, so this release needs no new database migration.
+- Existing wire manifests (`re`, `ra`, `rar`, `sr`, `rsd`, `rfe`) are unchanged, so 0.6.0 and 0.7.0 nodes interoperate during a rolling upgrade.
 - Require the scheduler to run 0.7.0 before consumers use the new delivery-control messages.
 
 #### 0.6.0 May 28th 2026 ####
