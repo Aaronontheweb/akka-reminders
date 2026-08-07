@@ -4,7 +4,6 @@ using Akka.Hosting;
 using Akka.Reminders.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Xunit.Abstractions;
 
 namespace Akka.Reminders.Tests;
 

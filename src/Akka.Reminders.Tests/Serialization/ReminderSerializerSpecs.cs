@@ -2,7 +2,6 @@ using Akka.Hosting;
 using Akka.Hosting.TestKit;
 using Akka.Reminders.Serialization;
 using Akka.Serialization;
-using Xunit.Abstractions;
 
 namespace Akka.Reminders.Tests.Serialization;
 

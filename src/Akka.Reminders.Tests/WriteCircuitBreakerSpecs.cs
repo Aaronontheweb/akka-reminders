@@ -4,7 +4,6 @@ using Akka.Hosting.TestKit;
 using Akka.Reminders.Sharding;
 using Akka.Reminders.Storage;
 using Akka.TestKit;
-using Xunit.Abstractions;
 
 namespace Akka.Reminders.Tests;
 
@@ -103,7 +102,7 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
 
         // Tick 1: delivery-tracking write fails before any reminders are sent -> circuit opens.
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
-        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -124,7 +123,7 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal(5, messages.Count);
 
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
-        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -143,7 +142,7 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
 
         // Failed writes now prevent delivery entirely, reducing the first-failure blast radius to zero.
-        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -162,13 +161,13 @@ public class WriteCircuitBreakerSpecs : Akka.Hosting.TestKit.TestKit
 
         // Outage tick: failed writes prevent any delivery.
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
-        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
 
         // Database recovers: the probe succeeds, closes the circuit, and the same run resumes full-batch processing.
         _storage.FailWrites = false;
 
         testScheduler.Advance(TimeSpan.FromMilliseconds(100));
         await CollectMessages(testProbe, 6, TimeSpan.FromSeconds(5));
-        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500));
+        await testProbe.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
     }
 }
