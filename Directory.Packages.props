@@ -15,7 +15,7 @@
   <!-- Test dependencies -->
   <ItemGroup>
     <PackageVersion Include="Akka.Hosting.TestKit" Version="$(AkkaHostingVersion)" />
-    <PackageVersion Include="coverlet.collector" Version="8.0.0" />
+    <PackageVersion Include="coverlet.collector" Version="10.0.1" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
     <PackageVersion Include="Testcontainers.MsSql" Version="4.11.0" />
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.11.0" />
