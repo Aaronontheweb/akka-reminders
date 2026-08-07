@@ -42,6 +42,10 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
             .AddHocon(ConfigurationFactory.ParseString(@"
                 akka.actor.serialize-messages = on
                 akka.actor.serialization-settings.allow-unregistered-types = off
+                akka.actor.serialization-bindings {
+                    ""Akka.Actor.Identify"" = hyperion
+                    ""Akka.Hosting.TestKit.TestKit+StableTestProbeRef+UpdateTarget, Akka.Hosting.TestKit"" = hyperion
+                }
             "), HoconAddMode.Prepend);
     }
 
