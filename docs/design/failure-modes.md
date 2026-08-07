@@ -276,5 +276,9 @@ Acks are buffered in memory and flushed in batches rather than written per-ack. 
 ### Custom storage providers opt in to status queries
 
 `IReminderStorage` remains unchanged for source and binary compatibility.
+
+The new commands have new Akka serializer manifests. Existing manifests keep
+their 0.6 layouts. During an upgrade, deploy the 0.7 scheduler before consumers
+call `NackAsync` or `GetOccurrenceStatusAsync`.
 Custom providers implement `IReminderOccurrenceStatusStorage` only when they need the new query.
 Negative acknowledgement uses the existing durable mutation contract.

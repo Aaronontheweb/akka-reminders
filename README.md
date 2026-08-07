@@ -574,6 +574,10 @@ var status = await reminders.GetOccurrenceStatusAsync(
 It returns `Failed` or `Expired` when the occurrence cannot retry.
 The status query returns terminal rows until normal pruning removes them.
 Official storage providers support status queries without a schema migration.
+
+The new delivery-control messages use new serializer manifests. Upgrade the
+reminder scheduler before a consumer calls this API. A 0.6 scheduler cannot
+read the 0.7 negative acknowledgement or status messages.
 Custom providers can implement `IReminderOccurrenceStatusStorage` to enable the query.
 
 ### Acknowledgement Protocol

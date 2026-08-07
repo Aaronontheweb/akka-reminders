@@ -10,6 +10,7 @@
 
 - Kept `IReminderClient` and `IReminderStorage` unchanged.
 - Reused the 0.6.0 storage schema, so this release needs no new database migration.
+- Require the scheduler to run 0.7.0 before consumers use the new delivery-control messages.
 
 #### 0.6.0 May 28th 2026 ####
 
