@@ -71,6 +71,33 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
         Output?.WriteLine("Reminder system started successfully under strict serialization.");
     }
 
+    /// <summary>
+    /// The ReminderScheduler stashes all incoming commands while it performs its
+    /// initial storage load (LoadReminderOverview). A command issued in that window
+    /// can exceed the client's Ask timeout on a loaded CI runner, surfacing as
+    /// ReminderScheduleResponseCode.Error even though the scheduler eventually
+    /// processes the message.
+    ///
+    /// This is a deterministic readiness barrier: poll a read (which follows the
+    /// same Ask path and is also stashed until init completes) until the scheduler
+    /// actually answers. Once it answers, the stash window is closed and all
+    /// subsequent commands are processed immediately.
+    /// </summary>
+    private async Task WaitForSchedulerReadyAsync(IReminderClient client)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var response = await client.ListRemindersAsync(ct);
+            if (response.ResponseCode != FetchRemindersResponseCode.Error)
+                return; // scheduler answered -> ready
+
+            await Task.Delay(100, ct);
+        }
+        throw new TimeoutException("ReminderScheduler did not become ready within 30s");
+    }
+
     [Fact]
     public async Task StrictSerialization_ShouldAllowSchedulingAndDelivery()
     {
@@ -80,6 +107,9 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
 
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("billing-shard", "customer-123");
+
+        // Deterministically wait out scheduler init before the first schedule
+        await WaitForSchedulerReadyAsync(client);
 
         var key = new ReminderKey("strict-serial-check");
         var message = new StrictSerialTestMsg("hello");
@@ -107,6 +137,8 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
 
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("retry-shard", "entity-1");
+        await WaitForSchedulerReadyAsync(client);
+
         var key = new ReminderKey("strict-retry");
         var when = DateTimeOffset.UtcNow.AddMilliseconds(100);
 
@@ -136,6 +168,8 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("billing-shard", "customer-123");
 
+        await WaitForSchedulerReadyAsync(client);
+
         var key = new ReminderKey("cancel-me");
         var message = new StrictSerialTestMsg("cancel");
         var when = DateTimeOffset.UtcNow.AddMilliseconds(200);
@@ -158,6 +192,8 @@ public class StrictSerializationSpecs : Akka.Hosting.TestKit.TestKit
 
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient("billing-shard", "customer-123");
+
+        await WaitForSchedulerReadyAsync(client);
 
         // Act
         var result = await client.CancelAllRemindersAsync(TestContext.Current.CancellationToken);
