@@ -1,3 +1,14 @@
+#### 1.5.73 October 6th 2026 ####
+
+**Bug Fixes**
+
+- Fixed a recurring reminder that stopped firing forever when the scheduler fell behind by more than one interval. The scheduler now skips the stale occurrence and the series continues at the next slot ([#143](https://github.com/Aaronontheweb/akka-reminders/issues/143), [#146](https://github.com/Aaronontheweb/akka-reminders/pull/146)).
+
+**Compatibility**
+
+- Requires Akka.NET 1.5.73 (Akka.Hosting 1.5.73). Apps that pin an older Akka.Hosting under central package management must bump it, or NuGet reports NU1605.
+- Package versions now track Akka.NET's version. The previous release was 0.7.0.
+
 #### 0.7.0 August 7th 2026 ####
 
 **New Features**
