@@ -224,6 +224,13 @@ public interface IReminderStorage
     /// <summary>
     /// Marks all active reminders whose delivery deadline has passed as expired.
     /// </summary>
+    /// <remarks>
+    /// Must not expire a <see cref="ReminderCompletionStatus.Pending"/> occurrence that has a repeat interval.
+    /// The scheduler ends that occurrence itself and writes the next one in the same commit; otherwise the
+    /// recurring series would be lost. For the same reason <see cref="GetNextRemindersAsync"/>,
+    /// <see cref="GetRemindersOverviewAsync"/> and <see cref="GetRemindersForEntityAsync"/> must keep returning
+    /// such occurrences after their deadline has passed.
+    /// </remarks>
     /// <param name="now">Current time used as the expiration cutoff.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The number of reminders transitioned to <see cref="ReminderCompletionStatus.Expired"/>.</returns>
