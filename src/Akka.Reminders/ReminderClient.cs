@@ -45,6 +45,9 @@ internal sealed class ReminderClient : IReminderClient
             RepeatInterval: null,
             MaxDeliveryWindow: maxDeliveryWindow);
 
+        if (ReminderValidation.Validate(command) is { } validationError)
+            return new ReminderProtocol.ReminderScheduled(command, ReminderScheduleResponseCode.Error, validationError);
+
         try
         {
             var response = await _schedulerProxy.Ask<ReminderProtocol.ReminderScheduled>(
@@ -89,13 +92,8 @@ internal sealed class ReminderClient : IReminderClient
             RepeatInterval: interval,
             MaxDeliveryWindow: maxDeliveryWindow);
 
-        if (interval <= TimeSpan.Zero)
-        {
-            return new ReminderProtocol.ReminderScheduled(
-                command,
-                ReminderScheduleResponseCode.Error,
-                $"Recurring reminder interval must be greater than zero, but was [{interval}].");
-        }
+        if (ReminderValidation.Validate(command) is { } validationError)
+            return new ReminderProtocol.ReminderScheduled(command, ReminderScheduleResponseCode.Error, validationError);
 
         try
         {

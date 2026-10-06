@@ -515,7 +515,10 @@ Task<ReminderScheduled> ScheduleRecurringReminderAsync(
 
 Schedules a recurring reminder that fires repeatedly at the specified interval. Recurring reminders are
 latest-only: each occurrence expires when the next occurrence becomes due, or sooner if `maxDeliveryWindow`
-produces an earlier deadline.
+produces an earlier deadline. If the scheduler falls behind (restart, failover, long pauses) and an
+occurrence passes its deadline before delivery, that occurrence is marked expired and the series
+continues at the next slot whose deadline has not passed; missed slots are skipped. `interval` and
+`maxDeliveryWindow` must be greater than zero.
 
 #### Cancel Reminder
 ```csharp
@@ -582,6 +585,15 @@ Custom providers must implement the new `IReminderStorage` query operations.
 
 `MaxDeliveryAttempts` applies to one occurrence. A recurring reminder creates a
 new occurrence with a new retry budget. A failed occurrence does not disable the recurring reminder.
+
+#### Custom storage providers and decorators
+
+A custom `IReminderStorage` keeps recurring series alive under scheduler lag only if it implements
+`IRecurringRollForwardStorage` (see its XML documentation for the contract). The scheduler detects
+the interface on the storage instance it is given, so a decorator that wraps another storage
+(logging, metrics, fault injection) must implement `IRecurringRollForwardStorage` itself and forward
+every call, including `CommitReminderMutationsAsync` with the new batch lists. A decorator that only
+implements `IReminderStorage` silently switches the scheduler back to the older behavior.
 
 ### Acknowledgement Protocol
 
@@ -778,6 +790,7 @@ public async Task Reminder_should_fire_at_scheduled_time()
 
 - **At-least-once delivery with acknowledgement**: Reminders are wrapped in `ReminderEnvelope<T>` and delivered via `Tell`. Recipients call `IReminderClient.AckAsync(envelope)` to confirm receipt. Unacknowledged reminders are retried with exponential backoff until they expire or exhaust attempts. Consumers must be idempotent.
 - **Durable persistence**: Reminders survive actor restarts and cluster failures
+- **Recurring series survive scheduler lag**: An occurrence that expires before delivery is replaced by the next live slot in the same storage commit
 - **Deadline-bounded retries**: Failed deliveries retry with exponential backoff inside each occurrence's absolute delivery deadline
 - **Cluster singleton**: Single scheduler instance with automatic failover
 - **Occurrence identity**: Reminders track delivery attempts, deadlines, and due-time identity per occurrence

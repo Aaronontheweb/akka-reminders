@@ -52,7 +52,13 @@ internal sealed class SqliteDialect : ISqlDialect
             """;
     }
 
-    public string GetBatchUpsertRemindersSql(string tableName, int count)
+    /// <summary>
+    /// Insert-or-update for pending occurrences. With <paramref name="activeRowsOnly"/> an existing row is
+    /// updated only while it is still active; a cancelled, delivered, expired, or failed row is left alone.
+    /// The scheduler's commit path uses that so a retry can never revive an occurrence that a concurrent
+    /// cancel already ended. Scheduling a reminder (which cancels the key first) resets any row.
+    /// </summary>
+    public string GetBatchUpsertRemindersSql(string tableName, int count, bool activeRowsOnly = false)
     {
         var fullTableName = $"\"{tableName}\"";
         var values = string.Join(",\n                ",
@@ -82,7 +88,7 @@ internal sealed class SqliteDialect : ISqlDialect
                 completed_at_utc = NULL,
                 completion_status = 'Pending',
                 delivered_at_utc = NULL,
-                ack_deadline_utc = NULL;
+                ack_deadline_utc = NULL{(activeRowsOnly ? $"\n            WHERE {fullTableName}.is_completed = 0" : string.Empty)};
             """;
     }
 
@@ -360,29 +366,95 @@ internal sealed class SqliteDialect : ISqlDialect
             """;
     }
 
-    public string GetInsertRecurringSuccessorsSql(string tableName, int count)
+    /// <summary>
+    /// Inserts recurring successors. For each successor the batch holds two statements: the computed
+    /// slot, then the slot after it, which runs only if the computed slot holds a completed occurrence
+    /// that was not cancelled (it was already delivered, expired, or failed; the series continues
+    /// after it). Each statement:
+    /// <list type="bullet">
+    /// <item><description>does nothing when an active occurrence of the series is due after the predecessor (series guard);</description></item>
+    /// <item><description>inserts the slot when no row has its key;</description></item>
+    /// <item><description>replaces a <c>Cancelled</c> row with the same key (left behind when the reminder was
+    /// rescheduled), and only when <paramref name="requireAwaitingPredecessor"/> is false or the predecessor
+    /// moved to <c>AwaitingAck</c> earlier in this transaction;</description></item>
+    /// <item><description>never touches a row that is active, delivered, expired, or failed.</description></item>
+    /// </list>
+    /// </summary>
+    public string GetInsertRecurringSuccessorsSql(string tableName, int count, bool requireAwaitingPredecessor)
     {
         var fullTableName = $"\"{tableName}\"";
 
-        return string.Join("\n", Enumerable.Range(0, count).Select(i => $"""
-            INSERT INTO {fullTableName}
-                (shard_region_name, entity_id, reminder_key, when_utc, due_time_utc, repeat_interval_ticks,
-                 serializer_id, manifest, payload, attempt_count, last_failure_reason,
-                 max_delivery_window_ticks, delivery_deadline_utc,
-                 is_completed, completed_at_utc, completion_status, delivered_at_utc, ack_deadline_utc)
-            SELECT @ShardRegionName{i}, @EntityId{i}, @ReminderKey{i}, @WhenUtc{i}, @DueTimeUtc{i}, @RepeatIntervalTicks{i},
-                   @SerializerId{i}, @Manifest{i}, @Payload{i}, @AttemptCount{i}, @LastFailureReason{i},
-                   @MaxDeliveryWindowTicks{i}, @DeliveryDeadlineUtc{i},
-                   0, NULL, 'Pending', NULL, NULL
-            WHERE NOT EXISTS (
-                SELECT 1 FROM {fullTableName}
-                WHERE shard_region_name = @ShardRegionName{i}
-                  AND entity_id = @EntityId{i}
-                  AND reminder_key = @ReminderKey{i}
-                  AND is_completed = 0
-                  AND due_time_utc > @PredecessorDueTimeUtc{i})
-            ON CONFLICT (shard_region_name, entity_id, reminder_key, due_time_utc) DO NOTHING;
-            """));
+        string Statement(int i, string slot, bool afterCompletedSlot)
+        {
+            var slotCondition = afterCompletedSlot
+                ? $"""
+
+                  AND EXISTS (
+                    SELECT 1 FROM {fullTableName} c
+                    WHERE c.shard_region_name = @ShardRegionName{i}
+                      AND c.entity_id = @EntityId{i}
+                      AND c.reminder_key = @ReminderKey{i}
+                      AND c.due_time_utc = @DueTimeUtc{i}
+                      AND c.is_completed = 1
+                      AND c.completion_status <> 'Cancelled')
+                """
+                : string.Empty;
+            var predecessorCondition = requireAwaitingPredecessor
+                ? $"""
+
+                AND EXISTS (
+                    SELECT 1 FROM {fullTableName} p
+                    WHERE p.shard_region_name = @ShardRegionName{i}
+                      AND p.entity_id = @EntityId{i}
+                      AND p.reminder_key = @ReminderKey{i}
+                      AND p.due_time_utc = @PredecessorDueTimeUtc{i}
+                      AND p.is_completed = 0
+                      AND p.completion_status = 'AwaitingAck')
+                """
+                : string.Empty;
+
+            return $"""
+                INSERT INTO {fullTableName}
+                    (shard_region_name, entity_id, reminder_key, when_utc, due_time_utc, repeat_interval_ticks,
+                     serializer_id, manifest, payload, attempt_count, last_failure_reason,
+                     max_delivery_window_ticks, delivery_deadline_utc,
+                     is_completed, completed_at_utc, completion_status, delivered_at_utc, ack_deadline_utc)
+                SELECT @ShardRegionName{i}, @EntityId{i}, @ReminderKey{i}, @{slot}WhenUtc{i}, @{slot}DueTimeUtc{i}, @RepeatIntervalTicks{i},
+                       @SerializerId{i}, @Manifest{i}, @Payload{i}, @AttemptCount{i}, @LastFailureReason{i},
+                       @MaxDeliveryWindowTicks{i}, @{slot}DeliveryDeadlineUtc{i},
+                       0, NULL, 'Pending', NULL, NULL
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {fullTableName} g
+                    WHERE g.shard_region_name = @ShardRegionName{i}
+                      AND g.entity_id = @EntityId{i}
+                      AND g.reminder_key = @ReminderKey{i}
+                      AND g.is_completed = 0
+                      AND g.due_time_utc > @PredecessorDueTimeUtc{i}){slotCondition}
+                ON CONFLICT (shard_region_name, entity_id, reminder_key, due_time_utc) DO UPDATE SET
+                    when_utc = excluded.when_utc,
+                    repeat_interval_ticks = excluded.repeat_interval_ticks,
+                    serializer_id = excluded.serializer_id,
+                    manifest = excluded.manifest,
+                    payload = excluded.payload,
+                    attempt_count = excluded.attempt_count,
+                    last_failure_reason = excluded.last_failure_reason,
+                    max_delivery_window_ticks = excluded.max_delivery_window_ticks,
+                    delivery_deadline_utc = excluded.delivery_deadline_utc,
+                    is_completed = 0,
+                    completed_at_utc = NULL,
+                    completion_status = 'Pending',
+                    delivered_at_utc = NULL,
+                    ack_deadline_utc = NULL
+                WHERE {fullTableName}.is_completed = 1
+                  AND {fullTableName}.completion_status = 'Cancelled'{predecessorCondition};
+                """;
+        }
+
+        return string.Join("\n", Enumerable.Range(0, count).SelectMany(i => new[]
+        {
+            Statement(i, string.Empty, afterCompletedSlot: false),
+            Statement(i, "Next", afterCompletedSlot: true)
+        }));
     }
 
     public DbConnection CreateConnection(string connectionString)

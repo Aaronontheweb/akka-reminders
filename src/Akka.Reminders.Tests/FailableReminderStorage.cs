@@ -29,6 +29,15 @@ internal sealed class FailableReminderStorage : IRecurringRollForwardStorage
     public bool FailReads { get; set; }
 
     /// <summary>
+    /// When true, GetNextRemindersAsync (the scheduler's due-reminder fetch) throws.
+    /// </summary>
+    public bool FailDueReminderFetches { get; set; }
+
+    private int _fetchAttempts;
+
+    public int FetchAttempts => Volatile.Read(ref _fetchAttempts);
+
+    /// <summary>
     /// When true, MarkRemindersAsCompletedAsync throws.
     /// </summary>
     public bool FailMarkCompletedWrites { get; set; }
@@ -110,6 +119,9 @@ internal sealed class FailableReminderStorage : IRecurringRollForwardStorage
     public Task<PendingRemindersWithSummary> GetNextRemindersAsync(DateTimeOffset untilDeadline, DateTimeOffset now,
         ReminderBatchSize maxCount, CancellationToken ct = default)
     {
+        Interlocked.Increment(ref _fetchAttempts);
+        if (FailDueReminderFetches)
+            throw new TimeoutException("Simulated database read timeout");
         return _inner.GetNextRemindersAsync(untilDeadline, now, maxCount, ct);
     }
 

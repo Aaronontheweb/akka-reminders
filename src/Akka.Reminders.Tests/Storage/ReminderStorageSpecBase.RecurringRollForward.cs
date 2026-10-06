@@ -199,34 +199,216 @@ public abstract partial class ReminderStorageSpecBase
         Assert.Null(await StatusAsync(second));
     }
 
+    /// <summary>
+    /// Puts one occurrence in a state without touching the other occurrences of its key
+    /// (a real cancel would cancel the whole key).
+    /// </summary>
+    private async Task PutOnlyThisOccurrenceInStateAsync(ScheduledReminder reminder, ReminderCompletionStatus state, DateTimeOffset now)
+    {
+        await AddOccurrenceAsync(reminder);
+        switch (state)
+        {
+            case ReminderCompletionStatus.Pending:
+                break;
+            case ReminderCompletionStatus.AwaitingAck:
+                await MoveToAwaitingAckAsync(reminder, now);
+                break;
+            case ReminderCompletionStatus.Delivered:
+                await MoveToAwaitingAckAsync(reminder, now);
+                Assert.True((await Storage!.AcknowledgeReminderAsync(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, Ct)).Success);
+                break;
+            case ReminderCompletionStatus.Cancelled:
+            case ReminderCompletionStatus.Expired:
+                Assert.True(await Storage!.MarkRemindersAsCompletedAsync(
+                    [new CompletedReminder(reminder.Entity, reminder.Key, reminder.DueTimeUtc, now, state)], Ct));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(state), state, null);
+        }
+
+        Assert.Equal(state, (await StatusAsync(reminder))?.CompletionStatus);
+    }
+
     [Theory]
-    [InlineData(ReminderCompletionStatus.Pending)]
-    [InlineData(ReminderCompletionStatus.AwaitingAck)]
-    [InlineData(ReminderCompletionStatus.Delivered)]
-    [InlineData(ReminderCompletionStatus.Cancelled)]
-    public async Task CommitReminderMutationsAsync_Should_NotResetExistingRow_When_SuccessorAlreadyExists(
-        ReminderCompletionStatus state)
+    [InlineData(ReminderCompletionStatus.Pending, true)]
+    [InlineData(ReminderCompletionStatus.Pending, false)]
+    [InlineData(ReminderCompletionStatus.AwaitingAck, true)]
+    [InlineData(ReminderCompletionStatus.AwaitingAck, false)]
+    [InlineData(ReminderCompletionStatus.Delivered, true)]
+    [InlineData(ReminderCompletionStatus.Delivered, false)]
+    [InlineData(ReminderCompletionStatus.Expired, true)]
+    [InlineData(ReminderCompletionStatus.Cancelled, true)]
+    [InlineData(ReminderCompletionStatus.Cancelled, false)]
+    public async Task CommitReminderMutationsAsync_Should_HandleExistingSuccessorRow_ByState(
+        ReminderCompletionStatus state, bool predecessorDeliveredInBatch)
     {
         var now = WholeSecondNow();
-        var existing = Recurring(CreateTestEntity("absent", state.ToString()), CreateTestKey("absent"),
-            now.AddSeconds(5), TimeSpan.FromSeconds(10), attemptCount: 3, lastFailureReason: "kept");
-        await PutInStateAsync(existing, state, now);
+        var interval = TimeSpan.FromSeconds(10);
+        var entity = CreateTestEntity("existing", $"{state}-{predecessorDeliveredInBatch}");
+        var key = CreateTestKey("existing");
+        var predecessor = Recurring(entity, key, now.AddSeconds(-5), interval);
+        var existing = Recurring(entity, key, now.AddSeconds(5), interval, attemptCount: 3, lastFailureReason: "kept");
+        var following = Recurring(entity, key, now.AddSeconds(15), interval);
+        await AddOccurrenceAsync(predecessor);
+        await PutOnlyThisOccurrenceInStateAsync(existing, state, now);
         var before = await StatusAsync(existing);
 
         var replacement = existing with { AttemptCount = 0, LastFailureReason = null, Message = "replacement" };
-        var batch = new ReminderMutationBatch([], [], [])
+        IReadOnlyList<AwaitingAckReminder> delivery = predecessorDeliveredInBatch
+            ? [new AwaitingAckReminder(entity, key, predecessor.DueTimeUtc, now, now.AddMinutes(1))]
+            : [];
+        Assert.True(await Storage!.CommitReminderMutationsAsync(new ReminderMutationBatch([], [], delivery)
         {
-            RecurringSuccessors = [new RecurringSuccessor(replacement, now.AddSeconds(-5))]
-        };
-        Assert.True(await Storage!.CommitReminderMutationsAsync(batch, Ct));
+            RecurringSuccessors = [new RecurringSuccessor(replacement, predecessor.DueTimeUtc)]
+        }, Ct));
 
         var after = await StatusAsync(existing);
+        if (state == ReminderCompletionStatus.Cancelled && predecessorDeliveredInBatch)
+        {
+            // Left behind by a reschedule: the winning predecessor brings the slot back.
+            Assert.Equal(ReminderCompletionStatus.Pending, after?.CompletionStatus);
+            Assert.Equal(0, after?.AttemptCount);
+            Assert.Null(after?.LastFailureReason);
+            Assert.Null(await StatusAsync(following));
+            return;
+        }
+
+        // Never reset: active rows, delivered/expired rows, and cancelled rows without a winning predecessor.
         Assert.Equal(state, after?.CompletionStatus);
         Assert.Equal(3, after?.AttemptCount);
         Assert.Equal("kept", after?.LastFailureReason);
         Assert.Equal(before?.AckDeadlineUtc, after?.AckDeadlineUtc);
         Assert.Equal(before?.CompletedAtUtc, after?.CompletedAtUtc);
+
+        // A slot that already completed (delivered or expired) does not end the series: it continues one slot later.
+        var expectFollowing = state is ReminderCompletionStatus.Delivered or ReminderCompletionStatus.Expired;
+        Assert.Equal(expectFollowing ? ReminderCompletionStatus.Pending : null, (await StatusAsync(following))?.CompletionStatus);
     }
+
+    [Fact]
+    public async Task CommitReminderMutationsAsync_Should_ReplaceCancelledSuccessor_When_RollForwardWins()
+    {
+        var now = WholeSecondNow();
+        var entity = CreateTestEntity("replace", "roll");
+        var key = CreateTestKey("replace");
+        var predecessor = Recurring(entity, key, now.AddSeconds(-10));
+        var successor = NextSlot(predecessor, now);
+        await AddOccurrenceAsync(predecessor);
+        await PutOnlyThisOccurrenceInStateAsync(successor with { AttemptCount = 2 }, ReminderCompletionStatus.Cancelled, now);
+
+        Assert.True(await Storage!.CommitReminderMutationsAsync(
+            RollForwardBatch(new RecurringRollForward(predecessor, ReminderCompletionStatus.Expired, now, successor)), Ct));
+
+        Assert.Equal(ReminderCompletionStatus.Expired, (await StatusAsync(predecessor))?.CompletionStatus);
+        var status = await StatusAsync(successor);
+        Assert.Equal(ReminderCompletionStatus.Pending, status?.CompletionStatus);
+        Assert.Equal(0, status?.AttemptCount);
+    }
+
+    [Fact]
+    public async Task Reschedule_Should_KeepSeriesAlive_When_SameAnchorIsRegisteredAgain()
+    {
+        // "Every 10 s from the same anchor", registered again (for example on every app start)
+        // after the anchor slot was delivered and acknowledged.
+        var now = WholeSecondNow();
+        var entity = CreateTestEntity("reschedule", "same-anchor");
+        var key = CreateTestKey("same-anchor");
+        var interval = TimeSpan.FromSeconds(10);
+        var anchor = Recurring(entity, key, now.AddSeconds(-1), interval);
+        var successor = NextSlot(anchor, now.AddSeconds(9));
+
+        Assert.Equal(ReminderScheduleResponseCode.Success, (await Storage!.ScheduleReminderAsync(anchor, Ct)).ResponseCode);
+        await DeliverAsync(anchor, successor, now);
+        Assert.True((await Storage.AcknowledgeReminderAsync(entity, key, anchor.DueTimeUtc, now, Ct)).Success);
+        Assert.Equal(ReminderCompletionStatus.Pending, (await StatusAsync(successor))?.CompletionStatus);
+
+        // Registering again cancels the pending successor and resets the anchor.
+        Assert.Equal(ReminderScheduleResponseCode.Success, (await Storage.ScheduleReminderAsync(anchor, Ct)).ResponseCode);
+        Assert.Equal(ReminderCompletionStatus.Cancelled, (await StatusAsync(successor))?.CompletionStatus);
+        Assert.Equal(ReminderCompletionStatus.Pending, (await StatusAsync(anchor))?.CompletionStatus);
+
+        // Delivering the anchor again must bring the successor back.
+        await DeliverAsync(anchor, successor, now);
+        Assert.Equal(ReminderCompletionStatus.Pending, (await StatusAsync(successor))?.CompletionStatus);
+    }
+
+    [Fact]
+    public async Task Reschedule_Should_KeepSeriesAlive_When_OldAnchorRollsForwardOntoDeliveredSlot()
+    {
+        // The anchor is several intervals old. The live slot was already delivered; the slot after it
+        // was pending until the reschedule cancelled it.
+        var now = WholeSecondNow();
+        var entity = CreateTestEntity("reschedule", "old-anchor");
+        var key = CreateTestKey("old-anchor");
+        var interval = TimeSpan.FromSeconds(10);
+        var anchor = Recurring(entity, key, now.AddSeconds(-25), interval);
+        var delivered = NextSlot(anchor, now.AddSeconds(-5));
+        var next = NextSlot(anchor, now.AddSeconds(5));
+        await PutOnlyThisOccurrenceInStateAsync(delivered, ReminderCompletionStatus.Delivered, now);
+        await AddOccurrenceAsync(next);
+
+        Assert.Equal(ReminderScheduleResponseCode.Success, (await Storage!.ScheduleReminderAsync(anchor, Ct)).ResponseCode);
+        Assert.Equal(ReminderCompletionStatus.Cancelled, (await StatusAsync(next))?.CompletionStatus);
+
+        // The scheduler expires the stale anchor and computes the live slot, which is the delivered one.
+        Assert.True(await Storage.CommitReminderMutationsAsync(
+            RollForwardBatch(new RecurringRollForward(anchor, ReminderCompletionStatus.Expired, now, delivered)), Ct));
+
+        Assert.Equal(ReminderCompletionStatus.Expired, (await StatusAsync(anchor))?.CompletionStatus);
+        Assert.Equal(ReminderCompletionStatus.Delivered, (await StatusAsync(delivered))?.CompletionStatus);
+        Assert.Equal(ReminderCompletionStatus.Pending, (await StatusAsync(next))?.CompletionStatus);
+    }
+
+    [Fact]
+    public async Task CommitReminderMutationsAsync_Should_NotReviveCompletedOccurrence_When_RetryIsUpserted()
+    {
+        // An ack-timeout retry read before a concurrent cancel must not bring the occurrence back.
+        var now = WholeSecondNow();
+        var reminder = Recurring(CreateTestEntity("revive", "entity"), CreateTestKey("revive"), now, TimeSpan.FromSeconds(10));
+        await AddOccurrenceAsync(reminder);
+        await MoveToAwaitingAckAsync(reminder, now);
+        Assert.Equal(ReminderCancelResponseCode.Success, (await Storage!.CancelReminderAsync(reminder.Entity, reminder.Key, Ct)).ResponseCode);
+
+        var retry = reminder with { When = now.AddSeconds(1), AttemptCount = 1, LastFailureReason = "Ack timeout" };
+        Assert.True(await Storage.CommitReminderMutationsAsync(new ReminderMutationBatch([retry], [], []), Ct));
+
+        Assert.Equal(ReminderCompletionStatus.Cancelled, (await StatusAsync(reminder))?.CompletionStatus);
+    }
+
+    /// <summary>
+    /// Overwrites a stored payload's serializer id so it can no longer be deserialized.
+    /// Returns false for providers that do not serialize payloads.
+    /// </summary>
+    protected virtual Task<bool> CorruptPayloadAsync(ScheduledReminder reminder) => Task.FromResult(false);
+
+    [Fact]
+    public async Task GetNextRemindersAsync_Should_FailUnreadableOccurrence_And_ReturnTheRest()
+    {
+        var now = WholeSecondNow();
+        var entity = CreateTestEntity("poison", "entity");
+        var poison = Recurring(entity, CreateTestKey("poison"), now.AddSeconds(-15));
+        var healthy = new ScheduledReminder(entity, CreateTestKey("healthy"), now.AddSeconds(-1), "healthy");
+        await AddOccurrenceAsync(poison);
+        await AddOccurrenceAsync(healthy);
+        if (!await CorruptPayloadAsync(poison))
+            return; // nothing to corrupt: this provider stores messages as objects
+
+        var batch = await Storage!.GetNextRemindersAsync(now.AddSeconds(1), now, new ReminderBatchSize(10), Ct);
+
+        var fetched = Assert.Single(batch.Reminders);
+        Assert.Equal(healthy.Key, fetched.Key);
+        var status = await StatusAsync(poison);
+        Assert.Equal(ReminderCompletionStatus.Failed, status?.CompletionStatus);
+        Assert.Contains("could not be deserialized", status?.LastFailureReason);
+        Assert.Equal(1, (await Storage.GetRemindersOverviewAsync(now, Ct)).TotalPendingReminders);
+    }
+
+    private async Task DeliverAsync(ScheduledReminder current, ScheduledReminder successor, DateTimeOffset now)
+        => Assert.True(await Storage!.CommitReminderMutationsAsync(new ReminderMutationBatch([], [],
+            [new AwaitingAckReminder(current.Entity, current.Key, current.DueTimeUtc, now, now.AddMinutes(1))])
+        {
+            RecurringSuccessors = [new RecurringSuccessor(successor, current.DueTimeUtc)]
+        }, Ct));
 
     [Fact]
     public async Task CommitReminderMutationsAsync_Should_SkipSuccessor_When_LaterActiveOccurrenceOfSeriesExists()

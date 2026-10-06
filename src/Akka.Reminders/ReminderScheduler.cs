@@ -285,8 +285,49 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             var delay = PendingReminders.TimeUntilNext;
             if (delay < TimeSpan.Zero)
                 delay = TimeSpan.Zero;
+
+            // After a failed fetch, wait out the backoff even if the overview says work is overdue,
+            // so a fetch that keeps failing cannot turn into a hot loop.
+            if (_fetchRetryNotBefore is { } notBefore)
+            {
+                var backoff = notBefore - TimeProvider.Now;
+                if (backoff > delay)
+                    delay = backoff;
+            }
+
             Timers.StartSingleTimer(FetchReminders.Instance, FetchReminders.Instance, delay);
         }
+    }
+
+    /// <summary>
+    /// First delay after a failed due-reminder fetch; doubles per consecutive failure up to
+    /// <c>2 * StorageTimeout</c>.
+    /// </summary>
+    private static readonly TimeSpan FetchFailureBackoffBase = TimeSpan.FromSeconds(1);
+
+    private int _consecutiveFetchFailures;
+
+    /// <summary>
+    /// Earliest time for the next fetch while fetches are failing; null when the last fetch succeeded.
+    /// </summary>
+    private DateTimeOffset? _fetchRetryNotBefore;
+
+    private void RecordFetchFailure()
+    {
+        _consecutiveFetchFailures += 1;
+        var exponent = Math.Min(_consecutiveFetchFailures - 1, 16);
+        var backoff = TimeSpan.FromTicks(FetchFailureBackoffBase.Ticks << exponent);
+        var cap = Settings.StorageTimeout + Settings.StorageTimeout;
+        if (backoff > cap)
+            backoff = cap;
+        _fetchRetryNotBefore = TimeProvider.Now + backoff;
+        _log.Warning("Fetching due reminders failed [{0}] time(s) in a row; next fetch in [{1}]", _consecutiveFetchFailures, backoff);
+    }
+
+    private void RecordFetchSuccess()
+    {
+        _consecutiveFetchFailures = 0;
+        _fetchRetryNotBefore = null;
     }
 
     private static (ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc) ToOccurrenceKey(
@@ -616,11 +657,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 var replyTo = Sender;
 
                 // The wire message can bypass client-side validation, so check here too.
-                if (scheduleSingle.RepeatInterval is { } repeatInterval && repeatInterval <= TimeSpan.Zero)
+                if (ReminderValidation.Validate(scheduleSingle) is { } validationError)
                 {
                     replyTo.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle,
                         ReminderScheduleResponseCode.Error,
-                        $"RepeatInterval must be greater than zero, but was [{repeatInterval}]."), ActorRefs.NoSender);
+                        validationError), ActorRefs.NoSender);
                     break;
                 }
 
@@ -1397,6 +1438,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 using var fetchCts = new CancellationTokenSource(Settings.StorageTimeout);
                 batch = await Storage.GetNextRemindersAsync(untilDeadline, TimeProvider.Now,
                     new ReminderBatchSize(effectiveBatchSize), fetchCts.Token);
+                RecordFetchSuccess();
                 _log.Info("Fetched {0} due reminders (batch)", batch.Reminders.Count);
                 latestOverview = batch.NextOverview;
             }
@@ -1405,6 +1447,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 // If fetch fails, no reminders were delivered and no write operations were attempted,
                 // so the write circuit remains unchanged.
                 _log.Error(ex, "Failed to fetch due reminders from storage");
+                RecordFetchFailure();
                 needsOverviewReload = true;
                 break;
             }
@@ -1678,7 +1721,12 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 continue;
 
             // A stale recurring occurrence rolled forward to a slot that is already due: fetch again
-            // so the live slot is delivered in this run instead of on the next timer tick.
+            // so the live slot is delivered in this run instead of on the next timer tick. This saves
+            // one tick of latency and keeps TestScheduler-driven specs deterministic (a zero-delay timer
+            // only fires on the next Advance). The scheduler cannot see whether storage applied the
+            // roll-forward (CommitReminderMutationsAsync returns one bool for the batch); when the
+            // compare-and-set lost, the extra fetch finds nothing new and the loop ends on the empty
+            // batch check above. The cap bounds the extra fetches per run.
             if (rolledForwardToDueSlot && rollForwardRefetches < MaxRollForwardRefetchesPerRun)
             {
                 rollForwardRefetches += 1;

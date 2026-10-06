@@ -5,7 +5,7 @@ namespace Akka.Reminders.Sqlite.Internal;
 internal interface ISqlDialect
 {
     string GetCreateTableSql(string tableName);
-    string GetBatchUpsertRemindersSql(string tableName, int count);
+    string GetBatchUpsertRemindersSql(string tableName, int count, bool activeRowsOnly = false);
     string GetSelectDueRemindersSql(string tableName, int maxCount);
     string GetBatchMarkCompletedSql(string tableName, int count);
     string GetExpireRemindersSql(string tableName);
@@ -20,7 +20,7 @@ internal interface ISqlDialect
     string GetAcknowledgeReminderSql(string tableName);
     string GetBatchAcknowledgeRemindersSql(string tableName, int count);
     string GetRollForwardPredecessorSql(string tableName);
-    string GetInsertRecurringSuccessorsSql(string tableName, int count);
+    string GetInsertRecurringSuccessorsSql(string tableName, int count, bool requireAwaitingPredecessor);
     DbConnection CreateConnection(string connectionString);
     void AddParameter(DbCommand command, string name, object value);
 }

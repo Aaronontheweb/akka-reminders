@@ -15,6 +15,7 @@ public sealed class SqliteReminderStorage : IRecurringRollForwardStorage
     private readonly SqliteReminderStorageSettings _settings;
     private readonly ISqlDialect _dialect;
     private readonly Akka.Serialization.Serialization _serialization;
+    private readonly ILoggingAdapter _log;
     private readonly object _initLock = new();
     private volatile bool _initialized;
 
@@ -27,6 +28,7 @@ public sealed class SqliteReminderStorage : IRecurringRollForwardStorage
         _settings.Validate();
 
         _serialization = system.Serialization;
+        _log = Logging.GetLogger(system, GetType());
         _dialect = SqliteDialect.Instance;
     }
 
@@ -100,7 +102,7 @@ public sealed class SqliteReminderStorage : IRecurringRollForwardStorage
 
         try
         {
-            if (!await UpsertReminderOccurrencesAsync(connection, transaction, mutationBatch.PendingUpserts, cancellationToken))
+            if (!await UpsertReminderOccurrencesAsync(connection, transaction, mutationBatch.PendingUpserts, cancellationToken, activeRowsOnly: true))
             {
                 await transaction.RollbackAsync(cancellationToken);
                 return false;
@@ -121,7 +123,8 @@ public sealed class SqliteReminderStorage : IRecurringRollForwardStorage
             // Runs after the awaiting-ack transition so each successor is written only once its
             // predecessor's row is locked by this transaction.
             await ApplyRecurringRollForwardsAsync(connection, transaction, mutationBatch.RecurringRollForwards, cancellationToken);
-            await InsertRecurringSuccessorsAsync(connection, transaction, mutationBatch.RecurringSuccessors, cancellationToken);
+            await InsertRecurringSuccessorsAsync(connection, transaction, mutationBatch.RecurringSuccessors,
+                requireAwaitingPredecessor: true, cancellationToken);
 
             await transaction.CommitAsync(cancellationToken);
             return true;
@@ -169,36 +172,72 @@ public sealed class SqliteReminderStorage : IRecurringRollForwardStorage
                     connection,
                     transaction,
                     [new RecurringSuccessor(rollForward.Successor, rollForward.Predecessor.DueTimeUtc)],
+                    requireAwaitingPredecessor: false,
                     cancellationToken);
             }
         }
     }
 
     /// <summary>
-    /// Inserts recurring successors only if absent: an existing row with the same key is never reset,
-    /// and nothing is inserted when an active occurrence of the series is already due after the predecessor.
+    /// Inserts recurring successors without ever resetting an active, delivered, expired, or failed row.
+    /// A <c>Cancelled</c> row at the successor's key (left by a reschedule) is replaced only when the
+    /// predecessor won its own transition in this transaction: the compare-and-set of a roll-forward, or
+    /// (with <paramref name="requireAwaitingPredecessor"/>) the move to <c>AwaitingAck</c>. A real cancel
+    /// ends the predecessor too, so that transition cannot win after one. See the dialect for the full rules.
     /// </summary>
     private async Task InsertRecurringSuccessorsAsync(
         System.Data.Common.DbConnection connection,
         System.Data.Common.DbTransaction transaction,
         IReadOnlyList<RecurringSuccessor> successors,
+        bool requireAwaitingPredecessor,
         CancellationToken cancellationToken)
     {
         for (var offset = 0; offset < successors.Count; offset += MaxUpsertedRemindersPerStatement)
         {
             var chunk = successors.Skip(offset).Take(MaxUpsertedRemindersPerStatement).ToList();
             await using var command = CreateCommand(connection, transaction);
-            command.CommandText = _dialect.GetInsertRecurringSuccessorsSql(_settings.TableName, chunk.Count);
+            command.CommandText = _dialect.GetInsertRecurringSuccessorsSql(_settings.TableName, chunk.Count, requireAwaitingPredecessor);
             command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
 
             for (var i = 0; i < chunk.Count; i++)
             {
                 var successor = chunk[i];
-                BindReminderParameters(command, i, successor.Successor);
+                var current = successor.Successor;
+                var next = FollowingSlot(current);
+                BindReminderParameters(command, i, current);
                 _dialect.AddParameter(command, $"@PredecessorDueTimeUtc{i}", successor.PredecessorDueTimeUtc.UtcDateTime);
+                _dialect.AddParameter(command, $"@NextWhenUtc{i}", next.When.UtcDateTime);
+                _dialect.AddParameter(command, $"@NextDueTimeUtc{i}", next.DueTimeUtc.UtcDateTime);
+                _dialect.AddParameter(command, $"@NextDeliveryDeadlineUtc{i}", next.DeliveryDeadlineUtc?.UtcDateTime ?? (object)DBNull.Value);
             }
 
             await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// The slot after <paramref name="successor"/>, used when the successor's own slot already holds a
+    /// completed occurrence. Returns the successor unchanged when there is no valid next slot, which
+    /// makes the second statement a no-op.
+    /// </summary>
+    private static ScheduledReminder FollowingSlot(ScheduledReminder successor)
+    {
+        if (successor.RepeatInterval is not { } interval || interval <= TimeSpan.Zero)
+            return successor;
+
+        try
+        {
+            var nextDue = successor.DueTimeUtc.Add(interval);
+            return successor with
+            {
+                When = nextDue,
+                OccurrenceDueTimeUtc = nextDue,
+                DeliveryDeadlineUtc = successor.DeliveryDeadlineUtc?.Add(interval)
+            };
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return successor;
         }
     }
 
@@ -206,7 +245,8 @@ public sealed class SqliteReminderStorage : IRecurringRollForwardStorage
         System.Data.Common.DbConnection connection,
         System.Data.Common.DbTransaction? transaction,
         IEnumerable<ScheduledReminder> reminders,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool activeRowsOnly = false)
     {
         var remindersList = reminders.ToList();
         if (remindersList.Count == 0)
@@ -218,7 +258,7 @@ public sealed class SqliteReminderStorage : IRecurringRollForwardStorage
             {
                 var chunk = remindersList.Skip(offset).Take(MaxUpsertedRemindersPerStatement).ToList();
                 await using var command = CreateCommand(connection, transaction);
-                command.CommandText = _dialect.GetBatchUpsertRemindersSql(_settings.TableName, chunk.Count);
+                command.CommandText = _dialect.GetBatchUpsertRemindersSql(_settings.TableName, chunk.Count, activeRowsOnly);
                 command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
 
                 for (var i = 0; i < chunk.Count; i++)
@@ -257,12 +297,32 @@ public sealed class SqliteReminderStorage : IRecurringRollForwardStorage
         _dialect.AddParameter(command, "@UntilDeadline", untilDeadline.UtcDateTime);
         _dialect.AddParameter(command, "@Now", now.UtcDateTime);
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-
-        while (await reader.ReadAsync(cancellationToken))
+        var unreadable = new List<UnreadableOccurrence>();
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            reminders.Add(ReadReminderFromReader(reader));
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                try
+                {
+                    reminders.Add(ReadReminderFromReader(reader));
+                }
+                catch (UnreadablePayloadException ex)
+                {
+                    unreadable.Add(new UnreadableOccurrence(
+                        reader.GetString(reader.GetOrdinal("shard_region_name")),
+                        reader.GetString(reader.GetOrdinal("entity_id")),
+                        reader.GetString(reader.GetOrdinal("reminder_key")),
+                        reader.GetValue(reader.GetOrdinal("due_time_utc")),
+                        Convert.ToInt32(reader.GetValue(reader.GetOrdinal("attempt_count")), System.Globalization.CultureInfo.InvariantCulture),
+                        ex.Message));
+                }
+            }
         }
+
+        // An occurrence whose payload can no longer be deserialized would otherwise fail every fetch
+        // and block all other reminders. End it as Failed so it leaves the due set and the overview.
+        if (unreadable.Count > 0)
+            await FailUnreadableOccurrencesAsync(connection, unreadable, now, cancellationToken);
 
         await using var conn2 = _dialect.CreateConnection(_settings.ConnectionString);
         await conn2.OpenAsync(cancellationToken);
@@ -992,7 +1052,15 @@ public sealed class SqliteReminderStorage : IRecurringRollForwardStorage
             ? (DateTimeOffset?)null
             : ParseDateTimeOffset(reader.GetValue(deadlineOrdinal));
 
-        var message = DeserializeMessage(serializerId, manifest, payload);
+        object message;
+        try
+        {
+            message = DeserializeMessage(serializerId, manifest, payload);
+        }
+        catch (Exception ex)
+        {
+            throw new UnreadablePayloadException(serializerId, manifest, ex);
+        }
 
         return new ScheduledReminder(
             new ReminderEntity(shardRegionName, entityId),
@@ -1005,5 +1073,46 @@ public sealed class SqliteReminderStorage : IRecurringRollForwardStorage
             maxDeliveryWindow,
             deliveryDeadlineUtc,
             dueTimeUtc);
+    }
+
+    private sealed record UnreadableOccurrence(
+        string ShardRegionName,
+        string EntityId,
+        string ReminderKey,
+        object RawDueTimeUtc,
+        int AttemptCount,
+        string Reason);
+
+    /// <summary>
+    /// Raised when a stored reminder payload cannot be deserialized (for example, the message type was
+    /// renamed or removed, or its serializer is no longer configured).
+    /// </summary>
+    private sealed class UnreadablePayloadException(int serializerId, string? manifest, Exception inner)
+        : Exception($"Reminder payload could not be deserialized (serializer [{serializerId}], manifest [{manifest}]): {inner.Message}", inner);
+
+    private async Task FailUnreadableOccurrencesAsync(
+        System.Data.Common.DbConnection connection,
+        IReadOnlyList<UnreadableOccurrence> occurrences,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        foreach (var occurrence in occurrences)
+        {
+            _log.Error("Marking reminder occurrence [{0}/{1}] / [{2}] due at [{3}] as Failed: {4}",
+                occurrence.ShardRegionName, occurrence.EntityId, occurrence.ReminderKey, occurrence.RawDueTimeUtc, occurrence.Reason);
+
+            await using var command = connection.CreateCommand();
+            command.CommandText = _dialect.GetRollForwardPredecessorSql(_settings.TableName);
+            command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+            _dialect.AddParameter(command, "@ShardRegionName", occurrence.ShardRegionName);
+            _dialect.AddParameter(command, "@EntityId", occurrence.EntityId);
+            _dialect.AddParameter(command, "@ReminderKey", occurrence.ReminderKey);
+            _dialect.AddParameter(command, "@DueTimeUtc", occurrence.RawDueTimeUtc);
+            _dialect.AddParameter(command, "@CompletedAtUtc", now.UtcDateTime);
+            _dialect.AddParameter(command, "@CompletionStatus", ReminderCompletionStatus.Failed.ToString());
+            _dialect.AddParameter(command, "@AttemptCount", occurrence.AttemptCount);
+            _dialect.AddParameter(command, "@LastFailureReason", occurrence.Reason);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 }

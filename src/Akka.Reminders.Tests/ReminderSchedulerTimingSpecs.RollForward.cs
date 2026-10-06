@@ -423,6 +423,160 @@ public partial class ReminderSchedulerTimingSpecs
             => targetMethod!.Invoke(_inner, args);
     }
 
+    private IReminderStorage CreateStorage(string kind)
+    {
+        if (kind == "inmem")
+            return new InMemoryReminderStorage();
+
+        var path = Path.Combine(Path.GetTempPath(), $"akka-reminders-timing-{Guid.NewGuid():N}.db");
+        return new Akka.Reminders.Sqlite.SqliteReminderStorage(
+            Akka.Reminders.Sqlite.Configuration.SqliteReminderStorageSettings.Create($"Data Source={path};Mode=ReadWriteCreate;Cache=Shared"), Sys);
+    }
+
+    [Theory]
+    [InlineData("inmem")]
+    [InlineData("sqlite")]
+    public async Task Should_KeepSeriesAlive_When_RecurringReminderIsRegisteredAgainWithSameAnchor(string kind)
+    {
+        var region = CreateTestProbe();
+        _resolver.RegisterShardRegion("resched-region", region);
+        var scheduler = StartDedicatedScheduler(DedicatedSettings(), CreateStorage(kind), "resched-" + kind);
+        var entity = new ReminderEntity("resched-region", "e1");
+        var key = new ReminderKey("daily");
+        var t0 = VirtualTime.Now;
+        var anchor = t0.AddSeconds(5);
+        var interval = TimeSpan.FromSeconds(10);
+
+        await ScheduleRecurringAsync(scheduler, entity, key, anchor, interval);
+        VirtualTime.Advance(TimeSpan.FromSeconds(5));
+        Assert.Equal(anchor, (await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct)).DueTimeUtc);
+        var ack = await scheduler.Ask<ReminderProtocol.ReminderAckResponse>(
+            new ReminderProtocol.ReminderAck(entity, key, anchor), ReplyTimeout, Ct);
+        Assert.Equal(ReminderAckResponseCode.Success, ack.ResponseCode);
+
+        // The app restarts at t0+7 and registers the same schedule again (same anchor, still inside
+        // its window). Registering cancels the pending t0+15 row and resets the anchor.
+        VirtualTime.Advance(TimeSpan.FromSeconds(2));
+        await ScheduleRecurringAsync(scheduler, entity, key, anchor, interval);
+        VirtualTime.Advance(TimeSpan.FromMilliseconds(10));
+
+        // Existing behavior: the reset anchor is delivered again.
+        Assert.Equal(anchor, (await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct)).DueTimeUtc);
+        Assert.Equal(ReminderCompletionStatus.Pending, (await StatusAsync(scheduler, entity, key, t0.AddSeconds(15)))?.CompletionStatus);
+
+        VirtualTime.Advance(TimeSpan.FromSeconds(9));
+        Assert.Equal(t0.AddSeconds(15), (await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct)).DueTimeUtc);
+    }
+
+    [Fact]
+    public async Task Should_NotBlockOtherReminders_When_StaleRecurringPayloadIsUnreadable()
+    {
+        var region = CreateTestProbe();
+        _resolver.RegisterShardRegion("poison-region", region);
+        var path = Path.Combine(Path.GetTempPath(), $"akka-reminders-timing-{Guid.NewGuid():N}.db");
+        var connectionString = $"Data Source={path};Mode=ReadWriteCreate;Cache=Shared";
+        var storage = new Akka.Reminders.Sqlite.SqliteReminderStorage(
+            Akka.Reminders.Sqlite.Configuration.SqliteReminderStorageSettings.Create(connectionString), Sys);
+        var entity = new ReminderEntity("poison-region", "e1");
+        var poisonKey = new ReminderKey("poison");
+        var t0 = VirtualTime.Now;
+        var due = t0.AddSeconds(-15);
+        var interval = TimeSpan.FromSeconds(2);
+        await storage.ScheduleReminderAsync(new ScheduledReminder(entity, poisonKey, due, "payload", interval,
+            DeliveryDeadlineUtc: due + interval, OccurrenceDueTimeUtc: due), Ct);
+
+        // The message type was renamed or removed: its serializer id no longer resolves.
+        await using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(connectionString))
+        {
+            await connection.OpenAsync(Ct);
+            var command = connection.CreateCommand();
+            command.CommandText = "UPDATE scheduled_reminders SET serializer_id = 987654 WHERE reminder_key = 'poison'";
+            Assert.Equal(1, await command.ExecuteNonQueryAsync(Ct));
+        }
+
+        var scheduler = StartDedicatedScheduler(DedicatedSettings(), storage, "poison-scheduler");
+        var scheduled = await scheduler.Ask<ReminderProtocol.ReminderScheduled>(
+            new ReminderProtocol.ScheduleReminder(entity, new ReminderKey("innocent"), t0.AddSeconds(2), "innocent"), ReplyTimeout, Ct);
+        Assert.Equal(ReminderScheduleResponseCode.Success, scheduled.ResponseCode);
+
+        for (var i = 0; i < 10; i++)
+        {
+            VirtualTime.Advance(TimeSpan.FromMilliseconds(500));
+            await Task.Delay(50, Ct);
+        }
+
+        var envelope = await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct);
+        Assert.Equal("innocent", envelope.Message);
+        var poisoned = await StatusAsync(scheduler, entity, poisonKey, due);
+        Assert.Equal(ReminderCompletionStatus.Failed, poisoned?.CompletionStatus);
+        Assert.Contains("could not be deserialized", poisoned?.LastFailureReason);
+    }
+
+    [Theory]
+    [InlineData("inmem")]
+    [InlineData("sqlite")]
+    public async Task Should_FailStoredOccurrence_When_StoredIntervalIsZero(string kind)
+    {
+        // Earlier releases accepted a zero interval; such a row may already be in storage.
+        var region = CreateTestProbe();
+        _resolver.RegisterShardRegion("zero-region", region);
+        var storage = CreateStorage(kind);
+        var entity = new ReminderEntity("zero-region", "e1");
+        var key = new ReminderKey("zero");
+        var t0 = VirtualTime.Now;
+        var due = t0.AddSeconds(1);
+        await storage.ScheduleReminderAsync(new ScheduledReminder(entity, key, due, "payload", TimeSpan.Zero,
+            DeliveryDeadlineUtc: due, OccurrenceDueTimeUtc: due), Ct);
+        var scheduler = StartDedicatedScheduler(DedicatedSettings(), storage, "zero-scheduler-" + kind);
+        Assert.Equal(ReminderCompletionStatus.Pending, (await StatusAsync(scheduler, entity, key, due))?.CompletionStatus);
+
+        VirtualTime.Advance(TimeSpan.FromSeconds(2));
+        await AwaitAssertAsync(async () =>
+        {
+            var status = await StatusAsync(scheduler, entity, key, due);
+            Assert.Equal(ReminderCompletionStatus.Failed, status?.CompletionStatus);
+            Assert.Contains("repeat interval of zero or less", status?.LastFailureReason);
+        }, ReplyTimeout, TimeSpan.FromMilliseconds(50), cancellationToken: Ct);
+        await region.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(300), Ct);
+    }
+
+    [Fact]
+    public async Task Should_BackOff_When_DueReminderFetchFails()
+    {
+        var region = CreateTestProbe();
+        _resolver.RegisterShardRegion("backoff-region", region);
+        var storage = new FailableReminderStorage(new InMemoryReminderStorage());
+        var entity = new ReminderEntity("backoff-region", "e1");
+        var key = new ReminderKey("overdue");
+        var t0 = VirtualTime.Now;
+        var due = t0.AddSeconds(-1);
+        await storage.ScheduleReminderAsync(new ScheduledReminder(entity, key, due, "overdue"), Ct);
+        storage.FailDueReminderFetches = true;
+
+        var scheduler = StartDedicatedScheduler(DedicatedSettings(), storage, "backoff-scheduler");
+        Assert.Equal(ReminderCompletionStatus.Pending, (await StatusAsync(scheduler, entity, key, due))?.CompletionStatus);
+
+        // The overview says the reminder is overdue, so the first fetch runs at once and fails.
+        VirtualTime.Advance(TimeSpan.Zero);
+        await AwaitConditionAsync(() => Task.FromResult(storage.FetchAttempts == 1), ReplyTimeout, cancellationToken: Ct);
+
+        // Without a backoff, every zero-length advance would fire another failing fetch.
+        for (var i = 0; i < 5; i++)
+        {
+            await Task.Delay(50, Ct);
+            VirtualTime.Advance(TimeSpan.Zero);
+        }
+
+        await Task.Delay(200, Ct);
+        Assert.Equal(1, storage.FetchAttempts);
+
+        // The next attempt waits for the 1 s backoff; once storage recovers, delivery resumes.
+        storage.FailDueReminderFetches = false;
+        VirtualTime.Advance(TimeSpan.FromSeconds(1));
+        var envelope = await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct);
+        Assert.Equal("overdue", envelope.Message);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(-1000)]
@@ -445,6 +599,31 @@ public partial class ReminderSchedulerTimingSpecs
         var scheduler = StartDedicatedScheduler(DedicatedSettings(), new InMemoryReminderStorage(), "interval-scheduler");
         var viaWire = await scheduler.Ask<ReminderProtocol.ReminderScheduled>(
             new ReminderProtocol.ScheduleReminder(client.Entity, key, when, "payload", interval), ReplyTimeout, Ct);
+        Assert.Equal(ReminderScheduleResponseCode.Error, viaWire.ResponseCode);
+        Assert.Null(await StatusAsync(scheduler, client.Entity, key, when));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1000)]
+    public async Task Should_RejectReminder_When_MaxDeliveryWindowIsNotPositive(int windowMilliseconds)
+    {
+        var region = CreateTestProbe();
+        var client = await ReadyClientAsync("test-region", "bad-window", region);
+        var window = TimeSpan.FromMilliseconds(windowMilliseconds);
+        var when = VirtualTime.Now.AddSeconds(5);
+        var key = new ReminderKey("bad-window");
+
+        Assert.Equal(ReminderScheduleResponseCode.Error,
+            (await client.ScheduleSingleReminderAsync(key, when, "payload", window, Ct)).ResponseCode);
+        Assert.Equal(ReminderScheduleResponseCode.Error,
+            (await client.ScheduleRecurringReminderAsync(key, when, TimeSpan.FromSeconds(10), "payload", window, Ct)).ResponseCode);
+        Assert.Equal(ReminderScheduleResponseCode.Error,
+            (await Sys.ReminderClient().ScheduleSingleReminderAsync(client.Entity, key, when, "payload", window, Ct)).ResponseCode);
+
+        var scheduler = StartDedicatedScheduler(DedicatedSettings(), new InMemoryReminderStorage(), "window-scheduler");
+        var viaWire = await scheduler.Ask<ReminderProtocol.ReminderScheduled>(
+            new ReminderProtocol.ScheduleReminder(client.Entity, key, when, "payload", MaxDeliveryWindow: window), ReplyTimeout, Ct);
         Assert.Equal(ReminderScheduleResponseCode.Error, viaWire.ResponseCode);
         Assert.Null(await StatusAsync(scheduler, client.Entity, key, when));
     }

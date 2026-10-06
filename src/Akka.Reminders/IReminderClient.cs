@@ -14,6 +14,10 @@ public interface IReminderClient
     /// Schedule a one-off reminder.
     /// If a reminder with the same key already exists, it will be overwritten.
     /// </summary>
+    /// <remarks>
+    /// When set, <paramref name="maxDeliveryWindow"/> must be greater than zero; otherwise the response
+    /// code is <see cref="ReminderScheduleResponseCode.Error"/>.
+    /// </remarks>
     Task<ReminderProtocol.ReminderScheduled> ScheduleSingleReminderAsync(
         ReminderKey key,
         DateTimeOffset when,
@@ -26,8 +30,8 @@ public interface IReminderClient
     /// If a reminder with the same key already exists, it will be overwritten.
     /// </summary>
     /// <remarks>
-    /// <paramref name="interval"/> must be greater than zero; otherwise the response code is
-    /// <see cref="ReminderScheduleResponseCode.Error"/>. If an occurrence passes its deadline before
+    /// <paramref name="interval"/> and, when set, <paramref name="maxDeliveryWindow"/> must be greater
+    /// than zero; otherwise the response code is <see cref="ReminderScheduleResponseCode.Error"/>. If an occurrence passes its deadline before
     /// it is delivered, it is marked expired and the series continues at the next slot whose deadline
     /// has not passed. Missed slots are skipped, not replayed.
     /// </remarks>

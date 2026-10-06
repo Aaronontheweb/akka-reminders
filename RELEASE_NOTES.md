@@ -1,15 +1,28 @@
 #### 1.5.73 October 6th 2026 ####
 
+**Versioning**
+
+- Package versions now track the Akka.NET version they are built against. The previous release was 0.7.0.
+- This release requires Akka.NET 1.5.73 (Akka.Hosting 1.5.73). Apps that pin an older Akka.Hosting under central package management must bump it, or NuGet reports NU1605 (package downgrade).
+
 **Bug Fixes**
 
 - Fixed: recurring reminders were deleted when an occurrence expired before delivery under scheduler lag ([#143](https://github.com/Aaronontheweb/akka-reminders/issues/143)). The stale occurrence is still marked `Expired` and is never delivered late; the series now continues at the next slot whose deadline has not passed, written in the same storage commit. Missed slots are skipped, not replayed. The same applies when a recurring occurrence runs out of retries because its shard region is missing.
-- Recurring reminders with a repeat interval of zero or less are now rejected with `ReminderScheduleResponseCode.Error`.
+- Registering a recurring reminder again with the same key and first due time (for example on every app start) no longer risks ending the series.
+- A stored reminder whose payload can no longer be deserialized is marked `Failed` instead of blocking every other delivery, and a failing due-reminder fetch now backs off instead of retrying in a tight loop.
 - PostgreSQL and SQL Server: a cancel that races a recurring delivery can no longer leave the next occurrence `Pending`.
+
+**Behavior Changes**
+
+- `ListReminders` can return a recurring occurrence whose `When` and `DueTimeUtc` are in the past: a stale occurrence stays listed until the scheduler rolls it forward.
+- A recurring reminder whose shard region no longer exists keeps producing occurrences that fail, instead of the series ending after the first one.
+- Recurring intervals and `maxDeliveryWindow` values of zero or less are rejected with `ReminderScheduleResponseCode.Error`.
+- Series that #143 already deleted before you upgrade stay deleted; schedule them again.
 
 **Compatibility**
 
 - No schema change and no wire format change.
-- Added `ReminderMutationBatch.RecurringSuccessors` and `ReminderMutationBatch.RecurringRollForwards` (init properties with empty defaults) and the opt-in `IRecurringRollForwardStorage` marker interface. Custom storage providers that do not implement it keep the 0.7.0 behavior.
+- Added `ReminderMutationBatch.RecurringSuccessors` and `ReminderMutationBatch.RecurringRollForwards` (init properties with empty defaults) and the opt-in `IRecurringRollForwardStorage` marker interface. Custom storage providers that do not implement it keep the 0.7.0 behavior. Storage decorators must implement and forward it.
 
 #### 0.7.0 August 7th 2026 ####
 

@@ -114,7 +114,12 @@ public sealed class InMemoryReminderStorage : IRecurringRollForwardStorage
 
             foreach (var reminder in mutationBatch.PendingUpserts)
             {
+                // Retries and terminal attempts only update active occurrences: a retry must not
+                // revive an occurrence that a concurrent cancel (or ack) already ended.
                 var key = ToKey(reminder);
+                if (completed.ContainsKey(key))
+                    continue;
+
                 pending[key] = reminder;
                 awaiting.Remove(key);
                 completed.Remove(key);
@@ -165,11 +170,16 @@ public sealed class InMemoryReminderStorage : IRecurringRollForwardStorage
                     rollForward.Status);
 
                 if (rollForward.Successor is not null)
-                    TryInsertSuccessor(rollForward.Successor, key.DueTimeUtc, pending, awaiting, completed);
+                    TryInsertSuccessor(rollForward.Successor, key.DueTimeUtc, predecessorWon: true, pending, awaiting, completed);
             }
 
             foreach (var successor in mutationBatch.RecurringSuccessors)
-                TryInsertSuccessor(successor.Successor, successor.PredecessorDueTimeUtc, pending, awaiting, completed);
+            {
+                // The predecessor won its transition in this batch only if it is now AwaitingAck.
+                var predecessorKey = (successor.Successor.Entity, successor.Successor.Key, successor.PredecessorDueTimeUtc);
+                TryInsertSuccessor(successor.Successor, successor.PredecessorDueTimeUtc,
+                    predecessorWon: awaiting.ContainsKey(predecessorKey), pending, awaiting, completed);
+            }
 
             ReplaceContents(_pendingReminders, pending);
             ReplaceContents(_awaitingAckReminders, awaiting);
@@ -181,27 +191,67 @@ public sealed class InMemoryReminderStorage : IRecurringRollForwardStorage
     }
 
     /// <summary>
-    /// Inserts a recurring successor only if its key is in none of the dictionaries and no active
-    /// occurrence of the same series is due after the predecessor.
+    /// Inserts a recurring successor. Nothing happens when an active occurrence of the series is due
+    /// after the predecessor (series guard). A free key is filled; a <c>Cancelled</c> row (left by a
+    /// reschedule) is replaced only when <paramref name="predecessorWon"/>; an active, delivered, expired,
+    /// or failed row is never touched. When the successor's slot holds a completed occurrence that was
+    /// not cancelled, the series continues at the slot after it.
     /// </summary>
     private static void TryInsertSuccessor(
         ScheduledReminder successor,
         DateTimeOffset predecessorDueTimeUtc,
+        bool predecessorWon,
         Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder> pending,
         Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), (ScheduledReminder Reminder, AwaitingAckReminder State)> awaiting,
         Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), CompletedReminder> completed)
     {
-        var key = ToKey(successor);
-        if (pending.ContainsKey(key) || awaiting.ContainsKey(key) || completed.ContainsKey(key))
-            return;
-
         bool IsLaterActiveOccurrence((ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc) k)
-            => k.Entity.Equals(key.Entity) && k.Key.Equals(key.Key) && k.DueTimeUtc > predecessorDueTimeUtc;
+            => k.Entity.Equals(successor.Entity) && k.Key.Equals(successor.Key) && k.DueTimeUtc > predecessorDueTimeUtc;
 
         if (pending.Keys.Any(IsLaterActiveOccurrence) || awaiting.Keys.Any(IsLaterActiveOccurrence))
             return;
 
+        var key = ToKey(successor);
+        if (completed.TryGetValue(key, out var occupant)
+            && occupant.Status != ReminderCompletionStatus.Cancelled
+            && TryGetFollowingSlot(successor, out var following))
+        {
+            successor = following;
+            key = ToKey(successor);
+        }
+
+        if (completed.TryGetValue(key, out occupant))
+        {
+            if (occupant.Status != ReminderCompletionStatus.Cancelled || !predecessorWon)
+                return;
+
+            completed.Remove(key);
+        }
+
         pending[key] = successor;
+    }
+
+    private static bool TryGetFollowingSlot(ScheduledReminder successor, out ScheduledReminder following)
+    {
+        following = successor;
+        if (successor.RepeatInterval is not { } interval || interval <= TimeSpan.Zero)
+            return false;
+
+        try
+        {
+            var nextDue = successor.DueTimeUtc.Add(interval);
+            following = successor with
+            {
+                When = nextDue,
+                OccurrenceDueTimeUtc = nextDue,
+                DeliveryDeadlineUtc = successor.DeliveryDeadlineUtc?.Add(interval)
+            };
+            return true;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return false;
+        }
     }
 
     /// <inheritdoc />

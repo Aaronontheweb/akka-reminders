@@ -124,9 +124,18 @@ public sealed record AwaitingAckReminder(
 /// same <see cref="ReminderMutationBatch"/>.
 /// </summary>
 /// <remarks>
-/// Storage inserts <paramref name="Successor"/> only when no row with the same primary key exists
-/// (in any state) and no non-completed occurrence of the same series has a due time later than
-/// <paramref name="PredecessorDueTimeUtc"/>. Storage never resets an existing row for a successor.
+/// Storage rules for a successor:
+/// <list type="bullet">
+/// <item><description>Nothing is written when a non-completed occurrence of the same series has a due time later
+/// than <paramref name="PredecessorDueTimeUtc"/> (series guard).</description></item>
+/// <item><description>A free primary key is inserted as <see cref="ReminderCompletionStatus.Pending"/>.</description></item>
+/// <item><description>A <see cref="ReminderCompletionStatus.Cancelled"/> row at the key (left behind when the reminder
+/// was rescheduled) is replaced, but only when the predecessor won its own transition in the same commit
+/// (it moved to <see cref="ReminderCompletionStatus.AwaitingAck"/> in this batch). A real cancel also cancels the
+/// predecessor, so that transition cannot win after one.</description></item>
+/// <item><description>An active, delivered, expired, or failed row is never changed. When the key holds a delivered,
+/// expired, or failed occurrence, the series continues at the slot one interval later, under the same rules.</description></item>
+/// </list>
 /// </remarks>
 /// <param name="Successor">The next occurrence to insert as <see cref="ReminderCompletionStatus.Pending"/>.</param>
 /// <param name="PredecessorDueTimeUtc">Due time of the occurrence that produced this successor.</param>
@@ -142,8 +151,8 @@ public sealed record RecurringSuccessor(
 /// Storage applies this as a compare-and-set: the predecessor moves to <paramref name="Status"/> only
 /// if it is still active and <see cref="ReminderCompletionStatus.Pending"/>. When that transition does
 /// not apply (the occurrence was cancelled, delivered, or already rolled forward), storage changes
-/// nothing and skips the successor. When it applies, <paramref name="Successor"/> is inserted with the
-/// same rules as <see cref="RecurringSuccessor"/>.
+/// nothing and skips the successor. When it applies, <paramref name="Successor"/> is written with the
+/// same rules as <see cref="RecurringSuccessor"/> (the compare-and-set counts as the predecessor winning).
 /// </remarks>
 /// <param name="Predecessor">The occurrence as the scheduler read it. Its <see cref="ScheduledReminder.AttemptCount"/>
 /// and <see cref="ScheduledReminder.LastFailureReason"/> are stored with the terminal status.</param>
@@ -173,8 +182,8 @@ public sealed record ReminderMutationBatch(
     public static ReminderMutationBatch Empty { get; } = new([], [], []);
 
     /// <summary>
-    /// Next occurrences of recurring reminders delivered in this batch. Inserted only if absent;
-    /// never reset an existing row. See <see cref="RecurringSuccessor"/>.
+    /// Next occurrences of recurring reminders delivered in this batch. Never reset an active, delivered,
+    /// expired, or failed row. See <see cref="RecurringSuccessor"/>.
     /// </summary>
     public IReadOnlyList<RecurringSuccessor> RecurringSuccessors { get; init; } = [];
 
@@ -260,6 +269,11 @@ public interface IReminderStorage
     /// <summary>
     /// Gets the next reminders that are due before the specified deadline.
     /// </summary>
+    /// <remarks>
+    /// A due occurrence whose payload can no longer be deserialized must not fail the whole fetch, or it
+    /// would block every other reminder. The built-in providers mark such an occurrence
+    /// <see cref="ReminderCompletionStatus.Failed"/> (with the error as its failure reason) and leave it out.
+    /// </remarks>
     /// <param name="untilDeadline">Deadline for fetching reminders</param>
     /// <param name="now">Current time from scheduler</param>
     /// <param name="maxCount">Maximum number of reminders to return.</param>
@@ -384,6 +398,12 @@ public interface IReminderStorage
 /// </list>
 /// Storage that does not implement this interface keeps the behavior of earlier releases: the
 /// scheduler writes successors through <see cref="ReminderMutationBatch.PendingUpserts"/>.
+/// <para>
+/// The scheduler checks for this interface on the storage instance it receives. A decorator that
+/// wraps another storage (logging, metrics, retries, fault injection) must implement this interface
+/// too and forward every member, including the new <see cref="ReminderMutationBatch"/> lists;
+/// otherwise the scheduler falls back to the older behavior for the wrapped storage.
+/// </para>
 /// </remarks>
 public interface IRecurringRollForwardStorage : IReminderStorage
 {

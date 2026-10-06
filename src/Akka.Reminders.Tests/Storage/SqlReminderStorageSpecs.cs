@@ -56,16 +56,28 @@ public sealed class PostgreSqlCollection : ICollectionFixture<PostgreSqlContaine
 public class SqlServerReminderStorageSpecs(SqlServerContainerFixture fixture) : ReminderStorageSpecBase
 {
     private ActorSystem? _system;
+    private SqlServerReminderStorageSettings? _settings;
+
+    protected override async Task<bool> CorruptPayloadAsync(ScheduledReminder reminder)
+    {
+        await using var connection = new Microsoft.Data.SqlClient.SqlConnection(_settings!.ConnectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"UPDATE [{_settings.SchemaName}].[{_settings.TableName}] SET SerializerId = 987654 WHERE ReminderKey = @key";
+        command.Parameters.AddWithValue("@key", reminder.Key.Name);
+        Assert.Equal(1, await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken));
+        return true;
+    }
 
     protected override Task<IReminderStorage> CreateStorage()
     {
         _system = ActorSystem.Create("test-system");
-        var settings = SqlServerReminderStorageSettings.Create(fixture.ConnectionString) with
+        _settings = SqlServerReminderStorageSettings.Create(fixture.ConnectionString) with
         {
             TableName = $"reminders_{Guid.NewGuid():N}"
         };
 
-        return Task.FromResult<IReminderStorage>(new SqlServerReminderStorage(settings, _system));
+        return Task.FromResult<IReminderStorage>(new SqlServerReminderStorage(_settings, _system));
     }
 
     protected override async Task CleanupStorage(IReminderStorage storage)
@@ -81,16 +93,28 @@ public class SqlServerReminderStorageSpecs(SqlServerContainerFixture fixture) : 
 public class PostgreSqlReminderStorageSpecs(PostgreSqlContainerFixture fixture) : ReminderStorageSpecBase
 {
     private ActorSystem? _system;
+    private PostgreSqlReminderStorageSettings? _settings;
+
+    protected override async Task<bool> CorruptPayloadAsync(ScheduledReminder reminder)
+    {
+        await using var connection = new Npgsql.NpgsqlConnection(_settings!.ConnectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"UPDATE \"{_settings.SchemaName}\".\"{_settings.TableName}\" SET serializer_id = 987654 WHERE reminder_key = @key";
+        command.Parameters.AddWithValue("key", reminder.Key.Name);
+        Assert.Equal(1, await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken));
+        return true;
+    }
 
     protected override Task<IReminderStorage> CreateStorage()
     {
         _system = ActorSystem.Create("test-system");
-        var settings = PostgreSqlReminderStorageSettings.Create(fixture.ConnectionString) with
+        _settings = PostgreSqlReminderStorageSettings.Create(fixture.ConnectionString) with
         {
             TableName = $"reminders_{Guid.NewGuid():N}"
         };
 
-        return Task.FromResult<IReminderStorage>(new PostgreSqlReminderStorage(settings, _system));
+        return Task.FromResult<IReminderStorage>(new PostgreSqlReminderStorage(_settings, _system));
     }
 
     protected override async Task CleanupStorage(IReminderStorage storage)
@@ -106,6 +130,18 @@ public class PostgreSqlReminderStorageSpecs(PostgreSqlContainerFixture fixture) 
 public class SqliteReminderStorageSpecs : ReminderStorageSpecBase
 {
     private ActorSystem? _system;
+    private SqliteReminderStorageSettings? _settings;
+
+    protected override async Task<bool> CorruptPayloadAsync(ScheduledReminder reminder)
+    {
+        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection(_settings!.ConnectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"UPDATE \"{_settings.TableName}\" SET serializer_id = 987654 WHERE reminder_key = @key";
+        command.Parameters.AddWithValue("@key", reminder.Key.Name);
+        Assert.Equal(1, await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken));
+        return true;
+    }
     private string? _databasePath;
 
     protected override Task<IReminderStorage> CreateStorage()
@@ -115,6 +151,7 @@ public class SqliteReminderStorageSpecs : ReminderStorageSpecBase
         _databasePath = Path.Combine(Path.GetTempPath(), $"akka-reminders-{Guid.NewGuid():N}.db");
         var connectionString = $"Data Source={_databasePath};Mode=ReadWriteCreate;Cache=Shared";
         var settings = SqliteReminderStorageSettings.Create(connectionString);
+        _settings = settings;
 
         IReminderStorage storage = new SqliteReminderStorage(settings, _system);
         return Task.FromResult(storage);

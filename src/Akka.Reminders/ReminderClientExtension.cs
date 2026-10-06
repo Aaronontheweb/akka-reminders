@@ -123,6 +123,13 @@ public sealed class ReminderClientExtension : IExtension
             message,
             RepeatInterval: null,
             MaxDeliveryWindow: maxDeliveryWindow);
+
+        if (ReminderValidation.Validate(command) is { } validationError)
+        {
+            return Task.FromResult(new ReminderProtocol.ReminderScheduled(
+                command, ReminderScheduleResponseCode.Error, validationError));
+        }
+
         return SendToSchedulerAsync<ReminderProtocol.ScheduleReminder, ReminderProtocol.ReminderScheduled>(
             command,
             ct,
@@ -197,12 +204,10 @@ public sealed class ReminderClientExtension : IExtension
             RepeatInterval: interval,
             MaxDeliveryWindow: maxDeliveryWindow);
 
-        if (interval <= TimeSpan.Zero)
+        if (ReminderValidation.Validate(command) is { } validationError)
         {
             return Task.FromResult(new ReminderProtocol.ReminderScheduled(
-                command,
-                ReminderScheduleResponseCode.Error,
-                $"Recurring reminder interval must be greater than zero, but was [{interval}]."));
+                command, ReminderScheduleResponseCode.Error, validationError));
         }
 
         return SendToSchedulerAsync<ReminderProtocol.ScheduleReminder, ReminderProtocol.ReminderScheduled>(

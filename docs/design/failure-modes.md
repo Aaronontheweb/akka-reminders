@@ -64,9 +64,10 @@ Flush buffered ack writes (if any)
           - Terminal completions
           - AwaitingAck transitions
           - Recurring roll-forwards (compare-and-set on the current occurrence)
-          - Recurring successors (insert only if absent)
+          - Recurring successors (never reset an active, delivered, expired, or failed row)
       -> Deliver ReminderEnvelope<T> only after the commit succeeds
   -> If a roll-forward produced a slot that is already due, fetch again in the same run
+     (saves one tick; bounded per run)
   -> Update overview (incrementally from batch results; reload from storage only on failure)
   -> Schedule next fetch timer
 ```
@@ -89,16 +90,28 @@ series would end.
   marked `Failed` and the series ends; the scheduler keeps running.
 - A recurring occurrence that runs out of retries because its shard region is missing rolls
   forward the same way, with `Expired` or `Failed` as its status.
-- The delivered path uses the same slot math, so a delivery and a roll-forward never disagree
-  about the next slot.
+- The delivered path uses the same slot math. The two paths can still pick different slots,
+  because each uses the clock reading of its own chunk; the series guard below makes sure only
+  one of them adds a successor.
 
 Storage fences that keep the series single and cancellable:
 
 - **Compare-and-set.** A roll-forward ends the current occurrence only if it is still active and
   `Pending`. If a cancel, a delivery, or another scheduler (singleton handover, zombie node, clock
   skew) got there first, storage changes nothing and skips the successor.
-- **Insert if absent.** Successors never use the upsert that resets a row to `Pending`. An existing
-  row with the same key keeps its state, whether `AwaitingAck`, `Delivered`, or `Cancelled`.
+- **No reset of live or finished rows.** Successors never use the upsert that resets a row to
+  `Pending`. A row with the same key that is active, `Delivered`, `Expired`, or `Failed` keeps its
+  state. If that slot already finished (`Delivered`, `Expired`, `Failed`), the successor goes to the
+  slot one interval later instead, so the series does not stop.
+- **Cancelled rows from a reschedule.** Scheduling a reminder again with the same key cancels its
+  active rows, then resets the first occurrence. The old successor stays behind as `Cancelled` at the
+  key the new series will use next. A successor may replace a `Cancelled` row, but only when its
+  predecessor won its own transition in the same transaction (the roll-forward compare-and-set, or
+  the move to `AwaitingAck` on delivery). A real cancel also cancels the predecessor, so after one
+  that transition cannot win and nothing comes back.
+- **Retries do not revive finished rows.** In the scheduler's commit, retry and attempt-detail
+  upserts only update rows that are still active. A retry that was read before a concurrent cancel
+  or ack leaves the finished row alone. (Scheduling a reminder still resets its first occurrence.)
 - **Series guard.** A successor is inserted only if no active occurrence of the same series is due
   after the current one. An ack-timeout retry moves a delivered occurrence back to `Pending` while
   its successor already exists; the guard stops that retry from starting a second series.
@@ -106,11 +119,13 @@ Storage fences that keep the series single and cancellable:
   before updating them. A concurrent roll-forward holds the current occurrence's row lock until it
   commits, so the cancel waits and then also cancels the successor that roll-forward inserted.
   Successors are written after the current occurrence's row is locked in the same transaction.
-- **SQL Server.** The conditional insert reads with `UPDLOCK, HOLDLOCK`, so two transactions cannot
-  both pass the absence check and race on the primary key.
+- **SQL Server.** The successor `MERGE` uses `HOLDLOCK` and its probes use `UPDLOCK, HOLDLOCK`, so two
+  transactions cannot both pass the absence check and race on the primary key.
 
 Custom storage providers opt in by implementing `IRecurringRollForwardStorage`. Without it, the
-scheduler writes successors through the pending upsert list, as earlier releases did.
+scheduler writes successors through the pending upsert list, as earlier releases did. The scheduler
+checks the interface on the instance it is given, so a storage decorator (logging, metrics, fault
+injection) must implement `IRecurringRollForwardStorage` too and forward every member.
 
 ### Ack handler
 
@@ -241,6 +256,29 @@ scheduler past a recurring occurrence's deadline before it is delivered.
 - The roll-forward and the expiry happen in one commit, so a crash in between cannot lose the series.
 - A scheduler that starts with such an occurrence in storage leaves it alone during startup expiry,
   reports it as overdue in the overview, and rolls it forward on its first tick.
+
+### Recurring reminder registered again with the same key
+
+Apps often register their schedules on every start, with the same key and first due time.
+
+- Registering cancels the active rows of the key and resets the first occurrence to `Pending`.
+- If the first occurrence is still inside its window it is delivered again (at-least-once).
+- The next occurrence replaces the `Cancelled` row the old series left at that key, or, if that slot
+  was already delivered, goes to the slot after it. The series continues.
+
+### Stored payload can no longer be deserialized
+
+A message type can be renamed or removed, or its serializer can be dropped from configuration.
+
+- When a due fetch reads such an occurrence, storage marks it `Failed` with the error as its failure
+  reason and returns the other due reminders. One bad row cannot block every delivery.
+- A recurring series whose payload cannot be read ends with that `Failed` occurrence.
+
+### Due-reminder fetch fails
+
+- No reminders are delivered and nothing is written.
+- The next fetch waits 1 s, doubling per consecutive failure up to `2 * StorageTimeout`, even when
+  the overview says work is overdue. A successful fetch resets the backoff.
 
 ### Late ack for superseded recurring occurrence
 

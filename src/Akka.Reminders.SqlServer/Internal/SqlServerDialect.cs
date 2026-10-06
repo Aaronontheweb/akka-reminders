@@ -62,7 +62,13 @@ internal sealed class SqlServerDialect : ISqlDialect
             """;
     }
 
-    public string GetBatchUpsertRemindersSql(string schemaName, string tableName, int count)
+    /// <summary>
+    /// Insert-or-update for pending occurrences. With <paramref name="activeRowsOnly"/> an existing row is
+    /// updated only while it is still active; a cancelled, delivered, expired, or failed row is left alone.
+    /// The scheduler's commit path uses that so a retry can never revive an occurrence that a concurrent
+    /// cancel already ended. Scheduling a reminder (which cancels the key first) resets any row.
+    /// </summary>
+    public string GetBatchUpsertRemindersSql(string schemaName, string tableName, int count, bool activeRowsOnly = false)
     {
         var fullTableName = $"[{schemaName}].[{tableName}]";
         var values = string.Join(",\n                ",
@@ -80,7 +86,7 @@ internal sealed class SqlServerDialect : ISqlDialect
                AND target.EntityId = source.EntityId
                AND target.ReminderKey = source.ReminderKey
                AND target.DueTimeUtc = source.DueTimeUtc
-            WHEN MATCHED THEN
+            WHEN MATCHED{(activeRowsOnly ? " AND target.IsCompleted = 0" : string.Empty)} THEN
                 UPDATE SET
                     WhenUtc = source.WhenUtc,
                     RepeatIntervalTicks = source.RepeatIntervalTicks,
@@ -376,36 +382,109 @@ internal sealed class SqlServerDialect : ISqlDialect
             """;
     }
 
-    public string GetInsertRecurringSuccessorsSql(string schemaName, string tableName, int count)
+    /// <summary>
+    /// Inserts recurring successors. For each successor the batch holds two statements: the computed
+    /// slot, then the slot after it, which runs only if the computed slot holds a completed occurrence
+    /// that was not cancelled (it was already delivered, expired, or failed; the series continues
+    /// after it). Each statement:
+    /// <list type="bullet">
+    /// <item><description>does nothing when an active occurrence of the series is due after the predecessor (series guard);</description></item>
+    /// <item><description>inserts the slot when no row has its key;</description></item>
+    /// <item><description>replaces a <c>Cancelled</c> row with the same key (left behind when the reminder was
+    /// rescheduled), and only when <paramref name="requireAwaitingPredecessor"/> is false or the predecessor
+    /// moved to <c>AwaitingAck</c> earlier in this transaction;</description></item>
+    /// <item><description>never touches a row that is active, delivered, expired, or failed.</description></item>
+    /// </list>
+    /// <c>HOLDLOCK</c> on the MERGE target and <c>UPDLOCK, HOLDLOCK</c> on the probes hold key-range locks until
+    /// commit, so a concurrent transaction cannot insert the same key between the check and the insert.
+    /// </summary>
+    public string GetInsertRecurringSuccessorsSql(string schemaName, string tableName, int count, bool requireAwaitingPredecessor)
     {
         var fullTableName = $"[{schemaName}].[{tableName}]";
 
-        // UPDLOCK + HOLDLOCK hold key-range locks on the probed keys until commit, so a concurrent
-        // transaction cannot insert the same successor between the check and the insert.
-        return string.Join("\n", Enumerable.Range(0, count).Select(i => $"""
-            INSERT INTO {fullTableName}
-                (ShardRegionName, EntityId, ReminderKey, WhenUtc, DueTimeUtc, RepeatIntervalTicks,
-                 SerializerId, Manifest, Payload, AttemptCount, LastFailureReason,
-                 MaxDeliveryWindowTicks, DeliveryDeadlineUtc,
-                 IsCompleted, CompletedAtUtc, CompletionStatus, DeliveredAtUtc, AckDeadlineUtc)
-            SELECT @ShardRegionName{i}, @EntityId{i}, @ReminderKey{i}, @WhenUtc{i}, @DueTimeUtc{i}, @RepeatIntervalTicks{i},
-                   @SerializerId{i}, @Manifest{i}, @Payload{i}, @AttemptCount{i}, @LastFailureReason{i},
-                   @MaxDeliveryWindowTicks{i}, @DeliveryDeadlineUtc{i},
-                   0, NULL, 'Pending', NULL, NULL
-            WHERE NOT EXISTS (
-                    SELECT 1 FROM {fullTableName} WITH (UPDLOCK, HOLDLOCK)
-                    WHERE ShardRegionName = @ShardRegionName{i}
-                      AND EntityId = @EntityId{i}
-                      AND ReminderKey = @ReminderKey{i}
-                      AND DueTimeUtc = @DueTimeUtc{i})
-              AND NOT EXISTS (
-                    SELECT 1 FROM {fullTableName} WITH (UPDLOCK, HOLDLOCK)
-                    WHERE ShardRegionName = @ShardRegionName{i}
-                      AND EntityId = @EntityId{i}
-                      AND ReminderKey = @ReminderKey{i}
-                      AND IsCompleted = 0
-                      AND DueTimeUtc > @PredecessorDueTimeUtc{i});
-            """));
+        string Statement(int i, string slot, bool afterCompletedSlot)
+        {
+            var slotCondition = afterCompletedSlot
+                ? $"""
+
+                      AND EXISTS (
+                        SELECT 1 FROM {fullTableName} c WITH (UPDLOCK, HOLDLOCK)
+                        WHERE c.ShardRegionName = @ShardRegionName{i}
+                          AND c.EntityId = @EntityId{i}
+                          AND c.ReminderKey = @ReminderKey{i}
+                          AND c.DueTimeUtc = @DueTimeUtc{i}
+                          AND c.IsCompleted = 1
+                          AND c.CompletionStatus <> 'Cancelled')
+                """
+                : string.Empty;
+            var predecessorCondition = requireAwaitingPredecessor
+                ? $"""
+
+                    AND EXISTS (
+                        SELECT 1 FROM {fullTableName} p
+                        WHERE p.ShardRegionName = @ShardRegionName{i}
+                          AND p.EntityId = @EntityId{i}
+                          AND p.ReminderKey = @ReminderKey{i}
+                          AND p.DueTimeUtc = @PredecessorDueTimeUtc{i}
+                          AND p.IsCompleted = 0
+                          AND p.CompletionStatus = 'AwaitingAck')
+                """
+                : string.Empty;
+
+            return $"""
+                MERGE {fullTableName} WITH (HOLDLOCK) AS target
+                USING (
+                    SELECT @ShardRegionName{i} AS ShardRegionName, @EntityId{i} AS EntityId, @ReminderKey{i} AS ReminderKey,
+                           @{slot}WhenUtc{i} AS WhenUtc, @{slot}DueTimeUtc{i} AS DueTimeUtc, @RepeatIntervalTicks{i} AS RepeatIntervalTicks,
+                           @SerializerId{i} AS SerializerId, @Manifest{i} AS Manifest, @Payload{i} AS Payload,
+                           @AttemptCount{i} AS AttemptCount, @LastFailureReason{i} AS LastFailureReason,
+                           @MaxDeliveryWindowTicks{i} AS MaxDeliveryWindowTicks, @{slot}DeliveryDeadlineUtc{i} AS DeliveryDeadlineUtc
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM {fullTableName} g WITH (UPDLOCK, HOLDLOCK)
+                        WHERE g.ShardRegionName = @ShardRegionName{i}
+                          AND g.EntityId = @EntityId{i}
+                          AND g.ReminderKey = @ReminderKey{i}
+                          AND g.IsCompleted = 0
+                          AND g.DueTimeUtc > @PredecessorDueTimeUtc{i}){slotCondition}
+                ) AS source
+                ON target.ShardRegionName = source.ShardRegionName
+                   AND target.EntityId = source.EntityId
+                   AND target.ReminderKey = source.ReminderKey
+                   AND target.DueTimeUtc = source.DueTimeUtc
+                WHEN MATCHED AND target.IsCompleted = 1
+                    AND target.CompletionStatus = 'Cancelled'{predecessorCondition} THEN
+                    UPDATE SET
+                        WhenUtc = source.WhenUtc,
+                        RepeatIntervalTicks = source.RepeatIntervalTicks,
+                        SerializerId = source.SerializerId,
+                        Manifest = source.Manifest,
+                        Payload = source.Payload,
+                        AttemptCount = source.AttemptCount,
+                        LastFailureReason = source.LastFailureReason,
+                        MaxDeliveryWindowTicks = source.MaxDeliveryWindowTicks,
+                        DeliveryDeadlineUtc = source.DeliveryDeadlineUtc,
+                        IsCompleted = 0,
+                        CompletedAtUtc = NULL,
+                        CompletionStatus = 'Pending',
+                        DeliveredAtUtc = NULL,
+                        AckDeadlineUtc = NULL
+                WHEN NOT MATCHED THEN
+                    INSERT (ShardRegionName, EntityId, ReminderKey, WhenUtc, DueTimeUtc, RepeatIntervalTicks,
+                            SerializerId, Manifest, Payload, AttemptCount, LastFailureReason,
+                            MaxDeliveryWindowTicks, DeliveryDeadlineUtc,
+                            IsCompleted, CompletedAtUtc, CompletionStatus, DeliveredAtUtc, AckDeadlineUtc)
+                    VALUES (source.ShardRegionName, source.EntityId, source.ReminderKey, source.WhenUtc, source.DueTimeUtc,
+                            source.RepeatIntervalTicks, source.SerializerId, source.Manifest, source.Payload,
+                            source.AttemptCount, source.LastFailureReason, source.MaxDeliveryWindowTicks,
+                            source.DeliveryDeadlineUtc, 0, NULL, 'Pending', NULL, NULL);
+                """;
+        }
+
+        return string.Join("\n", Enumerable.Range(0, count).SelectMany(i => new[]
+        {
+            Statement(i, string.Empty, afterCompletedSlot: false),
+            Statement(i, "Next", afterCompletedSlot: true)
+        }));
     }
 
     /// <summary>
