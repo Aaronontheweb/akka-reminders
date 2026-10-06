@@ -101,7 +101,7 @@ internal sealed class SqliteDialect : ISqlDialect
             WHERE is_completed = 0
               AND completion_status = 'Pending'
               AND when_utc <= @UntilDeadline
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now OR repeat_interval_ticks IS NOT NULL)
             ORDER BY when_utc ASC
             LIMIT {maxCount};
             """;
@@ -139,7 +139,8 @@ internal sealed class SqliteDialect : ISqlDialect
                 ack_deadline_utc = NULL
             WHERE is_completed = 0
               AND delivery_deadline_utc IS NOT NULL
-              AND delivery_deadline_utc <= @Now;
+              AND delivery_deadline_utc <= @Now
+              AND (completion_status <> 'Pending' OR repeat_interval_ticks IS NULL);
             """;
     }
 
@@ -163,7 +164,7 @@ internal sealed class SqliteDialect : ISqlDialect
             FROM {fullTableName}
             WHERE is_completed = 0
               AND completion_status = 'Pending'
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now);
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now OR repeat_interval_ticks IS NOT NULL);
             """;
     }
 
@@ -176,7 +177,7 @@ internal sealed class SqliteDialect : ISqlDialect
             FROM {fullTableName}
             WHERE is_completed = 0
               AND completion_status = 'Pending'
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now OR repeat_interval_ticks IS NOT NULL)
             ORDER BY when_utc ASC
             LIMIT 1 OFFSET @Skip;
             """;
@@ -229,7 +230,9 @@ internal sealed class SqliteDialect : ISqlDialect
             WHERE shard_region_name = @ShardRegionName
               AND entity_id = @EntityId
               AND is_completed = 0
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
+              AND (delivery_deadline_utc IS NULL
+                   OR delivery_deadline_utc > @Now
+                   OR (repeat_interval_ticks IS NOT NULL AND completion_status = 'Pending'))
             ORDER BY when_utc ASC;
             """;
     }

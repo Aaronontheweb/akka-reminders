@@ -26,6 +26,13 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     private static (ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc) ToKey(CompletedReminder reminder)
         => (reminder.Entity, reminder.Key, reminder.DueTimeUtc);
 
+    /// <summary>
+    /// A pending occurrence is still the scheduler's work while inside its window; a pending recurring
+    /// occurrence stays visible after its deadline so the scheduler can roll the series forward.
+    /// </summary>
+    private static bool IsActivePending(ScheduledReminder reminder, DateTimeOffset now)
+        => reminder.RepeatInterval.HasValue || !reminder.Deadline.IsExpired(now);
+
     /// <inheritdoc />
     public Task<ReminderProtocol.ReminderScheduled> ScheduleReminderAsync(
         ScheduledReminder reminder,
@@ -275,9 +282,11 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     {
         var now = DateTimeOffset.UtcNow;
         var reminders = _pendingReminders.Values
-            .Concat(_awaitingAckReminders.Values.Select(v => v.Reminder))
+            .Where(r => IsActivePending(r, now))
+            .Concat(_awaitingAckReminders.Values
+                .Select(v => v.Reminder)
+                .Where(r => !r.Deadline.IsExpired(now)))
             .Where(r => r.Entity.Equals(entity))
-            .Where(r => !r.Deadline.IsExpired(now))
             .OrderBy(r => r.When)
             .Skip(skip)
             .Take(take)
@@ -290,7 +299,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     public Task<ReminderOverview> GetRemindersOverviewAsync(DateTimeOffset now, CancellationToken ct = default)
     {
         var pending = _pendingReminders.Values
-            .Where(r => !r.Deadline.IsExpired(now))
+            .Where(r => IsActivePending(r, now))
             .OrderBy(r => r.When)
             .ToList();
 
@@ -312,7 +321,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         CancellationToken ct = default)
     {
         var dueReminders = _pendingReminders.Values
-            .Where(r => !r.Deadline.IsExpired(now) && r.When <= untilDeadline)
+            .Where(r => IsActivePending(r, now) && r.When <= untilDeadline)
             .OrderBy(r => r.When)
             .Take(maxCount.Value)
             .ToList();
@@ -323,7 +332,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         var remainingPending = _pendingReminders
             .Where(kvp => !fetchedKeys.Contains(kvp.Key))
             .Select(kvp => kvp.Value)
-            .Where(r => !r.Deadline.IsExpired(now))
+            .Where(r => IsActivePending(r, now))
             .OrderBy(r => r.When)
             .ToList();
 
@@ -385,6 +394,10 @@ public sealed class InMemoryReminderStorage : IReminderStorage
 
         foreach (var kvp in _pendingReminders.ToArray())
         {
+            // Pending recurring occurrences are left for the scheduler, which rolls the series forward.
+            if (kvp.Value.RepeatInterval.HasValue)
+                continue;
+
             if (kvp.Value.Deadline.IsExpired(now))
             {
                 if (_pendingReminders.TryRemove(kvp.Key, out var pending))

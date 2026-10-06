@@ -14,7 +14,8 @@ Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
 
 Recurring reminders are modeled as a stream of occurrences.
 
-- The next occurrence is persisted when the current occurrence is delivered.
+- The next occurrence is persisted, in the same commit, when the current occurrence is delivered or ends without delivery (expired, or failed because its shard region is missing).
+- The next occurrence is the earliest slot whose deadline has not passed. Missed slots are skipped, not replayed.
 - Each occurrence starts with a new retry budget.
 - Each occurrence has its own absolute UTC deadline.
 - By default, a recurring occurrence expires when the next occurrence becomes due.
@@ -180,6 +181,19 @@ Delivery-state writes now happen **before** user messages are sent.
 - Awaiting-ack state is stored in the database, not only in memory.
 - On startup, the scheduler loads the next ack deadline from storage as part of `InitResult` and schedules the timeout check before processing any messages.
 - Late acks remain safe because they are matched by `DueTimeUtc`.
+
+### Scheduler lag longer than the repeat interval
+
+Restarts, failover, thread-pool starvation, GC pauses, or slow storage can delay the scheduler past
+a recurring occurrence's deadline before it is delivered.
+
+- Storage expiry leaves `Pending` recurring occurrences alone, and the fetch and overview queries keep
+  returning them, so the scheduler still sees them (including right after a restart).
+- The scheduler marks the stale occurrence `Expired` (never delivered late) and writes the next live
+  slot in the same commit: `due + k * interval`, with `k` the smallest value whose deadline is after now.
+- A lag of many intervals produces one occurrence, not a backlog.
+- A stored payload that can no longer be deserialized is marked `Failed` during the fetch, so one
+  bad row cannot block other reminders.
 
 ### Late ack for superseded recurring occurrence
 

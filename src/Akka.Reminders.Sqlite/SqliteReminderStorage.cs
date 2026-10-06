@@ -15,6 +15,7 @@ public sealed class SqliteReminderStorage : IReminderStorage
     private readonly SqliteReminderStorageSettings _settings;
     private readonly ISqlDialect _dialect;
     private readonly Akka.Serialization.Serialization _serialization;
+    private readonly ILoggingAdapter _log;
     private readonly object _initLock = new();
     private volatile bool _initialized;
 
@@ -27,6 +28,7 @@ public sealed class SqliteReminderStorage : IReminderStorage
         _settings.Validate();
 
         _serialization = system.Serialization;
+        _log = Logging.GetLogger(system, GetType());
         _dialect = SqliteDialect.Instance;
     }
 
@@ -183,12 +185,33 @@ public sealed class SqliteReminderStorage : IReminderStorage
         _dialect.AddParameter(command, "@UntilDeadline", untilDeadline.UtcDateTime);
         _dialect.AddParameter(command, "@Now", now.UtcDateTime);
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-
-        while (await reader.ReadAsync(cancellationToken))
+        var unreadable = new List<CompletedReminder>();
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            reminders.Add(ReadReminderFromReader(reader));
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                try
+                {
+                    reminders.Add(ReadReminderFromReader(reader));
+                }
+                catch (UnreadablePayloadException ex)
+                {
+                    // A row whose payload can no longer be read would fail every fetch and block
+                    // all other reminders, so it is ended as Failed and left out.
+                    var row = new CompletedReminder(
+                        new ReminderEntity(reader.GetString(reader.GetOrdinal("shard_region_name")), reader.GetString(reader.GetOrdinal("entity_id"))),
+                        new ReminderKey(reader.GetString(reader.GetOrdinal("reminder_key"))),
+                        ParseDateTimeOffset(reader.GetValue(reader.GetOrdinal("due_time_utc"))),
+                        now,
+                        ReminderCompletionStatus.Failed);
+                    _log.Error(ex, "Marking reminder occurrence {0} as Failed", row);
+                    unreadable.Add(row);
+                }
+            }
         }
+
+        if (unreadable.Count > 0)
+            await MarkRemindersAsCompletedAsync(connection, null, unreadable, cancellationToken);
 
         await using var conn2 = _dialect.CreateConnection(_settings.ConnectionString);
         await conn2.OpenAsync(cancellationToken);
@@ -918,7 +941,15 @@ public sealed class SqliteReminderStorage : IReminderStorage
             ? (DateTimeOffset?)null
             : ParseDateTimeOffset(reader.GetValue(deadlineOrdinal));
 
-        var message = DeserializeMessage(serializerId, manifest, payload);
+        object message;
+        try
+        {
+            message = DeserializeMessage(serializerId, manifest, payload);
+        }
+        catch (Exception ex)
+        {
+            throw new UnreadablePayloadException(serializerId, manifest, ex);
+        }
 
         return new ScheduledReminder(
             new ReminderEntity(shardRegionName, entityId),
@@ -932,4 +963,7 @@ public sealed class SqliteReminderStorage : IReminderStorage
             deliveryDeadlineUtc,
             dueTimeUtc);
     }
+
+    private sealed class UnreadablePayloadException(int serializerId, string? manifest, Exception inner)
+        : Exception($"Reminder payload could not be deserialized (serializer [{serializerId}], manifest [{manifest}]): {inner.Message}", inner);
 }

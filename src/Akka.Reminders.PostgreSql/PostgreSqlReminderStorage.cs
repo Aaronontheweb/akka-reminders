@@ -14,6 +14,7 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
     private readonly PostgreSqlReminderStorageSettings _settings;
     private readonly ISqlDialect _dialect;
     private readonly Akka.Serialization.Serialization _serialization;
+    private readonly ILoggingAdapter _log;
     private readonly object _initLock = new();
     private volatile bool _initialized;
 
@@ -26,6 +27,7 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
         _settings.Validate();
 
         _serialization = system.Serialization;
+        _log = Logging.GetLogger(system, GetType());
         _dialect = PostgreSqlDialect.Instance;
     }
 
@@ -182,11 +184,33 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
         _dialect.AddParameter(command, "@UntilDeadline", TruncateToMicroseconds(untilDeadline));
         _dialect.AddParameter(command, "@Now", TruncateToMicroseconds(now));
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var unreadable = new List<CompletedReminder>();
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            reminders.Add(ReadReminderFromReader(reader));
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                try
+                {
+                    reminders.Add(ReadReminderFromReader(reader));
+                }
+                catch (UnreadablePayloadException ex)
+                {
+                    // A row whose payload can no longer be read would fail every fetch and block
+                    // all other reminders, so it is ended as Failed and left out.
+                    var row = new CompletedReminder(
+                        new ReminderEntity(reader.GetString(reader.GetOrdinal("shard_region_name")), reader.GetString(reader.GetOrdinal("entity_id"))),
+                        new ReminderKey(reader.GetString(reader.GetOrdinal("reminder_key"))),
+                        ReadUtc(reader, "due_time_utc")!.Value,
+                        TruncateToMicroseconds(now),
+                        ReminderCompletionStatus.Failed);
+                    _log.Error(ex, "Marking reminder occurrence {0} as Failed", row);
+                    unreadable.Add(row);
+                }
+            }
         }
+
+        if (unreadable.Count > 0)
+            await MarkRemindersAsCompletedAsync(connection, null, unreadable, cancellationToken);
 
         await using var conn2 = _dialect.CreateConnection(_settings.ConnectionString);
         await conn2.OpenAsync(cancellationToken);
@@ -875,7 +899,15 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
             ? (DateTimeOffset?)null
             : new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(deadlineOrdinal), DateTimeKind.Utc));
 
-        var message = DeserializeMessage(serializerId, manifest, payload);
+        object message;
+        try
+        {
+            message = DeserializeMessage(serializerId, manifest, payload);
+        }
+        catch (Exception ex)
+        {
+            throw new UnreadablePayloadException(serializerId, manifest, ex);
+        }
 
         return new ScheduledReminder(
             new ReminderEntity(shardRegionName, entityId),
@@ -889,4 +921,7 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
             deliveryDeadlineUtc,
             new DateTimeOffset(DateTime.SpecifyKind(dueTimeUtc, DateTimeKind.Utc)));
     }
+
+    private sealed class UnreadablePayloadException(int serializerId, string? manifest, Exception inner)
+        : Exception($"Reminder payload could not be deserialized (serializer [{serializerId}], manifest [{manifest}]): {inner.Message}", inner);
 }

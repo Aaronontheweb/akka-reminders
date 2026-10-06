@@ -123,7 +123,7 @@ internal sealed class SqlServerDialect : ISqlDialect
             WHERE IsCompleted = 0
               AND CompletionStatus = 'Pending'
               AND WhenUtc <= @UntilDeadline
-              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now)
+              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now OR RepeatIntervalTicks IS NOT NULL)
             ORDER BY WhenUtc ASC;
             """;
     }
@@ -165,7 +165,8 @@ internal sealed class SqlServerDialect : ISqlDialect
                 AckDeadlineUtc = NULL
             WHERE IsCompleted = 0
               AND DeliveryDeadlineUtc IS NOT NULL
-              AND DeliveryDeadlineUtc <= @Now;
+              AND DeliveryDeadlineUtc <= @Now
+              AND (CompletionStatus <> 'Pending' OR RepeatIntervalTicks IS NULL);
             """;
     }
 
@@ -189,7 +190,7 @@ internal sealed class SqlServerDialect : ISqlDialect
             FROM {fullTableName}
             WHERE IsCompleted = 0
               AND CompletionStatus = 'Pending'
-              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now);
+              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now OR RepeatIntervalTicks IS NOT NULL);
             """;
     }
 
@@ -202,7 +203,7 @@ internal sealed class SqlServerDialect : ISqlDialect
             FROM {fullTableName}
             WHERE IsCompleted = 0
               AND CompletionStatus = 'Pending'
-              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now)
+              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now OR RepeatIntervalTicks IS NOT NULL)
             ORDER BY WhenUtc ASC
             OFFSET @Skip ROWS FETCH NEXT 1 ROW ONLY;
             """;
@@ -255,7 +256,9 @@ internal sealed class SqlServerDialect : ISqlDialect
             WHERE ShardRegionName = @ShardRegionName
               AND EntityId = @EntityId
               AND IsCompleted = 0
-              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now)
+              AND (DeliveryDeadlineUtc IS NULL
+                   OR DeliveryDeadlineUtc > @Now
+                   OR (RepeatIntervalTicks IS NOT NULL AND CompletionStatus = 'Pending'))
             ORDER BY WhenUtc ASC;
             """;
     }
