@@ -9,7 +9,7 @@ namespace Akka.Reminders.SqlServer;
 /// <summary>
 /// SQL Server implementation of <see cref="IReminderStorage"/>.
 /// </summary>
-public sealed class SqlServerReminderStorage : IReminderStorage
+public sealed class SqlServerReminderStorage : IRecurringRollForwardStorage
 {
     private readonly SqlServerReminderStorageSettings _settings;
     private readonly ISqlDialect _dialect;
@@ -40,6 +40,8 @@ public sealed class SqlServerReminderStorage : IReminderStorage
             await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
             await connection.OpenAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            await LockActiveRemindersAsync(connection, transaction, reminder.Entity, reminder.Key, cancellationToken);
 
             await using (var cancelCommand = CreateCommand(connection, transaction))
             {
@@ -112,6 +114,11 @@ public sealed class SqlServerReminderStorage : IReminderStorage
                 return false;
             }
 
+            // Runs after the awaiting-ack transition so each successor is written only once its
+            // predecessor's row is locked by this transaction.
+            await ApplyRecurringRollForwardsAsync(connection, transaction, mutationBatch.RecurringRollForwards, cancellationToken);
+            await InsertRecurringSuccessorsAsync(connection, transaction, mutationBatch.RecurringSuccessors, cancellationToken);
+
             await transaction.CommitAsync(cancellationToken);
             return true;
         }
@@ -119,6 +126,100 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         {
             await transaction.RollbackAsync(cancellationToken);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// First statement of a cancel transaction: locks the active occurrences it will change. A
+    /// concurrent roll-forward holds its predecessor's row lock until commit, so this waits for it,
+    /// and the cancel UPDATE that follows then sees the successor that roll-forward inserted.
+    /// </summary>
+    private async Task LockActiveRemindersAsync(
+        System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        ReminderEntity entity,
+        ReminderKey? key,
+        CancellationToken cancellationToken)
+    {
+        await using var command = CreateCommand(connection, transaction);
+        command.CommandText = _dialect.GetLockActiveRemindersSql(_settings.SchemaName, _settings.TableName, key.HasValue);
+        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+        _dialect.AddParameter(command, "@ShardRegionName", entity.ShardRegionName);
+        _dialect.AddParameter(command, "@EntityId", entity.EntityId);
+        if (key.HasValue)
+            _dialect.AddParameter(command, "@ReminderKey", key.Value.Name);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+        }
+    }
+
+    /// <summary>
+    /// Ends each pending recurring predecessor with a compare-and-set and inserts its successor only
+    /// when this transaction won the transition. A lost race (cancelled, delivered, or already rolled
+    /// forward elsewhere) changes nothing and does not fail the batch.
+    /// </summary>
+    private async Task ApplyRecurringRollForwardsAsync(
+        System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        IReadOnlyList<RecurringRollForward> rollForwards,
+        CancellationToken cancellationToken)
+    {
+        foreach (var rollForward in rollForwards)
+        {
+            var predecessor = rollForward.Predecessor;
+            int transitioned;
+            await using (var command = CreateCommand(connection, transaction))
+            {
+                command.CommandText = _dialect.GetRollForwardPredecessorSql(_settings.SchemaName, _settings.TableName);
+                command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+                _dialect.AddParameter(command, "@ShardRegionName", predecessor.Entity.ShardRegionName);
+                _dialect.AddParameter(command, "@EntityId", predecessor.Entity.EntityId);
+                _dialect.AddParameter(command, "@ReminderKey", predecessor.Key.Name);
+                _dialect.AddParameter(command, "@DueTimeUtc", predecessor.DueTimeUtc.UtcDateTime);
+                _dialect.AddParameter(command, "@CompletedAtUtc", rollForward.CompletedAt.UtcDateTime);
+                _dialect.AddParameter(command, "@CompletionStatus", rollForward.Status.ToString());
+                _dialect.AddParameter(command, "@AttemptCount", predecessor.AttemptCount);
+                _dialect.AddParameter(command, "@LastFailureReason", predecessor.LastFailureReason ?? (object)DBNull.Value);
+                transitioned = await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (transitioned == 1 && rollForward.Successor is not null)
+            {
+                await InsertRecurringSuccessorsAsync(
+                    connection,
+                    transaction,
+                    [new RecurringSuccessor(rollForward.Successor, rollForward.Predecessor.DueTimeUtc)],
+                    cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Inserts recurring successors only if absent: an existing row with the same key is never reset,
+    /// and nothing is inserted when an active occurrence of the series is already due after the predecessor.
+    /// </summary>
+    private async Task InsertRecurringSuccessorsAsync(
+        System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        IReadOnlyList<RecurringSuccessor> successors,
+        CancellationToken cancellationToken)
+    {
+        for (var offset = 0; offset < successors.Count; offset += MaxUpsertedRemindersPerStatement)
+        {
+            var chunk = successors.Skip(offset).Take(MaxUpsertedRemindersPerStatement).ToList();
+            await using var command = CreateCommand(connection, transaction);
+            command.CommandText = _dialect.GetInsertRecurringSuccessorsSql(_settings.SchemaName, _settings.TableName, chunk.Count);
+            command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+
+            for (var i = 0; i < chunk.Count; i++)
+            {
+                var successor = chunk[i];
+                BindReminderParameters(command, i, successor.Successor);
+                _dialect.AddParameter(command, $"@PredecessorDueTimeUtc{i}", successor.PredecessorDueTimeUtc.UtcDateTime);
+            }
+
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
     }
 
@@ -314,8 +415,9 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         {
             await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-
-            await using var command = connection.CreateCommand();
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await LockActiveRemindersAsync(connection, transaction, entity, key, cancellationToken);
+            await using var command = CreateCommand(connection, transaction);
             command.CommandText = _dialect.GetCancelReminderSql(_settings.SchemaName, _settings.TableName);
             command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
             _dialect.AddParameter(command, "@ShardRegionName", entity.ShardRegionName);
@@ -323,6 +425,7 @@ public sealed class SqlServerReminderStorage : IReminderStorage
             _dialect.AddParameter(command, "@ReminderKey", key.Name);
             _dialect.AddParameter(command, "@CompletedAtUtc", DateTimeOffset.UtcNow.UtcDateTime);
             var count = await command.ExecuteNonQueryAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
             return count > 0
                 ? new ReminderProtocol.RemindersCancelled(entity, ReminderCancelResponseCode.Success, [key])
                 : new ReminderProtocol.RemindersCancelled(entity, ReminderCancelResponseCode.NotFound, []);
@@ -340,9 +443,10 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         {
             await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await LockActiveRemindersAsync(connection, transaction, entity, null, cancellationToken);
             var cancelledKeys = new HashSet<ReminderKey>();
-            await using (var selectCommand = connection.CreateCommand())
+            await using (var selectCommand = CreateCommand(connection, transaction))
             {
                 selectCommand.CommandText = _dialect.GetFetchRemindersSql(_settings.SchemaName, _settings.TableName);
                 selectCommand.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
@@ -359,13 +463,14 @@ public sealed class SqlServerReminderStorage : IReminderStorage
             if (cancelledKeys.Count == 0)
                 return new ReminderProtocol.RemindersCancelled(entity, ReminderCancelResponseCode.NotFound, []);
 
-            await using var command = connection.CreateCommand();
+            await using var command = CreateCommand(connection, transaction);
             command.CommandText = _dialect.GetCancelAllRemindersSql(_settings.SchemaName, _settings.TableName);
             command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
             _dialect.AddParameter(command, "@ShardRegionName", entity.ShardRegionName);
             _dialect.AddParameter(command, "@EntityId", entity.EntityId);
             _dialect.AddParameter(command, "@CompletedAtUtc", DateTimeOffset.UtcNow.UtcDateTime);
             await command.ExecuteNonQueryAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
 
             return new ReminderProtocol.RemindersCancelled(entity, ReminderCancelResponseCode.Success, cancelledKeys.ToList());
         }

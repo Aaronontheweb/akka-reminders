@@ -9,7 +9,7 @@ namespace Akka.Reminders.Tests.Storage;
 /// Inherit from this class and implement <see cref="CreateStorage"/> to test your storage implementation.
 /// All tests will be automatically run against your implementation.
 /// </remarks>
-public abstract class ReminderStorageSpecBase : IAsyncLifetime
+public abstract partial class ReminderStorageSpecBase : IAsyncLifetime
 {
     private static readonly ReminderBatchSize DefaultBatchSize = new(1000);
 

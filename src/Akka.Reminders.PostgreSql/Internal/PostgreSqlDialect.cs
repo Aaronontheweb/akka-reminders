@@ -104,7 +104,7 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             WHERE is_completed = FALSE
               AND completion_status = 'Pending'
               AND when_utc <= @UntilDeadline
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now OR repeat_interval_ticks IS NOT NULL)
             ORDER BY when_utc ASC
             LIMIT {maxCount};
             """;
@@ -147,7 +147,8 @@ internal sealed class PostgreSqlDialect : ISqlDialect
                 ack_deadline_utc = NULL
             WHERE is_completed = FALSE
               AND delivery_deadline_utc IS NOT NULL
-              AND delivery_deadline_utc <= @Now;
+              AND delivery_deadline_utc <= @Now
+              AND (completion_status <> 'Pending' OR repeat_interval_ticks IS NULL);
             """;
     }
 
@@ -171,7 +172,7 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             FROM {fullTableName}
             WHERE is_completed = FALSE
               AND completion_status = 'Pending'
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now);
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now OR repeat_interval_ticks IS NOT NULL);
             """;
     }
 
@@ -184,7 +185,7 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             FROM {fullTableName}
             WHERE is_completed = FALSE
               AND completion_status = 'Pending'
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now OR repeat_interval_ticks IS NOT NULL)
             ORDER BY when_utc ASC
             LIMIT 1 OFFSET @Skip;
             """;
@@ -237,7 +238,9 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             WHERE shard_region_name = @ShardRegionName
               AND entity_id = @EntityId
               AND is_completed = FALSE
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
+              AND (delivery_deadline_utc IS NULL
+                   OR delivery_deadline_utc > @Now
+                   OR (repeat_interval_ticks IS NOT NULL AND completion_status = 'Pending'))
             ORDER BY when_utc ASC;
             """;
     }
@@ -331,6 +334,75 @@ internal sealed class PostgreSqlDialect : ISqlDialect
               AND t.completion_status = 'AwaitingAck'
               AND t.is_completed = FALSE
               AND (t.delivery_deadline_utc IS NULL OR t.delivery_deadline_utc > v.acked_at_utc);
+            """;
+    }
+
+    public string GetRollForwardPredecessorSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+
+        return $"""
+            UPDATE {fullTableName}
+            SET is_completed = TRUE,
+                completed_at_utc = @CompletedAtUtc,
+                completion_status = @CompletionStatus,
+                attempt_count = @AttemptCount,
+                last_failure_reason = @LastFailureReason::text,
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL
+            WHERE shard_region_name = @ShardRegionName
+              AND entity_id = @EntityId
+              AND reminder_key = @ReminderKey
+              AND due_time_utc = @DueTimeUtc
+              AND is_completed = FALSE
+              AND completion_status = 'Pending';
+            """;
+    }
+
+    public string GetInsertRecurringSuccessorsSql(string schemaName, string tableName, int count)
+    {
+        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+
+        // Parameters are cast explicitly: untyped NULL parameters in a SELECT list would resolve to text.
+        return string.Join("\n", Enumerable.Range(0, count).Select(i => $"""
+            INSERT INTO {fullTableName}
+                (shard_region_name, entity_id, reminder_key, when_utc, due_time_utc, repeat_interval_ticks,
+                 serializer_id, manifest, payload, attempt_count, last_failure_reason,
+                 max_delivery_window_ticks, delivery_deadline_utc,
+                 is_completed, completed_at_utc, completion_status, delivered_at_utc, ack_deadline_utc)
+            SELECT @ShardRegionName{i}::varchar, @EntityId{i}::varchar, @ReminderKey{i}::varchar,
+                   @WhenUtc{i}::timestamptz, @DueTimeUtc{i}::timestamptz, @RepeatIntervalTicks{i}::bigint,
+                   @SerializerId{i}::integer, @Manifest{i}::varchar, @Payload{i}::bytea, @AttemptCount{i}::integer,
+                   @LastFailureReason{i}::text, @MaxDeliveryWindowTicks{i}::bigint, @DeliveryDeadlineUtc{i}::timestamptz,
+                   FALSE, NULL, 'Pending', NULL, NULL
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {fullTableName}
+                WHERE shard_region_name = @ShardRegionName{i}::varchar
+                  AND entity_id = @EntityId{i}::varchar
+                  AND reminder_key = @ReminderKey{i}::varchar
+                  AND is_completed = FALSE
+                  AND due_time_utc > @PredecessorDueTimeUtc{i}::timestamptz)
+            ON CONFLICT (shard_region_name, entity_id, reminder_key, due_time_utc) DO NOTHING;
+            """));
+    }
+
+    /// <summary>
+    /// Row-locks the active occurrences a cancel is about to change. Run first in the cancel
+    /// transaction so the cancel UPDATE, which takes a fresh snapshot, also sees a successor that a
+    /// concurrent roll-forward committed while this statement waited on the predecessor's row lock.
+    /// </summary>
+    public string GetLockActiveRemindersSql(string schemaName, string tableName, bool matchReminderKey)
+    {
+        var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
+        var keyPredicate = matchReminderKey ? "\n              AND reminder_key = @ReminderKey" : string.Empty;
+
+        return $"""
+            SELECT 1
+            FROM {fullTableName}
+            WHERE shard_region_name = @ShardRegionName
+              AND entity_id = @EntityId{keyPredicate}
+              AND is_completed = FALSE
+            FOR UPDATE;
             """;
     }
 

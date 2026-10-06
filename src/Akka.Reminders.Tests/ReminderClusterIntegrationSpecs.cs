@@ -4,15 +4,28 @@ using Akka.Cluster.Hosting;
 using Akka.Cluster.Sharding;
 using Akka.Hosting;
 using Akka.Hosting.TestKit;
+using Akka.Remote.Hosting;
 using Akka.Reminders.Sharding;
 using Akka.Reminders.Storage;
 
 namespace Akka.Reminders.Tests;
 
 /// <summary>
+/// Real-time cluster specs (ClusterSharding + ClusterSingleton on real timers). They run one class
+/// at a time, after the parallel collections, so thread-pool contention from other tests cannot
+/// stall the scheduler past a reminder's deadline.
+/// </summary>
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class ClusterIntegrationCollection
+{
+    public const string Name = "ClusterIntegration";
+}
+
+/// <summary>
 /// Integration tests for Akka.Reminders with real ClusterSharding and ClusterSingleton.
 /// Tests reminder delivery to sharded entities in a single-node cluster.
 /// </summary>
+[Collection(ClusterIntegrationCollection.Name)]
 public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
 {
     private const string ShardRegionName = "test-entity";
@@ -23,7 +36,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
     {
     }
 
-    private void EnsureClusterFormed()
+    private async Task EnsureClusterFormedAsync()
     {
         if (_clusterFormed) return;
 
@@ -32,8 +45,8 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         cluster.Join(cluster.SelfAddress);
 
         // Wait for the cluster to be up
-        AwaitCondition(() => cluster.State.Members.Count(m => m.Status == MemberStatus.Up) == 1,
-            TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(100));
+        await AwaitConditionAsync(() => Task.FromResult(cluster.State.Members.Count(m => m.Status == MemberStatus.Up) == 1),
+            TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(100), cancellationToken: TestContext.Current.CancellationToken);
 
         _clusterFormed = true;
     }
@@ -44,14 +57,14 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         {
             var response = await client.ListRemindersAsync();
             Assert.Equal(FetchRemindersResponseCode.Success, response.ResponseCode);
-        }, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(100));
+        }, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(100), cancellationToken: TestContext.Current.CancellationToken);
     }
 
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
-        // Configure a single-node cluster
-        // Note: Using port 0 initially, then we'll form a single-node cluster manually
+        // Configure a single-node cluster on a random port; the tests form it by joining self.
         builder
+            .WithRemoting(new RemoteOptions { HostName = "localhost", Port = 0 })
             .WithClustering(new ClusterOptions
             {
                 Roles = new[] { "reminder-host" },
@@ -78,7 +91,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
     public async Task SingleReminder_ShouldBeDelivered_ToShardedEntity()
     {
         // Arrange
-        EnsureClusterFormed();
+        await EnsureClusterFormedAsync();
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient(ShardRegionName, "entity-1");
         await EnsureReminderSchedulerReady(client);
@@ -101,7 +114,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal(ReminderScheduleResponseCode.Success, result.ResponseCode);
 
         // Wait for the reminder to be delivered
-        var received = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
+        var received = await probe.ExpectMsgAsync<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("entity-1", received.EntityId);
         Assert.Equal("test message", received.Message);
     }
@@ -110,7 +123,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
     public async Task RecurringReminder_ShouldBeDelivered_MultipleTimesToShardedEntity()
     {
         // Arrange
-        EnsureClusterFormed();
+        await EnsureClusterFormedAsync();
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient(ShardRegionName, "entity-2");
         await EnsureReminderSchedulerReady(client);
@@ -122,7 +135,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         var result = await client.ScheduleRecurringReminderAsync(
             new ReminderKey("recurring-reminder"),
             DateTimeOffset.UtcNow.AddMilliseconds(100),
-            TimeSpan.FromMilliseconds(500),
+            TimeSpan.FromSeconds(2),
             new EntityMessage("entity-2", "recurring message"), ct: TestContext.Current.CancellationToken);
 
         // Assert
@@ -131,15 +144,15 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         // Wait for multiple occurrences — first delivery traverses the full
         // cluster singleton → shard region → entity actor chain which has
         // higher latency on constrained CI runners.
-        var msg1 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
+        var msg1 = await probe.ExpectMsgAsync<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("entity-2", msg1.EntityId);
         Assert.Equal("recurring message", msg1.Message);
 
-        var msg2 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        var msg2 = await probe.ExpectMsgAsync<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("entity-2", msg2.EntityId);
         Assert.Equal("recurring message", msg2.Message);
 
-        var msg3 = probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
+        var msg3 = await probe.ExpectMsgAsync<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("entity-2", msg3.EntityId);
         Assert.Equal("recurring message", msg3.Message);
 
@@ -151,7 +164,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
     public async Task MultipleEntities_ShouldReceive_TheirOwnReminders()
     {
         // Arrange
-        EnsureClusterFormed();
+        await EnsureClusterFormedAsync();
         var extension = Sys.ReminderClient();
         var client1 = extension.CreateClient(ShardRegionName, "entity-3");
         var client2 = extension.CreateClient(ShardRegionName, "entity-4");
@@ -173,8 +186,8 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
 
         // Assert - Both entities should receive their messages
         var messages = new List<TestEntity.ReminderReceived>();
-        messages.Add(probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken));
-        messages.Add(probe.ExpectMsg<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken));
+        messages.Add(await probe.ExpectMsgAsync<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken));
+        messages.Add(await probe.ExpectMsgAsync<TestEntity.ReminderReceived>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken));
 
         // Verify both entities received their correct messages
         Assert.Contains(messages, m => m.EntityId == "entity-3" && m.Message == "message for entity-3");
@@ -185,7 +198,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
     public async Task CancelledReminder_ShouldNotBeDelivered_ToShardedEntity()
     {
         // Arrange
-        EnsureClusterFormed();
+        await EnsureClusterFormedAsync();
         var extension = Sys.ReminderClient();
         var client = extension.CreateClient(ShardRegionName, "entity-5");
         await EnsureReminderSchedulerReady(client);
@@ -207,7 +220,7 @@ public class ReminderClusterIntegrationSpecs : Akka.Hosting.TestKit.TestKit
         Assert.Equal(ReminderCancelResponseCode.Success, cancelResult.ResponseCode);
 
         // Wait longer than the reminder was scheduled for
-        probe.ExpectNoMsg(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await probe.ExpectNoMsgAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
     }
 }
 

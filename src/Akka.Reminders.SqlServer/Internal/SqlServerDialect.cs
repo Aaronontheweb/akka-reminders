@@ -123,7 +123,7 @@ internal sealed class SqlServerDialect : ISqlDialect
             WHERE IsCompleted = 0
               AND CompletionStatus = 'Pending'
               AND WhenUtc <= @UntilDeadline
-              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now)
+              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now OR RepeatIntervalTicks IS NOT NULL)
             ORDER BY WhenUtc ASC;
             """;
     }
@@ -165,7 +165,8 @@ internal sealed class SqlServerDialect : ISqlDialect
                 AckDeadlineUtc = NULL
             WHERE IsCompleted = 0
               AND DeliveryDeadlineUtc IS NOT NULL
-              AND DeliveryDeadlineUtc <= @Now;
+              AND DeliveryDeadlineUtc <= @Now
+              AND (CompletionStatus <> 'Pending' OR RepeatIntervalTicks IS NULL);
             """;
     }
 
@@ -189,7 +190,7 @@ internal sealed class SqlServerDialect : ISqlDialect
             FROM {fullTableName}
             WHERE IsCompleted = 0
               AND CompletionStatus = 'Pending'
-              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now);
+              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now OR RepeatIntervalTicks IS NOT NULL);
             """;
     }
 
@@ -202,7 +203,7 @@ internal sealed class SqlServerDialect : ISqlDialect
             FROM {fullTableName}
             WHERE IsCompleted = 0
               AND CompletionStatus = 'Pending'
-              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now)
+              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now OR RepeatIntervalTicks IS NOT NULL)
             ORDER BY WhenUtc ASC
             OFFSET @Skip ROWS FETCH NEXT 1 ROW ONLY;
             """;
@@ -255,7 +256,9 @@ internal sealed class SqlServerDialect : ISqlDialect
             WHERE ShardRegionName = @ShardRegionName
               AND EntityId = @EntityId
               AND IsCompleted = 0
-              AND (DeliveryDeadlineUtc IS NULL OR DeliveryDeadlineUtc > @Now)
+              AND (DeliveryDeadlineUtc IS NULL
+                   OR DeliveryDeadlineUtc > @Now
+                   OR (RepeatIntervalTicks IS NOT NULL AND CompletionStatus = 'Pending'))
             ORDER BY WhenUtc ASC;
             """;
     }
@@ -348,6 +351,80 @@ internal sealed class SqlServerDialect : ISqlDialect
             WHERE t.CompletionStatus = 'AwaitingAck'
               AND t.IsCompleted = 0
               AND (t.DeliveryDeadlineUtc IS NULL OR t.DeliveryDeadlineUtc > v.AckedAtUtc);
+            """;
+    }
+
+    public string GetRollForwardPredecessorSql(string schemaName, string tableName)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+
+        return $"""
+            UPDATE {fullTableName}
+            SET IsCompleted = 1,
+                CompletedAtUtc = @CompletedAtUtc,
+                CompletionStatus = @CompletionStatus,
+                AttemptCount = @AttemptCount,
+                LastFailureReason = @LastFailureReason,
+                DeliveredAtUtc = NULL,
+                AckDeadlineUtc = NULL
+            WHERE ShardRegionName = @ShardRegionName
+              AND EntityId = @EntityId
+              AND ReminderKey = @ReminderKey
+              AND DueTimeUtc = @DueTimeUtc
+              AND IsCompleted = 0
+              AND CompletionStatus = 'Pending';
+            """;
+    }
+
+    public string GetInsertRecurringSuccessorsSql(string schemaName, string tableName, int count)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+
+        // UPDLOCK + HOLDLOCK hold key-range locks on the probed keys until commit, so a concurrent
+        // transaction cannot insert the same successor between the check and the insert.
+        return string.Join("\n", Enumerable.Range(0, count).Select(i => $"""
+            INSERT INTO {fullTableName}
+                (ShardRegionName, EntityId, ReminderKey, WhenUtc, DueTimeUtc, RepeatIntervalTicks,
+                 SerializerId, Manifest, Payload, AttemptCount, LastFailureReason,
+                 MaxDeliveryWindowTicks, DeliveryDeadlineUtc,
+                 IsCompleted, CompletedAtUtc, CompletionStatus, DeliveredAtUtc, AckDeadlineUtc)
+            SELECT @ShardRegionName{i}, @EntityId{i}, @ReminderKey{i}, @WhenUtc{i}, @DueTimeUtc{i}, @RepeatIntervalTicks{i},
+                   @SerializerId{i}, @Manifest{i}, @Payload{i}, @AttemptCount{i}, @LastFailureReason{i},
+                   @MaxDeliveryWindowTicks{i}, @DeliveryDeadlineUtc{i},
+                   0, NULL, 'Pending', NULL, NULL
+            WHERE NOT EXISTS (
+                    SELECT 1 FROM {fullTableName} WITH (UPDLOCK, HOLDLOCK)
+                    WHERE ShardRegionName = @ShardRegionName{i}
+                      AND EntityId = @EntityId{i}
+                      AND ReminderKey = @ReminderKey{i}
+                      AND DueTimeUtc = @DueTimeUtc{i})
+              AND NOT EXISTS (
+                    SELECT 1 FROM {fullTableName} WITH (UPDLOCK, HOLDLOCK)
+                    WHERE ShardRegionName = @ShardRegionName{i}
+                      AND EntityId = @EntityId{i}
+                      AND ReminderKey = @ReminderKey{i}
+                      AND IsCompleted = 0
+                      AND DueTimeUtc > @PredecessorDueTimeUtc{i});
+            """));
+    }
+
+    /// <summary>
+    /// Update-locks the active occurrences a cancel is about to change. Run first in the cancel
+    /// transaction so the cancel UPDATE also sees a successor that a concurrent roll-forward
+    /// committed while this statement waited on the predecessor's row lock (including under
+    /// READ_COMMITTED_SNAPSHOT, where the UPDATE would otherwise read a stale version).
+    /// </summary>
+    public string GetLockActiveRemindersSql(string schemaName, string tableName, bool matchReminderKey)
+    {
+        var fullTableName = $"[{schemaName}].[{tableName}]";
+        var keyPredicate = matchReminderKey ? "\n              AND ReminderKey = @ReminderKey" : string.Empty;
+
+        return $"""
+            SELECT COUNT(*)
+            FROM {fullTableName} WITH (UPDLOCK, ROWLOCK)
+            WHERE ShardRegionName = @ShardRegionName
+              AND EntityId = @EntityId{keyPredicate}
+              AND IsCompleted = 0;
             """;
     }
 

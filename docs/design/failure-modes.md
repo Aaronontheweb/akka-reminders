@@ -14,7 +14,8 @@ Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
 
 Recurring reminders are modeled as a stream of occurrences.
 
-- The next occurrence is persisted when the current occurrence is delivered.
+- The next occurrence is persisted when the current occurrence is delivered or reaches a terminal state (expired or failed) without delivery. Both happen in the same storage commit as the change to the current occurrence.
+- The next occurrence is the earliest slot after the current one whose deadline has not passed. Missed slots are skipped, not replayed.
 - Each occurrence starts with a new retry budget.
 - Each occurrence has its own absolute UTC deadline.
 - By default, a recurring occurrence expires when the next occurrence becomes due.
@@ -47,22 +48,69 @@ Each tick is triggered by a `FetchReminders` timer. The timer delay is derived f
 
 ```text
 Flush buffered ack writes (if any)
-  -> Expire stale occurrences (best effort)
-  -> Fetch due Pending reminders (bounded batch, up to MaxBatchSize)
-  -> Process in DeliveryCommitChunkSize chunks:
+  -> Expire stale occurrences (best effort; Pending recurring occurrences are left for the next step)
+  -> Fetch due Pending reminders (bounded batch, up to MaxBatchSize),
+     including Pending recurring occurrences whose deadline has passed
+  -> Process in DeliveryCommitChunkSize chunks, with one clock reading per chunk:
       -> Classify each occurrence:
-          - Deadline expired -> terminal (Expired)
-          - Shard region not found -> retry or terminal (Failed/Expired)
+          - Deadline expired, one-off -> terminal (Expired)
+          - Deadline expired, recurring -> roll forward: Expired + next live slot
+          - Shard region not found -> retry, or terminal (Failed/Expired);
+            a terminal recurring occurrence also rolls forward
           - Deliverable -> create AwaitingAck state
-      -> For recurring reminders: pre-create next occurrence
+      -> For delivered recurring reminders: pre-create the next occurrence
       -> Commit all mutations in a single CommitReminderMutationsAsync call:
-          - Pending upserts (retries + next recurring occurrences)
+          - Pending upserts (retries)
           - Terminal completions
           - AwaitingAck transitions
+          - Recurring roll-forwards (compare-and-set on the current occurrence)
+          - Recurring successors (insert only if absent)
       -> Deliver ReminderEnvelope<T> only after the commit succeeds
+  -> If a roll-forward produced a slot that is already due, fetch again in the same run
   -> Update overview (incrementally from batch results; reload from storage only on failure)
   -> Schedule next fetch timer
 ```
+
+#### Recurring roll-forward
+
+A recurring reminder exists in storage only as its current occurrence row. When that occurrence
+ends without delivery, the scheduler writes the next occurrence in the same commit, or the
+series would end.
+
+- Storage expiry (`ExpireRemindersAsync`) skips `Pending` occurrences that have a repeat interval.
+  It still expires `AwaitingAck` occurrences (their successor already exists) and one-off reminders.
+- Fetch, overview, and listing queries keep returning those stale `Pending` recurring occurrences,
+  so the overview arms a fetch tick and the scheduler sees them.
+- The scheduler marks the stale occurrence `Expired` (it is never delivered late) and inserts the
+  next slot. With `offset = min(MaxDeliveryWindow ?? interval, interval)`, the slot index is
+  `k = max(1, floor((now - offset - due) / interval) + 1)` and the next due time is
+  `due + k * interval`. The math is O(1) and uses checked arithmetic. If the next slot falls
+  outside the `DateTimeOffset` range, or the stored interval is zero or less, the occurrence is
+  marked `Failed` and the series ends; the scheduler keeps running.
+- A recurring occurrence that runs out of retries because its shard region is missing rolls
+  forward the same way, with `Expired` or `Failed` as its status.
+- The delivered path uses the same slot math, so a delivery and a roll-forward never disagree
+  about the next slot.
+
+Storage fences that keep the series single and cancellable:
+
+- **Compare-and-set.** A roll-forward ends the current occurrence only if it is still active and
+  `Pending`. If a cancel, a delivery, or another scheduler (singleton handover, zombie node, clock
+  skew) got there first, storage changes nothing and skips the successor.
+- **Insert if absent.** Successors never use the upsert that resets a row to `Pending`. An existing
+  row with the same key keeps its state, whether `AwaitingAck`, `Delivered`, or `Cancelled`.
+- **Series guard.** A successor is inserted only if no active occurrence of the same series is due
+  after the current one. An ack-timeout retry moves a delivered occurrence back to `Pending` while
+  its successor already exists; the guard stops that retry from starting a second series.
+- **Cancel locks first.** PostgreSQL and SQL Server cancels lock the active rows they will change
+  before updating them. A concurrent roll-forward holds the current occurrence's row lock until it
+  commits, so the cancel waits and then also cancels the successor that roll-forward inserted.
+  Successors are written after the current occurrence's row is locked in the same transaction.
+- **SQL Server.** The conditional insert reads with `UPDLOCK, HOLDLOCK`, so two transactions cannot
+  both pass the absence check and race on the primary key.
+
+Custom storage providers opt in by implementing `IRecurringRollForwardStorage`. Without it, the
+scheduler writes successors through the pending upsert list, as earlier releases did.
 
 ### Ack handler
 
@@ -181,6 +229,19 @@ Delivery-state writes now happen **before** user messages are sent.
 - On startup, the scheduler loads the next ack deadline from storage as part of `InitResult` and schedules the timeout check before processing any messages.
 - Late acks remain safe because they are matched by `DueTimeUtc`.
 
+### Scheduler lag longer than the repeat interval
+
+Restarts, singleton handover, thread-pool starvation, GC pauses, or slow storage can delay the
+scheduler past a recurring occurrence's deadline before it is delivered.
+
+- The stale occurrence is marked `Expired`. It is not delivered late.
+- The series continues at the earliest slot whose deadline has not passed. If that slot is already
+  due, it is delivered in the same run.
+- Missed slots are skipped. A lag of many intervals produces one occurrence, not a backlog.
+- The roll-forward and the expiry happen in one commit, so a crash in between cannot lose the series.
+- A scheduler that starts with such an occurrence in storage leaves it alone during startup expiry,
+  reports it as overdue in the overview, and rolls it forward on its first tick.
+
 ### Late ack for superseded recurring occurrence
 
 - The old occurrence is already expired or no longer AwaitingAck.
@@ -227,7 +288,7 @@ Each fetched batch is processed in smaller chunks. This bounds the amount of sta
 
 Hot-path writes are batched into single round-trips:
 
-- **Delivery path**: `CommitReminderMutationsAsync` handles pending upserts (retries + next recurring occurrences), terminal completions, and awaiting-ack transitions in a single call per chunk.
+- **Delivery path**: `CommitReminderMutationsAsync` handles pending upserts (retries), terminal completions, awaiting-ack transitions, recurring roll-forwards, and recurring successors in a single call per chunk.
 - **Ack path**: `AcknowledgeRemindersAsync` flushes buffered acks in batches of `AckFlushBatchSize`.
 
 This avoids one round-trip per reminder in both the delivery and acknowledgement paths.
@@ -237,7 +298,7 @@ This avoids one round-trip per reminder in both the delivery and acknowledgement
 Pending-overview queries only count actionable `Pending` rows.
 
 - `AwaitingAck` rows are not treated as pending work.
-- Expired rows are excluded by deadline filters.
+- Expired rows are excluded by deadline filters, except `Pending` recurring rows: those stay visible until the scheduler rolls them forward.
 - This prevents hot empty-fetch polling while the system is simply waiting for acks.
 
 ### 5. Incremental overview maintenance
@@ -263,11 +324,12 @@ The design goal is to keep those duplicates bounded and occurrence-specific.
 ### Recurring reminders are latest-only, not catch-up
 
 If an old recurring occurrence is still unacked when the next occurrence becomes due, the old one expires instead of building an unbounded replay backlog.
+The same rule applies when the scheduler itself falls behind: missed slots are skipped and the series resumes at the next live slot.
 
 ### Deadline expiration is best-effort cleanup
 
 The scheduler marks expired rows terminally during each tick (as a prelude to fetching), but correctness does not depend on cleanup running first.
-Fetch and ack paths also enforce the deadline directly.
+Fetch and ack paths also enforce the deadline directly. `Pending` recurring rows are the exception: the scheduler, not storage cleanup, ends them, so it can persist the next occurrence in the same commit.
 
 ### Ack writes are eventually consistent
 
@@ -286,4 +348,4 @@ Negative acknowledgement uses the existing durable mutation contract.
 ### Poison recurring reminders
 
 `MaxDeliveryAttempts` applies to one occurrence. Each recurring occurrence starts with zero attempts.
-A terminal occurrence does not cancel or disable the recurring reminder definition.
+A terminal occurrence does not cancel or disable the recurring reminder definition: the next occurrence is persisted in the same commit that ends it.

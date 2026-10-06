@@ -19,6 +19,9 @@ internal interface ISqlDialect
     string GetTimedOutAckRemindersSql(string schemaName, string tableName, int maxCount);
     string GetAcknowledgeReminderSql(string schemaName, string tableName);
     string GetBatchAcknowledgeRemindersSql(string schemaName, string tableName, int count);
+    string GetRollForwardPredecessorSql(string schemaName, string tableName);
+    string GetInsertRecurringSuccessorsSql(string schemaName, string tableName, int count);
+    string GetLockActiveRemindersSql(string schemaName, string tableName, bool matchReminderKey);
     DbConnection CreateConnection(string connectionString);
     void AddParameter(DbCommand command, string name, object value);
 }

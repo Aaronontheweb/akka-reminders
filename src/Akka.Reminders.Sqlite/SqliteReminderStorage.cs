@@ -10,7 +10,7 @@ namespace Akka.Reminders.Sqlite;
 /// <summary>
 /// SQLite implementation of <see cref="IReminderStorage"/>.
 /// </summary>
-public sealed class SqliteReminderStorage : IReminderStorage
+public sealed class SqliteReminderStorage : IRecurringRollForwardStorage
 {
     private readonly SqliteReminderStorageSettings _settings;
     private readonly ISqlDialect _dialect;
@@ -118,6 +118,11 @@ public sealed class SqliteReminderStorage : IReminderStorage
                 return false;
             }
 
+            // Runs after the awaiting-ack transition so each successor is written only once its
+            // predecessor's row is locked by this transaction.
+            await ApplyRecurringRollForwardsAsync(connection, transaction, mutationBatch.RecurringRollForwards, cancellationToken);
+            await InsertRecurringSuccessorsAsync(connection, transaction, mutationBatch.RecurringSuccessors, cancellationToken);
+
             await transaction.CommitAsync(cancellationToken);
             return true;
         }
@@ -125,6 +130,75 @@ public sealed class SqliteReminderStorage : IReminderStorage
         {
             await transaction.RollbackAsync(cancellationToken);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Ends each pending recurring predecessor with a compare-and-set and inserts its successor only
+    /// when this transaction won the transition. A lost race (cancelled, delivered, or already rolled
+    /// forward elsewhere) changes nothing and does not fail the batch.
+    /// </summary>
+    private async Task ApplyRecurringRollForwardsAsync(
+        System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        IReadOnlyList<RecurringRollForward> rollForwards,
+        CancellationToken cancellationToken)
+    {
+        foreach (var rollForward in rollForwards)
+        {
+            var predecessor = rollForward.Predecessor;
+            int transitioned;
+            await using (var command = CreateCommand(connection, transaction))
+            {
+                command.CommandText = _dialect.GetRollForwardPredecessorSql(_settings.TableName);
+                command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+                _dialect.AddParameter(command, "@ShardRegionName", predecessor.Entity.ShardRegionName);
+                _dialect.AddParameter(command, "@EntityId", predecessor.Entity.EntityId);
+                _dialect.AddParameter(command, "@ReminderKey", predecessor.Key.Name);
+                _dialect.AddParameter(command, "@DueTimeUtc", predecessor.DueTimeUtc.UtcDateTime);
+                _dialect.AddParameter(command, "@CompletedAtUtc", rollForward.CompletedAt.UtcDateTime);
+                _dialect.AddParameter(command, "@CompletionStatus", rollForward.Status.ToString());
+                _dialect.AddParameter(command, "@AttemptCount", predecessor.AttemptCount);
+                _dialect.AddParameter(command, "@LastFailureReason", predecessor.LastFailureReason ?? (object)DBNull.Value);
+                transitioned = await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (transitioned == 1 && rollForward.Successor is not null)
+            {
+                await InsertRecurringSuccessorsAsync(
+                    connection,
+                    transaction,
+                    [new RecurringSuccessor(rollForward.Successor, rollForward.Predecessor.DueTimeUtc)],
+                    cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Inserts recurring successors only if absent: an existing row with the same key is never reset,
+    /// and nothing is inserted when an active occurrence of the series is already due after the predecessor.
+    /// </summary>
+    private async Task InsertRecurringSuccessorsAsync(
+        System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        IReadOnlyList<RecurringSuccessor> successors,
+        CancellationToken cancellationToken)
+    {
+        for (var offset = 0; offset < successors.Count; offset += MaxUpsertedRemindersPerStatement)
+        {
+            var chunk = successors.Skip(offset).Take(MaxUpsertedRemindersPerStatement).ToList();
+            await using var command = CreateCommand(connection, transaction);
+            command.CommandText = _dialect.GetInsertRecurringSuccessorsSql(_settings.TableName, chunk.Count);
+            command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+
+            for (var i = 0; i < chunk.Count; i++)
+            {
+                var successor = chunk[i];
+                BindReminderParameters(command, i, successor.Successor);
+                _dialect.AddParameter(command, $"@PredecessorDueTimeUtc{i}", successor.PredecessorDueTimeUtc.UtcDateTime);
+            }
+
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
     }
 

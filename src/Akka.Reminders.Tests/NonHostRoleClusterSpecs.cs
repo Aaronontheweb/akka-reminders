@@ -3,6 +3,7 @@ using Akka.Cluster.Hosting;
 using Akka.Cluster.Sharding;
 using Akka.Hosting;
 using Akka.Hosting.TestKit;
+using Akka.Remote.Hosting;
 using Akka.Reminders.Sharding;
 using Akka.Reminders.Storage;
 using FluentAssertions;
@@ -14,6 +15,7 @@ namespace Akka.Reminders.Tests;
 /// Verifies that such nodes can start successfully with just a proxy (no singleton manager).
 /// See: https://github.com/Aaronontheweb/akka-reminders/issues/49
 /// </summary>
+[Collection(ClusterIntegrationCollection.Name)]
 public class NonHostRoleClusterSpecs : Akka.Hosting.TestKit.TestKit
 {
     private const string ReminderHostRole = "reminder-host";
@@ -29,6 +31,7 @@ public class NonHostRoleClusterSpecs : Akka.Hosting.TestKit.TestKit
         // Configure a node that does NOT have the reminder-host role
         // This simulates a service that needs to schedule reminders but shouldn't host the singleton
         builder
+            .WithRemoting(new RemoteOptions { HostName = "localhost", Port = 0 })
             .WithClustering(new ClusterOptions
             {
                 // Intentionally NOT including "reminder-host" role
@@ -80,7 +83,7 @@ public class NonHostRoleClusterSpecs : Akka.Hosting.TestKit.TestKit
     }
 
     [Fact]
-    public void NonHostNode_ShouldNotHaveSingletonManagerActor()
+    public async Task NonHostNode_ShouldNotHaveSingletonManagerActor()
     {
         // Arrange & Act
         // Try to resolve the singleton manager path - it should NOT exist on non-host nodes
@@ -89,7 +92,7 @@ public class NonHostRoleClusterSpecs : Akka.Hosting.TestKit.TestKit
         // Assert - The actor should not exist (will throw or return ActorNotFound)
         var probe = CreateTestProbe();
         selection.Tell(new Identify("test"), probe);
-        var identity = probe.ExpectMsg<ActorIdentity>(TimeSpan.FromSeconds(3), cancellationToken: TestContext.Current.CancellationToken);
+        var identity = await probe.ExpectMsgAsync<ActorIdentity>(TimeSpan.FromSeconds(3), cancellationToken: TestContext.Current.CancellationToken);
 
         // ActorRef should be null since the singleton manager wasn't created
         identity.Subject.Should().BeNull("the singleton manager should not be created on non-host nodes");
@@ -110,7 +113,7 @@ public class NonHostRoleClusterSpecs : Akka.Hosting.TestKit.TestKit
     }
 
     [Fact]
-    public void NonHostNode_ProxyActor_ShouldExist()
+    public async Task NonHostNode_ProxyActor_ShouldExist()
     {
         // Arrange
         var selection = Sys.ActorSelection("/system/reminder-scheduler-proxy");
@@ -118,7 +121,7 @@ public class NonHostRoleClusterSpecs : Akka.Hosting.TestKit.TestKit
 
         // Act
         selection.Tell(new Identify("test"), probe);
-        var identity = probe.ExpectMsg<ActorIdentity>(TimeSpan.FromSeconds(3), cancellationToken: TestContext.Current.CancellationToken);
+        var identity = await probe.ExpectMsgAsync<ActorIdentity>(TimeSpan.FromSeconds(3), cancellationToken: TestContext.Current.CancellationToken);
 
         // Assert
         identity.Subject.Should().NotBeNull("the proxy actor should exist on non-host nodes");

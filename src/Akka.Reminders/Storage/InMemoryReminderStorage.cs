@@ -9,7 +9,7 @@ namespace Akka.Reminders.Storage;
 /// Thread-safe implementation using concurrent collections. Suitable for testing and single-node scenarios.
 /// Not suitable for distributed scenarios as state is not shared across nodes.
 /// </remarks>
-public sealed class InMemoryReminderStorage : IReminderStorage
+public sealed class InMemoryReminderStorage : IRecurringRollForwardStorage
 {
     private readonly object _sync = new();
     private readonly ConcurrentDictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder> _pendingReminders = new();
@@ -25,6 +25,13 @@ public sealed class InMemoryReminderStorage : IReminderStorage
 
     private static (ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc) ToKey(CompletedReminder reminder)
         => (reminder.Entity, reminder.Key, reminder.DueTimeUtc);
+
+    /// <summary>
+    /// A pending occurrence the scheduler still has to act on: either inside its delivery window,
+    /// or a recurring occurrence past its deadline that the scheduler must roll forward.
+    /// </summary>
+    private static bool IsActivePending(ScheduledReminder reminder, DateTimeOffset now)
+        => reminder.RepeatInterval.HasValue || !reminder.Deadline.IsExpired(now);
 
     /// <inheritdoc />
     public Task<ReminderProtocol.ReminderScheduled> ScheduleReminderAsync(
@@ -136,6 +143,34 @@ public sealed class InMemoryReminderStorage : IReminderStorage
                 awaiting[key] = (pendingReminder, reminder);
             }
 
+            foreach (var rollForward in mutationBatch.RecurringRollForwards)
+            {
+                // Compare-and-set: only a still-pending predecessor can roll forward. A cancelled,
+                // delivered, or already rolled-forward occurrence leaves storage unchanged.
+                var key = ToKey(rollForward.Predecessor);
+                if (!pending.TryGetValue(key, out var current))
+                    continue;
+
+                pending.Remove(key);
+                completedDetails[key] = current with
+                {
+                    AttemptCount = rollForward.Predecessor.AttemptCount,
+                    LastFailureReason = rollForward.Predecessor.LastFailureReason
+                };
+                completed[key] = new CompletedReminder(
+                    key.Entity,
+                    key.Key,
+                    key.DueTimeUtc,
+                    rollForward.CompletedAt,
+                    rollForward.Status);
+
+                if (rollForward.Successor is not null)
+                    TryInsertSuccessor(rollForward.Successor, key.DueTimeUtc, pending, awaiting, completed);
+            }
+
+            foreach (var successor in mutationBatch.RecurringSuccessors)
+                TryInsertSuccessor(successor.Successor, successor.PredecessorDueTimeUtc, pending, awaiting, completed);
+
             ReplaceContents(_pendingReminders, pending);
             ReplaceContents(_awaitingAckReminders, awaiting);
             ReplaceContents(_completedReminders, completed);
@@ -143,6 +178,30 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         }
 
         return Task.FromResult(true);
+    }
+
+    /// <summary>
+    /// Inserts a recurring successor only if its key is in none of the dictionaries and no active
+    /// occurrence of the same series is due after the predecessor.
+    /// </summary>
+    private static void TryInsertSuccessor(
+        ScheduledReminder successor,
+        DateTimeOffset predecessorDueTimeUtc,
+        Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder> pending,
+        Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), (ScheduledReminder Reminder, AwaitingAckReminder State)> awaiting,
+        Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), CompletedReminder> completed)
+    {
+        var key = ToKey(successor);
+        if (pending.ContainsKey(key) || awaiting.ContainsKey(key) || completed.ContainsKey(key))
+            return;
+
+        bool IsLaterActiveOccurrence((ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc) k)
+            => k.Entity.Equals(key.Entity) && k.Key.Equals(key.Key) && k.DueTimeUtc > predecessorDueTimeUtc;
+
+        if (pending.Keys.Any(IsLaterActiveOccurrence) || awaiting.Keys.Any(IsLaterActiveOccurrence))
+            return;
+
+        pending[key] = successor;
     }
 
     /// <inheritdoc />
@@ -275,9 +334,11 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     {
         var now = DateTimeOffset.UtcNow;
         var reminders = _pendingReminders.Values
-            .Concat(_awaitingAckReminders.Values.Select(v => v.Reminder))
+            .Where(r => IsActivePending(r, now))
+            .Concat(_awaitingAckReminders.Values
+                .Select(v => v.Reminder)
+                .Where(r => !r.Deadline.IsExpired(now)))
             .Where(r => r.Entity.Equals(entity))
-            .Where(r => !r.Deadline.IsExpired(now))
             .OrderBy(r => r.When)
             .Skip(skip)
             .Take(take)
@@ -290,7 +351,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     public Task<ReminderOverview> GetRemindersOverviewAsync(DateTimeOffset now, CancellationToken ct = default)
     {
         var pending = _pendingReminders.Values
-            .Where(r => !r.Deadline.IsExpired(now))
+            .Where(r => IsActivePending(r, now))
             .OrderBy(r => r.When)
             .ToList();
 
@@ -312,7 +373,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         CancellationToken ct = default)
     {
         var dueReminders = _pendingReminders.Values
-            .Where(r => !r.Deadline.IsExpired(now) && r.When <= untilDeadline)
+            .Where(r => IsActivePending(r, now) && r.When <= untilDeadline)
             .OrderBy(r => r.When)
             .Take(maxCount.Value)
             .ToList();
@@ -323,7 +384,7 @@ public sealed class InMemoryReminderStorage : IReminderStorage
         var remainingPending = _pendingReminders
             .Where(kvp => !fetchedKeys.Contains(kvp.Key))
             .Select(kvp => kvp.Value)
-            .Where(r => !r.Deadline.IsExpired(now))
+            .Where(r => IsActivePending(r, now))
             .OrderBy(r => r.When)
             .ToList();
 
@@ -383,10 +444,15 @@ public sealed class InMemoryReminderStorage : IReminderStorage
     {
         var expiredCount = 0;
 
-        foreach (var kvp in _pendingReminders.ToArray())
+        lock (_sync)
         {
-            if (kvp.Value.Deadline.IsExpired(now))
+            foreach (var kvp in _pendingReminders.ToArray())
             {
+                // Pending recurring occurrences are left for the scheduler, which ends them and
+                // persists the next occurrence in one commit.
+                if (kvp.Value.RepeatInterval.HasValue || !kvp.Value.Deadline.IsExpired(now))
+                    continue;
+
                 if (_pendingReminders.TryRemove(kvp.Key, out var pending))
                 {
                     _completedReminderDetails[kvp.Key] = pending;
@@ -399,12 +465,12 @@ public sealed class InMemoryReminderStorage : IReminderStorage
                     expiredCount++;
                 }
             }
-        }
 
-        foreach (var kvp in _awaitingAckReminders.ToArray())
-        {
-            if (kvp.Value.Reminder.Deadline.IsExpired(now))
+            foreach (var kvp in _awaitingAckReminders.ToArray())
             {
+                if (!kvp.Value.Reminder.Deadline.IsExpired(now))
+                    continue;
+
                 if (_awaitingAckReminders.TryRemove(kvp.Key, out var awaiting))
                 {
                     _completedReminderDetails[kvp.Key] = awaiting.Reminder;

@@ -196,6 +196,15 @@ public sealed class ReminderClientExtension : IExtension
             message,
             RepeatInterval: interval,
             MaxDeliveryWindow: maxDeliveryWindow);
+
+        if (interval <= TimeSpan.Zero)
+        {
+            return Task.FromResult(new ReminderProtocol.ReminderScheduled(
+                command,
+                ReminderScheduleResponseCode.Error,
+                $"Recurring reminder interval must be greater than zero, but was [{interval}]."));
+        }
+
         return SendToSchedulerAsync<ReminderProtocol.ScheduleReminder, ReminderProtocol.ReminderScheduled>(
             command,
             ct,

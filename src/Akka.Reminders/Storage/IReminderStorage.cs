@@ -120,8 +120,51 @@ public sealed record AwaitingAckReminder(
     DateTimeOffset AckDeadline);
 
 /// <summary>
+/// The next occurrence of a recurring reminder whose current occurrence is being delivered in the
+/// same <see cref="ReminderMutationBatch"/>.
+/// </summary>
+/// <remarks>
+/// Storage inserts <paramref name="Successor"/> only when no row with the same primary key exists
+/// (in any state) and no non-completed occurrence of the same series has a due time later than
+/// <paramref name="PredecessorDueTimeUtc"/>. Storage never resets an existing row for a successor.
+/// </remarks>
+/// <param name="Successor">The next occurrence to insert as <see cref="ReminderCompletionStatus.Pending"/>.</param>
+/// <param name="PredecessorDueTimeUtc">Due time of the occurrence that produced this successor.</param>
+public sealed record RecurringSuccessor(
+    ScheduledReminder Successor,
+    DateTimeOffset PredecessorDueTimeUtc);
+
+/// <summary>
+/// Ends a <see cref="ReminderCompletionStatus.Pending"/> recurring occurrence without delivering it
+/// and, optionally, inserts the next occurrence of the series in the same commit.
+/// </summary>
+/// <remarks>
+/// Storage applies this as a compare-and-set: the predecessor moves to <paramref name="Status"/> only
+/// if it is still active and <see cref="ReminderCompletionStatus.Pending"/>. When that transition does
+/// not apply (the occurrence was cancelled, delivered, or already rolled forward), storage changes
+/// nothing and skips the successor. When it applies, <paramref name="Successor"/> is inserted with the
+/// same rules as <see cref="RecurringSuccessor"/>.
+/// </remarks>
+/// <param name="Predecessor">The occurrence as the scheduler read it. Its <see cref="ScheduledReminder.AttemptCount"/>
+/// and <see cref="ScheduledReminder.LastFailureReason"/> are stored with the terminal status.</param>
+/// <param name="Status">The terminal status for the predecessor, such as <see cref="ReminderCompletionStatus.Expired"/>.</param>
+/// <param name="CompletedAt">When the predecessor reached its terminal status.</param>
+/// <param name="Successor">The next occurrence, or <c>null</c> when the series cannot continue.</param>
+public sealed record RecurringRollForward(
+    ScheduledReminder Predecessor,
+    ReminderCompletionStatus Status,
+    DateTimeOffset CompletedAt,
+    ScheduledReminder? Successor);
+
+/// <summary>
 /// Batched mutation set applied by the scheduler inside a single storage commit.
 /// </summary>
+/// <remarks>
+/// Storage applies the lists in this order: <see cref="PendingUpserts"/>, <see cref="CompletedReminders"/>,
+/// <see cref="AwaitingAckReminders"/>, <see cref="RecurringRollForwards"/>, <see cref="RecurringSuccessors"/>.
+/// The scheduler only fills the two recurring lists when the storage implements
+/// <see cref="IRecurringRollForwardStorage"/>.
+/// </remarks>
 public sealed record ReminderMutationBatch(
     IReadOnlyList<ScheduledReminder> PendingUpserts,
     IReadOnlyList<CompletedReminder> CompletedReminders,
@@ -129,7 +172,23 @@ public sealed record ReminderMutationBatch(
 {
     public static ReminderMutationBatch Empty { get; } = new([], [], []);
 
-    public bool IsEmpty => PendingUpserts.Count == 0 && CompletedReminders.Count == 0 && AwaitingAckReminders.Count == 0;
+    /// <summary>
+    /// Next occurrences of recurring reminders delivered in this batch. Inserted only if absent;
+    /// never reset an existing row. See <see cref="RecurringSuccessor"/>.
+    /// </summary>
+    public IReadOnlyList<RecurringSuccessor> RecurringSuccessors { get; init; } = [];
+
+    /// <summary>
+    /// Pending recurring occurrences that end without delivery, each paired with the next occurrence
+    /// of its series. See <see cref="RecurringRollForward"/>.
+    /// </summary>
+    public IReadOnlyList<RecurringRollForward> RecurringRollForwards { get; init; } = [];
+
+    public bool IsEmpty => PendingUpserts.Count == 0
+                           && CompletedReminders.Count == 0
+                           && AwaitingAckReminders.Count == 0
+                           && RecurringSuccessors.Count == 0
+                           && RecurringRollForwards.Count == 0;
 }
 
 /// <summary>
@@ -224,6 +283,11 @@ public interface IReminderStorage
     /// <summary>
     /// Marks all active reminders whose delivery deadline has passed as expired.
     /// </summary>
+    /// <remarks>
+    /// Implementations of <see cref="IRecurringRollForwardStorage"/> must not expire
+    /// <see cref="ReminderCompletionStatus.Pending"/> recurring occurrences here; the scheduler ends those
+    /// itself so it can persist the next occurrence in the same commit.
+    /// </remarks>
     /// <param name="now">Current time used as the expiration cutoff.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The number of reminders transitioned to <see cref="ReminderCompletionStatus.Expired"/>.</returns>
@@ -301,4 +365,26 @@ public interface IReminderStorage
     Task<IReadOnlyList<AckResult>> AcknowledgeRemindersAsync(
         IEnumerable<ReminderAcknowledgement> acknowledgements,
         CancellationToken ct = default);
+}
+
+/// <summary>
+/// Marks an <see cref="IReminderStorage"/> that keeps recurring reminders alive when an occurrence
+/// ends before delivery.
+/// </summary>
+/// <remarks>
+/// An implementation must:
+/// <list type="bullet">
+/// <item><description>Leave <see cref="ReminderCompletionStatus.Pending"/> occurrences that have a repeat interval
+/// alone in <see cref="IReminderStorage.ExpireRemindersAsync"/>, even past their delivery deadline.</description></item>
+/// <item><description>Keep returning those stale occurrences from <see cref="IReminderStorage.GetNextRemindersAsync"/>,
+/// <see cref="IReminderStorage.GetRemindersOverviewAsync"/> and <see cref="IReminderStorage.GetRemindersForEntityAsync"/>
+/// so the scheduler can roll them forward.</description></item>
+/// <item><description>Apply <see cref="ReminderMutationBatch.RecurringRollForwards"/> and
+/// <see cref="ReminderMutationBatch.RecurringSuccessors"/> atomically with the rest of the batch.</description></item>
+/// </list>
+/// Storage that does not implement this interface keeps the behavior of earlier releases: the
+/// scheduler writes successors through <see cref="ReminderMutationBatch.PendingUpserts"/>.
+/// </remarks>
+public interface IRecurringRollForwardStorage : IReminderStorage
+{
 }

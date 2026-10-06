@@ -6,7 +6,7 @@ namespace Akka.Reminders.Tests;
 /// Wraps an <see cref="IReminderStorage"/> and allows selectively failing write operations
 /// to test circuit breaker and failure recovery behavior.
 /// </summary>
-internal sealed class FailableReminderStorage : IReminderStorage
+internal sealed class FailableReminderStorage : IRecurringRollForwardStorage
 {
     private readonly IReminderStorage _inner;
     private readonly TaskCompletionSource _firstCommitMutationFailure = new(TaskCreationOptions.RunContinuationsAsynchronously);

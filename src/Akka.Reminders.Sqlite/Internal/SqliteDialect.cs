@@ -101,7 +101,7 @@ internal sealed class SqliteDialect : ISqlDialect
             WHERE is_completed = 0
               AND completion_status = 'Pending'
               AND when_utc <= @UntilDeadline
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now OR repeat_interval_ticks IS NOT NULL)
             ORDER BY when_utc ASC
             LIMIT {maxCount};
             """;
@@ -139,7 +139,8 @@ internal sealed class SqliteDialect : ISqlDialect
                 ack_deadline_utc = NULL
             WHERE is_completed = 0
               AND delivery_deadline_utc IS NOT NULL
-              AND delivery_deadline_utc <= @Now;
+              AND delivery_deadline_utc <= @Now
+              AND (completion_status <> 'Pending' OR repeat_interval_ticks IS NULL);
             """;
     }
 
@@ -163,7 +164,7 @@ internal sealed class SqliteDialect : ISqlDialect
             FROM {fullTableName}
             WHERE is_completed = 0
               AND completion_status = 'Pending'
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now);
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now OR repeat_interval_ticks IS NOT NULL);
             """;
     }
 
@@ -176,7 +177,7 @@ internal sealed class SqliteDialect : ISqlDialect
             FROM {fullTableName}
             WHERE is_completed = 0
               AND completion_status = 'Pending'
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
+              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now OR repeat_interval_ticks IS NOT NULL)
             ORDER BY when_utc ASC
             LIMIT 1 OFFSET @Skip;
             """;
@@ -229,7 +230,9 @@ internal sealed class SqliteDialect : ISqlDialect
             WHERE shard_region_name = @ShardRegionName
               AND entity_id = @EntityId
               AND is_completed = 0
-              AND (delivery_deadline_utc IS NULL OR delivery_deadline_utc > @Now)
+              AND (delivery_deadline_utc IS NULL
+                   OR delivery_deadline_utc > @Now
+                   OR (repeat_interval_ticks IS NOT NULL AND completion_status = 'Pending'))
             ORDER BY when_utc ASC;
             """;
     }
@@ -333,6 +336,53 @@ internal sealed class SqliteDialect : ISqlDialect
                     ELSE completed_at_utc
                 END);
             """;
+    }
+
+    public string GetRollForwardPredecessorSql(string tableName)
+    {
+        var fullTableName = $"\"{tableName}\"";
+
+        return $"""
+            UPDATE {fullTableName}
+            SET is_completed = 1,
+                completed_at_utc = @CompletedAtUtc,
+                completion_status = @CompletionStatus,
+                attempt_count = @AttemptCount,
+                last_failure_reason = @LastFailureReason,
+                delivered_at_utc = NULL,
+                ack_deadline_utc = NULL
+            WHERE shard_region_name = @ShardRegionName
+              AND entity_id = @EntityId
+              AND reminder_key = @ReminderKey
+              AND due_time_utc = @DueTimeUtc
+              AND is_completed = 0
+              AND completion_status = 'Pending';
+            """;
+    }
+
+    public string GetInsertRecurringSuccessorsSql(string tableName, int count)
+    {
+        var fullTableName = $"\"{tableName}\"";
+
+        return string.Join("\n", Enumerable.Range(0, count).Select(i => $"""
+            INSERT INTO {fullTableName}
+                (shard_region_name, entity_id, reminder_key, when_utc, due_time_utc, repeat_interval_ticks,
+                 serializer_id, manifest, payload, attempt_count, last_failure_reason,
+                 max_delivery_window_ticks, delivery_deadline_utc,
+                 is_completed, completed_at_utc, completion_status, delivered_at_utc, ack_deadline_utc)
+            SELECT @ShardRegionName{i}, @EntityId{i}, @ReminderKey{i}, @WhenUtc{i}, @DueTimeUtc{i}, @RepeatIntervalTicks{i},
+                   @SerializerId{i}, @Manifest{i}, @Payload{i}, @AttemptCount{i}, @LastFailureReason{i},
+                   @MaxDeliveryWindowTicks{i}, @DeliveryDeadlineUtc{i},
+                   0, NULL, 'Pending', NULL, NULL
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {fullTableName}
+                WHERE shard_region_name = @ShardRegionName{i}
+                  AND entity_id = @EntityId{i}
+                  AND reminder_key = @ReminderKey{i}
+                  AND is_completed = 0
+                  AND due_time_utc > @PredecessorDueTimeUtc{i})
+            ON CONFLICT (shard_region_name, entity_id, reminder_key, due_time_utc) DO NOTHING;
+            """));
     }
 
     public DbConnection CreateConnection(string connectionString)

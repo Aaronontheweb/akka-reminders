@@ -1,3 +1,16 @@
+#### 1.5.73 October 6th 2026 ####
+
+**Bug Fixes**
+
+- Fixed: recurring reminders were deleted when an occurrence expired before delivery under scheduler lag ([#143](https://github.com/Aaronontheweb/akka-reminders/issues/143)). The stale occurrence is still marked `Expired` and is never delivered late; the series now continues at the next slot whose deadline has not passed, written in the same storage commit. Missed slots are skipped, not replayed. The same applies when a recurring occurrence runs out of retries because its shard region is missing.
+- Recurring reminders with a repeat interval of zero or less are now rejected with `ReminderScheduleResponseCode.Error`.
+- PostgreSQL and SQL Server: a cancel that races a recurring delivery can no longer leave the next occurrence `Pending`.
+
+**Compatibility**
+
+- No schema change and no wire format change.
+- Added `ReminderMutationBatch.RecurringSuccessors` and `ReminderMutationBatch.RecurringRollForwards` (init properties with empty defaults) and the opt-in `IRecurringRollForwardStorage` marker interface. Custom storage providers that do not implement it keep the 0.7.0 behavior.
+
 #### 0.7.0 August 7th 2026 ####
 
 **New Features**

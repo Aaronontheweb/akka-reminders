@@ -17,7 +17,7 @@ namespace Akka.Reminders.Tests;
 /// real time internally, which means timer-based scheduling doesn't respect TestScheduler.Advance().
 /// This is a known limitation of IWithTimers with TestScheduler in Akka.NET.
 /// </summary>
-public class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
+public partial class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
 {
     private readonly TestShardRegionResolver _resolver;
 

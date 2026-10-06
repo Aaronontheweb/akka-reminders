@@ -112,7 +112,15 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         ShardRegionResolver = shardRegionResolver;
         Storage = storage;
         TimeProvider = timeProvider;
+        _supportsRecurringRollForward = storage is IRecurringRollForwardStorage;
     }
+
+    /// <summary>
+    /// True when storage applies <see cref="ReminderMutationBatch.RecurringSuccessors"/> and
+    /// <see cref="ReminderMutationBatch.RecurringRollForwards"/>. Otherwise the scheduler writes
+    /// successors through the pending upsert list, as earlier releases did.
+    /// </summary>
+    private readonly bool _supportsRecurringRollForward;
 
     public ReminderSettings Settings { get; }
 
@@ -606,12 +614,22 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             {
                 _log.Debug("Scheduling reminder {0}", scheduleSingle);
                 var replyTo = Sender;
+
+                // The wire message can bypass client-side validation, so check here too.
+                if (scheduleSingle.RepeatInterval is { } repeatInterval && repeatInterval <= TimeSpan.Zero)
+                {
+                    replyTo.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle,
+                        ReminderScheduleResponseCode.Error,
+                        $"RepeatInterval must be greater than zero, but was [{repeatInterval}]."), ActorRefs.NoSender);
+                    break;
+                }
+
                 RunTask(async () =>
                 {
                     using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-                    var reminder = CreateScheduledReminder(scheduleSingle);
                     try
                     {
+                        var reminder = CreateScheduledReminder(scheduleSingle);
                         // validate that the ShardRegion exists
                         var shardRegion = ShardRegionResolver.TryResolve(reminder.Entity);
                         if (shardRegion is null)
@@ -1059,24 +1077,100 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     }
 
     /// <summary>
-    /// Creates the next occurrence for a recurring reminder. Both when_utc and due_time_utc
-    /// advance by RepeatInterval — this is a NEW row with a new occurrence identity,
-    /// not a mutation of the current one. AttemptCount resets to 0 for the fresh occurrence.
+    /// Creates the next occurrence for a recurring reminder. This is a NEW row with a new
+    /// occurrence identity, not a mutation of the current one. AttemptCount resets to 0.
+    ///
+    /// The next occurrence is the earliest slot after the current one whose deadline is still
+    /// later than <paramref name="now"/>; slots missed during scheduler lag are skipped
+    /// (see <see cref="RecurringSchedule.TryComputeNextOccurrence"/>).
     /// </summary>
-    private ScheduledReminder CreateNextRecurringOccurrence(ScheduledReminder reminder)
+    private static RecurringSchedule.Result TryCreateNextRecurringOccurrence(
+        ScheduledReminder reminder,
+        DateTimeOffset now,
+        out ScheduledReminder? nextOccurrence)
     {
+        nextOccurrence = null;
         if (!reminder.RepeatInterval.HasValue)
             throw new InvalidOperationException("Cannot create next recurring occurrence for a non-recurring reminder.");
 
-        var nextDue = reminder.DueTimeUtc.Add(reminder.RepeatInterval.Value);
-        return reminder with
+        var result = RecurringSchedule.TryComputeNextOccurrence(
+            reminder.DueTimeUtc,
+            reminder.RepeatInterval.Value,
+            reminder.MaxDeliveryWindow,
+            now,
+            out var nextDue,
+            out var nextDeadline);
+        if (result != RecurringSchedule.Result.Success)
+            return result;
+
+        nextOccurrence = reminder with
         {
             When = nextDue,
             AttemptCount = 0,
             LastFailureReason = null,
-            DeliveryDeadlineUtc = ComputeDeliveryDeadlineUtc(nextDue, reminder.RepeatInterval, reminder.MaxDeliveryWindow),
+            DeliveryDeadlineUtc = nextDeadline,
             OccurrenceDueTimeUtc = nextDue
         };
+        return result;
+    }
+
+    private static string DescribeMissingSuccessor(RecurringSchedule.Result result)
+        => result == RecurringSchedule.Result.InvalidInterval
+            ? "Recurring reminder has a repeat interval of zero or less"
+            : "Next recurring occurrence is outside the supported date range";
+
+    /// <summary>
+    /// Ends a recurring occurrence that will not be delivered (deadline passed, or retries exhausted)
+    /// and persists the next occurrence of its series in the same commit.
+    /// </summary>
+    /// <param name="occurrence">The occurrence to end, carrying the attempt details to persist.</param>
+    /// <param name="status">The terminal status the caller chose.</param>
+    /// <param name="completedAt">The single clock snapshot used for this chunk.</param>
+    /// <param name="persistAttemptDetails">True when <paramref name="occurrence"/> carries a new attempt
+    /// count or failure reason that the legacy path must upsert before completing it.</param>
+    /// <param name="rollForwards">Receives the roll-forward when storage supports it.</param>
+    /// <param name="occurrencesToUpsert">Legacy path: receives the attempt details and the successor.</param>
+    /// <param name="terminalReminders">Legacy path: receives the terminal completion.</param>
+    /// <returns>The status actually written; <see cref="ReminderCompletionStatus.Failed"/> when the
+    /// series cannot continue.</returns>
+    private ReminderCompletionStatus AddRecurringTerminal(
+        ScheduledReminder occurrence,
+        ReminderCompletionStatus status,
+        DateTimeOffset completedAt,
+        bool persistAttemptDetails,
+        List<RecurringRollForward> rollForwards,
+        List<ScheduledReminder> occurrencesToUpsert,
+        List<CompletedReminder> terminalReminders)
+    {
+        var result = TryCreateNextRecurringOccurrence(occurrence, completedAt, out var successor);
+        if (result != RecurringSchedule.Result.Success)
+        {
+            var reason = DescribeMissingSuccessor(result);
+            _log.Error("{0} for reminder occurrence [{1}] / [{2}] due at [{3}]; marking it failed with no next occurrence.",
+                reason, occurrence.Entity, occurrence.Key, occurrence.DueTimeUtc);
+            status = ReminderCompletionStatus.Failed;
+            occurrence = occurrence with { LastFailureReason = reason };
+            persistAttemptDetails = true;
+        }
+
+        if (_supportsRecurringRollForward)
+        {
+            rollForwards.Add(new RecurringRollForward(occurrence, status, completedAt, successor));
+            return status;
+        }
+
+        // Storage without roll-forward support: same writes as earlier releases, plus the successor.
+        if (persistAttemptDetails)
+            occurrencesToUpsert.Add(occurrence);
+        terminalReminders.Add(new CompletedReminder(
+            occurrence.Entity,
+            occurrence.Key,
+            occurrence.DueTimeUtc,
+            completedAt,
+            status));
+        if (successor is not null)
+            occurrencesToUpsert.Add(successor);
+        return status;
     }
 
     /// <summary>
@@ -1268,6 +1362,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
+    /// <summary>
+    /// Upper bound on extra fetches per run that deliver slots produced by a roll-forward.
+    /// </summary>
+    private const int MaxRollForwardRefetchesPerRun = 8;
+
     private async Task ProcessReminders(DateTimeOffset untilDeadline)
     {
         var totalDelivered = 0;
@@ -1276,6 +1375,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         var totalExpired = 0;
         var latestOverview = PendingReminders;
         var needsOverviewReload = false;
+        var rollForwardRefetches = 0;
 
         // When the write circuit is open, probe with a single reminder to test
         // write availability before resuming full-batch processing. This limits
@@ -1314,6 +1414,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
             var stopProcessing = false;
             var recoveredFromProbe = false;
+            var rolledForwardToDueSlot = false;
             var batchOverview = batch.NextOverview;
 
             // Process the fetched batch in smaller chunks to cap duplicate blast radius
@@ -1332,6 +1433,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 var occurrencesToUpsert = new List<ScheduledReminder>();
                 var terminalReminders = new List<CompletedReminder>();
                 var remindersToAwaitAck = new List<AwaitingAckReminder>();
+                var recurringSuccessors = new List<RecurringSuccessor>();
+                var rollForwards = new List<RecurringRollForward>();
                 var deliveries = new List<(IActorRef ShardRegion, ScheduledReminder Reminder, DateTimeOffset AckDeadline)>();
                 var chunkRetried = 0;
                 var chunkFailed = 0;
@@ -1339,15 +1442,36 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                 foreach (var reminder in chunk)
                 {
+                    // Past its deadline: never deliver late. A recurring occurrence rolls forward to
+                    // the next live slot in the same commit so the series survives scheduler lag.
                     if (reminder.DeliveryDeadlineUtc.HasValue && reminder.DeliveryDeadlineUtc.Value <= completedAt)
                     {
-                        terminalReminders.Add(new CompletedReminder(
-                            reminder.Entity,
-                            reminder.Key,
-                            reminder.DueTimeUtc,
-                            completedAt,
-                            ReminderCompletionStatus.Expired));
-                        chunkExpired += 1;
+                        var expiredStatus = ReminderCompletionStatus.Expired;
+                        if (reminder.RepeatInterval.HasValue)
+                        {
+                            expiredStatus = AddRecurringTerminal(
+                                reminder,
+                                ReminderCompletionStatus.Expired,
+                                completedAt,
+                                persistAttemptDetails: false,
+                                rollForwards,
+                                occurrencesToUpsert,
+                                terminalReminders);
+                        }
+                        else
+                        {
+                            terminalReminders.Add(new CompletedReminder(
+                                reminder.Entity,
+                                reminder.Key,
+                                reminder.DueTimeUtc,
+                                completedAt,
+                                ReminderCompletionStatus.Expired));
+                        }
+
+                        if (expiredStatus == ReminderCompletionStatus.Expired)
+                            chunkExpired += 1;
+                        else
+                            chunkFailed += 1;
                         continue;
                     }
 
@@ -1360,7 +1484,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                         if (TryCreateRetryReminder(
                                 reminder,
-                                TimeProvider.Now,
+                                completedAt,
                                 failureReason,
                                 out var retryReminder,
                                 out var terminalStatus))
@@ -1368,6 +1492,23 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             occurrencesToUpsert.Add(retryReminder);
                             _log.Info("Scheduling retry for reminder {0} at {1}", reminder.Key, retryReminder.When);
                             chunkRetried += 1;
+                        }
+                        else if (reminder.RepeatInterval.HasValue)
+                        {
+                            // Retries exhausted for this occurrence, but the series continues.
+                            terminalStatus = AddRecurringTerminal(
+                                CreateTerminalAttempt(reminder, failureReason),
+                                terminalStatus,
+                                completedAt,
+                                persistAttemptDetails: true,
+                                rollForwards,
+                                occurrencesToUpsert,
+                                terminalReminders);
+
+                            if (terminalStatus == ReminderCompletionStatus.Expired)
+                                chunkExpired += 1;
+                            else
+                                chunkFailed += 1;
                         }
                         else
                         {
@@ -1387,15 +1528,29 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     }
                     else
                     {
-                        var ackDeadline = TimeProvider.Now.Add(Settings.AckTimeout);
+                        var ackDeadline = completedAt.Add(Settings.AckTimeout);
 
                         // For recurring reminders, pre-create the next occurrence NOW
                         // (before delivery) so it's persisted in the same commit batch.
                         // This means the next occurrence exists in storage even if the
                         // scheduler crashes after delivery — no occurrences are lost.
+                        // Storage inserts it only if absent, so a redelivered occurrence
+                        // (ack-timeout retry) never resets a successor that already exists.
                         if (reminder.RepeatInterval.HasValue)
                         {
-                            occurrencesToUpsert.Add(CreateNextRecurringOccurrence(reminder));
+                            var result = TryCreateNextRecurringOccurrence(reminder, completedAt, out var nextOccurrence);
+                            if (nextOccurrence is not null)
+                            {
+                                if (_supportsRecurringRollForward)
+                                    recurringSuccessors.Add(new RecurringSuccessor(nextOccurrence, reminder.DueTimeUtc));
+                                else
+                                    occurrencesToUpsert.Add(nextOccurrence);
+                            }
+                            else
+                            {
+                                _log.Error("{0} for reminder occurrence [{1}] / [{2}] due at [{3}]; delivering it with no next occurrence.",
+                                    DescribeMissingSuccessor(result), reminder.Entity, reminder.Key, reminder.DueTimeUtc);
+                            }
                         }
 
                         // Move the current occurrence to AwaitingAck. It stays there
@@ -1417,7 +1572,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 var mutationBatch = new ReminderMutationBatch(
                     occurrencesToUpsert,
                     terminalReminders,
-                    remindersToAwaitAck);
+                    remindersToAwaitAck)
+                {
+                    RecurringSuccessors = recurringSuccessors,
+                    RecurringRollForwards = rollForwards
+                };
 
                 if (!mutationBatch.IsEmpty)
                 {
@@ -1431,10 +1590,12 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     catch (Exception ex)
                     {
                         _log.Error(ex,
-                            "Failed to commit reminder mutation chunk with [{0}] upsert(s), [{1}] completion(s), and [{2}] awaiting-ack transition(s)",
+                            "Failed to commit reminder mutation chunk with [{0}] upsert(s), [{1}] completion(s), [{2}] awaiting-ack transition(s), [{3}] recurring successor(s), and [{4}] recurring roll-forward(s)",
                             occurrencesToUpsert.Count,
                             terminalReminders.Count,
-                            remindersToAwaitAck.Count);
+                            remindersToAwaitAck.Count,
+                            recurringSuccessors.Count,
+                            rollForwards.Count);
                         writeFailed = true;
                     }
                 }
@@ -1458,16 +1619,24 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 // Update the in-memory overview incrementally from upserted reminders
                 // (next recurring occurrences, retries). Avoids an extra storage query
                 // per chunk — the overview is only reloaded from storage on failure.
-                if (occurrencesToUpsert.Count > 0)
+                foreach (var pendingReminder in occurrencesToUpsert)
+                    batchOverview = batchOverview.Apply(pendingReminder, completedAt).newOverview;
+                foreach (var successor in recurringSuccessors)
+                    batchOverview = batchOverview.Apply(successor.Successor, completedAt).newOverview;
+                foreach (var rollForward in rollForwards)
                 {
-                    foreach (var pendingReminder in occurrencesToUpsert)
-                    {
-                        batchOverview = batchOverview.Apply(pendingReminder, completedAt).newOverview;
-                    }
+                    if (rollForward.Successor is not null)
+                        batchOverview = batchOverview.Apply(rollForward.Successor, completedAt).newOverview;
                 }
 
                 if (remindersToAwaitAck.Count > 0)
                     TrackAckDeadlines(remindersToAwaitAck);
+
+                foreach (var rollForward in rollForwards)
+                {
+                    if (rollForward.Successor is not null && rollForward.Successor.When <= untilDeadline)
+                        rolledForwardToDueSlot = true;
+                }
 
                 if (_writeCircuitOpen)
                 {
@@ -1507,6 +1676,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             // processing in this same run rather than waiting for a later timer tick.
             if (recoveredFromProbe)
                 continue;
+
+            // A stale recurring occurrence rolled forward to a slot that is already due: fetch again
+            // so the live slot is delivered in this run instead of on the next timer tick.
+            if (rolledForwardToDueSlot && rollForwardRefetches < MaxRollForwardRefetchesPerRun)
+            {
+                rollForwardRefetches += 1;
+                continue;
+            }
 
             // If we got fewer than the effective fetch batch size, there are no more due reminders
             if (batch.Reminders.Count < effectiveBatchSize)
