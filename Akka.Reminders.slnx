@@ -13,6 +13,9 @@
     <Project Path="src/Akka.Reminders.SqlServer/Akka.Reminders.SqlServer.csproj" />
     <Project Path="src/Akka.Reminders.Sqlite/Akka.Reminders.Sqlite.csproj" />
   </Folder>
+  <Folder Name="/aot/">
+    <Project Path="src/aot/Akka.Reminders.AOT.App/Akka.Reminders.AOT.App.csproj" />
+  </Folder>
   <Project Path="src/Akka.Reminders.Tests/Akka.Reminders.Tests.csproj" />
   <Project Path="src/Akka.Reminders.Benchmarks/Akka.Reminders.Benchmarks.csproj" />
   <Project Path="src\Akka.Reminders\Akka.Reminders.csproj" />

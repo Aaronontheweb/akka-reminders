@@ -50,5 +50,23 @@ jobs:
         shell: bash
         run: dotnet test -c Release 
 
+      # Native AOT canary: local reminders with Akka.DynamicTypeLoading off, in-memory and SQLite
+      # storage, including a restart that restores a reminder from SQLite. Fails on any trim/AOT
+      # warning from Akka.Reminders, or any warning missing from the baseline.
+      - name: "Native AOT canary: publish"
+        shell: bash
+        run: |
+          mkdir -p ./aot
+          dotnet publish src/aot/Akka.Reminders.AOT.App -c Release -r linux-x64 -o ./aot/app 2>&1 | tee ./aot/publish.log
+          exit ${PIPESTATUS[0]}
+
+      - name: "Native AOT canary: check trim/AOT warnings"
+        shell: bash
+        run: src/aot/check-aot-warnings.sh ./aot/publish.log
+
+      - name: "Native AOT canary: run"
+        shell: bash
+        run: ./aot/app/Akka.Reminders.AOT.App
+
       - name: "dotnet pack"
         run: dotnet pack -c Release -o ./bin/nuget

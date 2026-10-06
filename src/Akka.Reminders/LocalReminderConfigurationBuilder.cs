@@ -103,6 +103,24 @@ public sealed class LocalReminderConfigurationBuilder
     }
 
     /// <summary>
+    /// Registers <typeparamref name="TMessage"/> as a reminder payload type, so the scheduler can build
+    /// <see cref="ReminderEnvelope{T}"/> for it without reflection. Required under Native AOT for every
+    /// message type you schedule, including reminders restored from storage after a restart.
+    /// Optional, and harmless, under the JIT.
+    /// </summary>
+    /// <typeparam name="TMessage">The exact runtime type of the message you schedule.</typeparam>
+    /// <returns>This builder for method chaining.</returns>
+    /// <remarks>
+    /// Native AOT also needs an Akka.NET serializer for <typeparamref name="TMessage"/> when you use
+    /// durable storage; register one with <c>WithCustomSerializer</c>. See <see cref="ReminderMessageTypes"/>.
+    /// </remarks>
+    public LocalReminderConfigurationBuilder WithReminderMessage<TMessage>() where TMessage : notnull
+    {
+        ReminderMessageTypes.Register<TMessage>();
+        return this;
+    }
+
+    /// <summary>
     /// Configures the reminder settings.
     /// </summary>
     /// <param name="settings">The reminder settings to use.</param>

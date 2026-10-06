@@ -114,8 +114,9 @@ namespace Akka.Reminders.Serialization;
 ///
 /// <para>
 /// Deserialization of <see cref="ReminderEnvelope"/> reconstructs the strongly-typed
-/// <see cref="ReminderEnvelope{T}"/> by using the runtime type of the deserialized inner
-/// message via reflection (<see cref="Type.MakeGenericType"/>).
+/// <see cref="ReminderEnvelope{T}"/> for the runtime type of the deserialized inner message.
+/// Types registered through <see cref="ReminderMessageTypes"/> are built without reflection;
+/// others fall back to reflection, which Native AOT does not support.
 /// </para>
 /// </remarks>
 public sealed class ReminderSerializer : SerializerWithStringManifest
@@ -134,8 +135,6 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
     private const string CancelAllRemindersManifest = "car";
     private const string RemindersCancelledManifest = "rc";
     private const string GetRemindersManifest = "gr";
-
-    private static readonly Type ReminderEnvelopeOpenGenericType = typeof(ReminderEnvelope<>);
 
     private readonly ExtendedActorSystem _system;
     private Akka.Serialization.Serialization? _serialization;
@@ -268,14 +267,9 @@ public sealed class ReminderSerializer : SerializerWithStringManifest
 
         var innerMessage = SerializationSystem.Deserialize(innerBytes, innerSerializerId, innerManifest);
 
-        // Construct ReminderEnvelope<T> using the runtime type of the deserialized message
-        var messageType = innerMessage.GetType();
-        var closedGenericType = ReminderEnvelopeOpenGenericType.MakeGenericType(messageType);
-        var envelope = Activator.CreateInstance(closedGenericType, entity, key, dueTimeUtc, deadline, innerMessage)
-            ?? throw new InvalidOperationException(
-                $"Failed to create {closedGenericType.FullName} via Activator.CreateInstance.");
-
-        return (ReminderEnvelope)envelope;
+        // Rebuild ReminderEnvelope<T> for the runtime type of the inner message. Registered types
+        // (ReminderMessageTypes / WithReminderMessage<T>) need no reflection, so they work under Native AOT.
+        return ReminderEnvelopeFactory.Create(entity, key, dueTimeUtc, deadline, innerMessage);
     }
 
     private static byte[] SerializeReminderAck(ReminderProtocol.ReminderAck ack)

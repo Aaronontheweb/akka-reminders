@@ -8,6 +8,7 @@
     <Description>Compatibility package for SQL Server, PostgreSQL, and SQLite storage in Akka.Reminders.</Description>
     <PackageTags>akka;akkadotnet;akka.reminders;sql;sqlserver;postgresql;sqlite;compatibility;</PackageTags>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
   <ItemGroup>
