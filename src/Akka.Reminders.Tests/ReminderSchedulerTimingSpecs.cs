@@ -28,8 +28,8 @@ public partial class ReminderSchedulerTimingSpecs : Akka.Hosting.TestKit.TestKit
 
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
-        // Configure the system to use TestScheduler
-        builder.AddHocon("akka.scheduler.implementation = \"Akka.TestKit.TestScheduler, Akka.TestKit\"", HoconAddMode.Prepend);
+        // Configure the system to use TestScheduler (EagerTestScheduler behaves the same unless a test turns on its flag)
+        builder.AddHocon("akka.scheduler.implementation = \"Akka.Reminders.Tests.EagerTestScheduler, Akka.Reminders.Tests\"", HoconAddMode.Prepend);
 
         builder.WithActors((system, registry) =>
         {

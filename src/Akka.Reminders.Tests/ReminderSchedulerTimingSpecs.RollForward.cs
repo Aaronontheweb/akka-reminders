@@ -98,7 +98,10 @@ public partial class ReminderSchedulerTimingSpecs
         for (var i = 0; i < 100 && !region.HasMessages; i++)
         {
             await Task.Delay(20, Ct);
-            VirtualTime.Advance(TimeSpan.Zero);
+
+            // Not TimeSpan.Zero: TestScheduler.Advance drops an item that the actor adds to the bucket
+            // it is draining, and a zero-delay re-arm during a zero advance lands in that bucket.
+            VirtualTime.Advance(TimeSpan.FromTicks(1));
         }
 
         return (await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct)).DueTimeUtc;
@@ -290,7 +293,8 @@ public partial class ReminderSchedulerTimingSpecs
         // The overdue poison row arms a zero-delay tick; the fetch must fail that row, not throw.
         await AwaitAssertAsync(async () =>
         {
-            VirtualTime.Advance(TimeSpan.Zero);
+            // One tick, not zero: see NextDeliveryAsync.
+            VirtualTime.Advance(TimeSpan.FromTicks(1));
             Assert.Equal(ReminderCompletionStatus.Failed, (await StatusAsync(scheduler, entity, poison, due))?.CompletionStatus);
         }, ReplyTimeout, TimeSpan.FromMilliseconds(50), cancellationToken: Ct);
         VirtualTime.Advance(TimeSpan.FromSeconds(2));

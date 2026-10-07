@@ -136,17 +136,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     private bool _writeCircuitOpen;
 
     /// <summary>
-    /// Guards against re-entrant FetchReminders processing. RunTask suspends the mailbox,
-    /// but the timer could fire again before FetchRemindersCompleted is processed.
-    /// </summary>
-    private bool _processingReminders;
-
-    /// <summary>
-    /// Same guard for CheckAckTimeouts — prevents overlapping ack-timeout scans.
-    /// </summary>
-    private bool _processingAckTimeouts;
-
-    /// <summary>
     /// Debounce flag for ack flush scheduling. Multiple ReminderAck messages can arrive
     /// while the actor is processing other work; this flag ensures only one
     /// FlushBufferedAcks self-message is queued at a time.
@@ -194,15 +183,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
-    private sealed class FetchRemindersCompleted : INoSerializationVerificationNeeded
-    {
-        public static readonly FetchRemindersCompleted Instance = new();
-
-        private FetchRemindersCompleted()
-        {
-        }
-    }
-
     /// <summary>
     /// Time to prune completed reminders
     /// </summary>
@@ -224,15 +204,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         public static readonly CheckAckTimeouts Instance = new();
 
         private CheckAckTimeouts()
-        {
-        }
-    }
-
-    private sealed class CheckAckTimeoutsCompleted : INoSerializationVerificationNeeded
-    {
-        public static readonly CheckAckTimeoutsCompleted Instance = new();
-
-        private CheckAckTimeoutsCompleted()
         {
         }
     }
@@ -576,32 +547,21 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         {
             case FetchReminders:
             {
-                if (_processingReminders)
-                    break;
-
-                _processingReminders = true;
+                // RunTask suspends the mailbox until the task ends, so two fetches cannot overlap.
+                // Never drop a tick here: the tick armed at the end of a fetch can reach the mailbox
+                // before that fetch's task is done, and a dropped tick is never armed again.
                 // Each tick: flush any pending acks first (so the fetch sees up-to-date
                 // storage state), then expire stale reminders, then process due reminders.
                 // MaxSlippage causes the scheduler to fetch slightly ahead of the current
                 // time, avoiding a re-schedule for reminders about to become due.
                 RunTask(async () =>
                 {
-                    try
-                    {
-                        await FlushBufferedAcksIfAnyAsync();
-                        await ExpireRemindersAsync(TimeProvider.Now);
-                        await ProcessReminders(TimeProvider.Now + Settings.MaxSlippage);
-                    }
-                    finally
-                    {
-                        Self.Tell(FetchRemindersCompleted.Instance);
-                    }
+                    await FlushBufferedAcksIfAnyAsync();
+                    await ExpireRemindersAsync(TimeProvider.Now);
+                    await ProcessReminders(TimeProvider.Now + Settings.MaxSlippage);
                 });
                 break;
             }
-            case FetchRemindersCompleted:
-                _processingReminders = false;
-                break;
             case ReminderProtocol.ScheduleReminder scheduleSingle:
             {
                 _log.Debug("Scheduling reminder {0}", scheduleSingle);
@@ -850,30 +810,18 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             // actually acked but not yet flushed.
             case CheckAckTimeouts:
             {
-                if (_processingAckTimeouts)
-                    break;
-
+                // As with FetchReminders: the mailbox is suspended while the task runs, and a
+                // dropped tick would leave _nextAckTimeoutAt set with no timer behind it.
                 _nextAckTimeoutAt = null;
 
-                _processingAckTimeouts = true;
                 RunTask(async () =>
                 {
-                    try
-                    {
-                        await FlushBufferedAcksIfAnyAsync();
-                        await ExpireRemindersAsync(TimeProvider.Now);
-                        await ProcessAckTimeouts();
-                    }
-                    finally
-                    {
-                        Self.Tell(CheckAckTimeoutsCompleted.Instance);
-                    }
+                    await FlushBufferedAcksIfAnyAsync();
+                    await ExpireRemindersAsync(TimeProvider.Now);
+                    await ProcessAckTimeouts();
                 });
                 break;
             }
-            case CheckAckTimeoutsCompleted:
-                _processingAckTimeouts = false;
-                break;
             default:
                 Unhandled(message);
                 break;
