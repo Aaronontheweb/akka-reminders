@@ -128,6 +128,12 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     public ReminderOverview PendingReminders { get; set; } = ReminderOverview.Empty;
 
     /// <summary>
+    /// The clock reading <see cref="PendingReminders"/> was computed against. Its
+    /// <see cref="ReminderOverview.TimeUntilNext"/> counts from here, not from when a timer is armed.
+    /// </summary>
+    private DateTimeOffset _overviewAsOf;
+
+    /// <summary>
     /// Write circuit breaker. When database writes fail (mark-complete, schedule), this flag
     /// is set to prevent fetching and delivering full batches against a database that can't
     /// persist completions. While open, ProcessReminders probes with a single reminder to
@@ -245,7 +251,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             // and the immediate fetch re-delivers it ~12 times/second).
             // StartSingleTimer with the same key cancels any prior pending timer,
             // naturally debouncing rapid TryScheduleFetchReminders calls.
-            var delay = PendingReminders.TimeUntilNext;
+            // Storage calls since the overview was read took time; count the delay from now.
+            var delay = PendingReminders.TimeUntilNext - (TimeProvider.Now - _overviewAsOf);
             if (delay < TimeSpan.Zero)
                 delay = TimeSpan.Zero;
             Timers.StartSingleTimer(FetchReminders.Instance, FetchReminders.Instance, delay);
@@ -507,6 +514,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             case InitResult init:
                 _log.Info("Loaded reminder overview from storage: {0}", init.Overview);
                 PendingReminders = init.Overview;
+                _overviewAsOf = init.AsOf;
 
                 // Schedule ack timeout check BEFORE unstashing so the mailbox is
                 // fully ready when client messages are replayed — no RunTask gap.
@@ -601,7 +609,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             // The reminder is stored. Its due time is known, so the fetch timer can be
                             // armed from it alone; the next fetch brings a fresh overview.
                             _log.Warning(ex, "Failed to reload the overview after storing {0}; arming the fetch timer from its due time", scheduleSingle);
-                            PendingReminders = PendingReminders.Apply(reminder, TimeProvider.Now).newOverview;
+                            PendingReminders = PendingReminders.Apply(reminder, _overviewAsOf).newOverview;
                         }
 
                         TryScheduleFetchReminders();
@@ -862,7 +870,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     private async Task ReloadPendingOverviewAsync()
     {
         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-        PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
+        var now = TimeProvider.Now;
+        PendingReminders = await Storage.GetRemindersOverviewAsync(now, cts.Token);
+        _overviewAsOf = now;
     }
 
     private async Task ExpireRemindersAsync(DateTimeOffset now)
@@ -887,7 +897,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// initialization completes in a single PipeTo — no stashed RunTask to block
     /// the mailbox after UnstashAll.
     /// </summary>
-    private sealed record InitResult(ReminderOverview Overview, DateTimeOffset? NextAckDeadline) : Akka.Actor.INoSerializationVerificationNeeded;
+    private sealed record InitResult(ReminderOverview Overview, DateTimeOffset AsOf, DateTimeOffset? NextAckDeadline) : Akka.Actor.INoSerializationVerificationNeeded;
 
     private Task LoadReminderOverview()
     {
@@ -895,9 +905,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         {
             await ExpireRemindersAsync(TimeProvider.Now);
             using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-            var overview = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
+            var now = TimeProvider.Now;
+            var overview = await Storage.GetRemindersOverviewAsync(now, cts.Token);
             var nextAckDeadline = await Storage.GetNextAwaitingAckDeadlineAsync(cts.Token);
-            return new InitResult(overview, nextAckDeadline);
+            return new InitResult(overview, now, nextAckDeadline);
         }
 
         var init = LoadAsync();
@@ -1302,6 +1313,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         var totalFailed = 0;
         var totalExpired = 0;
         var latestOverview = PendingReminders;
+        var fetchedAt = _overviewAsOf;
         var needsOverviewReload = false;
 
         // When the write circuit is open, probe with a single reminder to test
@@ -1322,7 +1334,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             try
             {
                 using var fetchCts = new CancellationTokenSource(Settings.StorageTimeout);
-                batch = await Storage.GetNextRemindersAsync(untilDeadline, TimeProvider.Now,
+                fetchedAt = TimeProvider.Now;
+                batch = await Storage.GetNextRemindersAsync(untilDeadline, fetchedAt,
                     new ReminderBatchSize(effectiveBatchSize), fetchCts.Token);
                 _log.Info("Fetched {0} due reminders (batch)", batch.Reminders.Count);
                 latestOverview = batch.NextOverview;
@@ -1515,7 +1528,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 {
                     foreach (var pendingReminder in occurrencesToUpsert)
                     {
-                        batchOverview = batchOverview.Apply(pendingReminder, completedAt).newOverview;
+                        batchOverview = batchOverview.Apply(pendingReminder, fetchedAt).newOverview;
                     }
                 }
 
@@ -1571,7 +1584,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             try
             {
                 using var overviewCts = new CancellationTokenSource(Settings.StorageTimeout);
-                PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, overviewCts.Token);
+                var now = TimeProvider.Now;
+                PendingReminders = await Storage.GetRemindersOverviewAsync(now, overviewCts.Token);
+                _overviewAsOf = now;
             }
             catch (Exception ex)
             {
@@ -1581,6 +1596,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         else
         {
             PendingReminders = latestOverview;
+            _overviewAsOf = fetchedAt;
         }
 
         _log.Info(
