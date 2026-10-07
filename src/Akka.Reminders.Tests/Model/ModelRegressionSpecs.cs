@@ -136,6 +136,17 @@ public sealed class ModelRegressionSpecs
         new Tick(5000),
     ]));
 
+    // A nack stores the retry, then the overview read fails. The caller gets Error although the retry
+    // was saved, and no fetch timer is set for it. Same shape as #152, on the nack path; no ruling yet.
+    [Fact(DisplayName = "Should_SendTheRetry_When_OverviewReloadFailsAfterANack")]
+    public Task RetryIsNotStrandedWhenOverviewReloadFailsAfterNack() => RunStrictAsync(new Scenario(new ModelSettings(500, 500, 1000, 10000, 5, 3, 100, 256),
+    [
+        new SetRecipient(2, Recipient.Nack),
+        new ScheduleRecurring(2, 0, 0, 5000, null),
+        new InjectFault(StorageCall.Overview, FaultKind.Fail, 1, 0, false),
+        new Tick(3000),
+    ]));
+
     // The reminder is stored, then reloading the overview fails. The caller gets Error and no fetch
     // timer is set, so the stored reminder is not delivered.
     [Fact(DisplayName = "Should_DeliverStoredReminder_When_OverviewReloadFailsAfterSchedule")]

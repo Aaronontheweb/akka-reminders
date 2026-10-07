@@ -56,6 +56,10 @@ public sealed class ScenarioRunner
         public DeliveryRecord? Last;
         public bool AckedSuccess;
         public bool NackedSinceLastDelivery;
+
+        // Retry times the scheduler granted in nack replies. A slow storage call can let the retry go
+        // out before the harness has seen the reply, so the flag above is not enough.
+        public readonly HashSet<DateTimeOffset> NackRetryTimes = [];
     }
 
     public ScenarioRunner(ModelHost host, IModelStorageFactory factory, Scenario scenario)
@@ -587,7 +591,11 @@ public sealed class ScenarioRunner
             // An Error after a fault may still have stored the retry.
             if (response.ResponseCode == ReminderNackResponseCode.RetryScheduled ||
                 (faulted && response.ResponseCode == ReminderNackResponseCode.Error))
+            {
                 Occ(d.Row, rowGen).NackedSinceLastDelivery = true;
+                if (response.NextAttemptAtUtc is { } granted)
+                    Occ(d.Row, rowGen).NackRetryTimes.Add(granted);
+            }
         }
     }
 
@@ -674,7 +682,7 @@ public sealed class ScenarioRunner
             if (occ.AckedSuccess)
                 throw Violation("NoRedeliveryAfterAck", $"{d.Row} g{d.Gen} was delivered again after its ack succeeded");
             var prevAckDeadline = occ.Last!.Awaiting!.AckDeadline;
-            if (!occ.NackedSinceLastDelivery && d.Awaiting.CommitStart < prevAckDeadline)
+            if (!occ.NackedSinceLastDelivery && !occ.NackRetryTimes.Contains(d.Awaiting.RowWhen) && d.Awaiting.CommitStart < prevAckDeadline)
                 throw Violation("NoRedeliveryBeforeAckTimeout",
                     $"{d.Row} g{d.Gen} was delivered again at {ModelLog.T(d.Awaiting.CommitStart)} before the previous attempt's ack deadline {ModelLog.T(prevAckDeadline)}, without a nack");
         }
