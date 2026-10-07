@@ -38,6 +38,16 @@ internal sealed class FailableReminderStorage : IReminderStorage
     public bool ApplyNextCommitThenReportFailure { get; set; }
 
     /// <summary>
+    /// Like <see cref="ApplyNextCommitThenReportFailure"/>, but the failure is a thrown <see cref="TimeoutException"/>.
+    /// </summary>
+    public bool ApplyNextCommitThenThrow { get; set; }
+
+    /// <summary>
+    /// When true, the next overview read throws (once).
+    /// </summary>
+    public bool FailNextOverviewRead { get; set; }
+
+    /// <summary>
     /// When true, all read operations throw.
     /// </summary>
     public bool FailReads { get; set; }
@@ -94,17 +104,20 @@ internal sealed class FailableReminderStorage : IReminderStorage
             _firstCommitMutationFailure.TrySetResult();
             throw new TimeoutException("Simulated database write timeout");
         }
-        if (ApplyNextCommitThenReportFailure)
+        if (ApplyNextCommitThenReportFailure || ApplyNextCommitThenThrow)
         {
-            ApplyNextCommitThenReportFailure = false;
-            return ApplyThenReportFailureAsync(mutationBatch, ct);
+            var throws = ApplyNextCommitThenThrow;
+            ApplyNextCommitThenReportFailure = ApplyNextCommitThenThrow = false;
+            return ApplyThenFailAsync(mutationBatch, throws, ct);
         }
         return _inner.CommitReminderMutationsAsync(mutationBatch, ct);
     }
 
-    private async Task<bool> ApplyThenReportFailureAsync(ReminderMutationBatch mutationBatch, CancellationToken ct)
+    private async Task<bool> ApplyThenFailAsync(ReminderMutationBatch mutationBatch, bool throws, CancellationToken ct)
     {
         await _inner.CommitReminderMutationsAsync(mutationBatch, ct);
+        if (throws)
+            throw new TimeoutException("Simulated database commit timeout after the commit landed");
         return false;
     }
 
@@ -151,6 +164,13 @@ internal sealed class FailableReminderStorage : IReminderStorage
         {
             FailNextOverviewReads--;
             throw new TimeoutException("Simulated overview read timeout");
+        }
+
+
+        if (FailNextOverviewRead)
+        {
+            FailNextOverviewRead = false;
+            throw new TimeoutException("Simulated database read timeout");
         }
 
         return _inner.GetRemindersOverviewAsync(now, ct);
