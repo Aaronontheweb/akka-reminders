@@ -1083,8 +1083,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
     /// <summary>
     /// Adds the next occurrence of a recurring reminder to the commit, unless the commit already
-    /// holds a row for that slot or storage already has it. A retried occurrence that was delivered
-    /// before already wrote its next slot (always due + interval), and that row must never be reset.
+    /// holds a row for that slot. The next occurrence is written the first time an occurrence is
+    /// processed (attempt 0). A retried occurrence already wrote it (always at due + interval), and
+    /// that row must never be reset, so a retry only writes it when storage has no row there at all
+    /// (a retry row stored by a version that wrote the next occurrence later).
     /// </summary>
     private async Task AddNextOccurrenceAsync(ScheduledReminder reminder, DateTimeOffset now, List<ScheduledReminder> occurrencesToUpsert)
     {
@@ -1438,6 +1440,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             AddUpsert(occurrencesToUpsert, retryReminder);
                             _log.Info("Scheduling retry for reminder {0} at {1}", reminder.Key, retryReminder.When);
                             chunkRetried += 1;
+
+                            // The next occurrence is written the first time this one is processed, whatever
+                            // the outcome, so later retries never need to write (and possibly reset) it.
+                            if (reminder.RepeatInterval.HasValue)
+                                await AddNextOccurrenceAsync(reminder, completedAt, occurrencesToUpsert);
                         }
                         else
                         {

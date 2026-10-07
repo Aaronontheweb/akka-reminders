@@ -765,7 +765,9 @@ public sealed class ScenarioRunner
             }
 
             var regionPresent = _resolver.IsPresent(ModelGen.RegionOf(reg.Entity));
-            if (done.Status == ReminderCompletionStatus.Expired && !delivered && regionPresent && reg.Deadline(id.Due) > c.Start)
+            // Latest-only: sending a later occurrence in the same commit ends this one, deadline or not.
+            var superseded = batch.AwaitingAckReminders.Any(a => a.Entity == id.Entity && a.Key == id.Key && a.DueTimeUtc > id.Due);
+            if (done.Status == ReminderCompletionStatus.Expired && !delivered && !superseded && regionPresent && reg.Deadline(id.Due) > c.Start)
                 throw Violation("NoEarlyExpiry",
                     $"{id} g{gen} was never delivered and was marked Expired at {ModelLog.T(c.Start)}, before its deadline {ModelLog.T(reg.Deadline(id.Due))}");
 
@@ -899,11 +901,13 @@ public sealed class ScenarioRunner
                 throw Violation("SeriesNeverDies",
                     $"{reg}: newest occurrence {head} is {headStatus?.CompletionStatus.ToString() ?? "missing"} (row generation g{GenOfRow(head)})");
 
-            // Series never forks: at most one never-delivered Pending occurrence.
+            // Series never forks: at most one untouched Pending occurrence (attempt 0, never sent). An
+            // occurrence waiting on a missing shard region has attempt > 0 and already wrote its successor.
             var fresh = active.Where(r => _possiblyActive[r].CompletionStatus == ReminderCompletionStatus.Pending &&
+                                          _possiblyActive[r].AttemptCount == 0 &&
                                           !_everAwaiting.Contains((r, reg.Gen))).ToList();
             if (fresh.Count > 1)
-                throw Violation("SeriesNeverForks", $"{reg} has {fresh.Count} undelivered Pending occurrences: {string.Join(", ", fresh)}");
+                throw Violation("SeriesNeverForks", $"{reg} has {fresh.Count} untouched Pending occurrences: {string.Join(", ", fresh)}");
 
             // Latest-only: at most one attempted occurrence is still live (delivering the next one expires it).
             // A row past its deadline is dead even before cleanup marks it (cleanup is best effort).

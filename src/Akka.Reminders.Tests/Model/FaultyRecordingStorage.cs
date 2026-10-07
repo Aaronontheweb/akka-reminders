@@ -117,6 +117,9 @@ public sealed class FaultyRecordingStorage : IReminderStorage
                 Delay(fault.Value.Delay, fault.Value.Fire);
                 break;
             case FaultKind.AppliedThenFail:
+                // A commit reports failure the way the shipped providers do: it returns false.
+                if (failResult is not null)
+                    return failResult();
                 throw new TimeoutException($"Injected {call} failure after the call reached storage");
         }
 

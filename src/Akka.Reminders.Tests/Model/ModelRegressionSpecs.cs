@@ -61,6 +61,17 @@ public sealed class ModelRegressionSpecs
         new Tick(3000),
     ]));
 
+    // A re-registration leaves the old registration's rows behind. A retried occurrence of the new
+    // series must not mistake one of them for its own next occurrence and stop writing one.
+    [Fact(DisplayName = "Should_KeepSeriesAlive_When_AnOldRegistrationLeftARowOnTheNextSlot")]
+    public Task SeriesSurvivesLeftoverRowOnNextSlot() => RunStrictAsync(new Scenario(new ModelSettings(5000, 500, 1000, 10000, 5, 1, 100, 256),
+    [
+        new ScheduleRecurring(2, 1, 0, 5000, null),
+        new ScheduleRecurring(2, 1, 0, 1000, null),
+        new SetRegion(1, false),
+        new Tick(10000),
+    ]));
+
     // The scheduler reads the clock before a fetch that takes 1 ms; the occurrence's 1 ms window
     // closes meanwhile and it is still committed for delivery.
     [Fact(DisplayName = "Should_NotDeliverPastTheDeadline_When_StorageIsSlowDuringAPass")]

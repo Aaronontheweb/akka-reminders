@@ -14,12 +14,12 @@ Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
 
 Recurring reminders are modeled as a stream of occurrences.
 
-- The next occurrence is persisted, in the same commit, when the current occurrence is delivered or ends without delivery (expired, or failed because its shard region is missing).
+- The next occurrence is persisted, in the same commit, the first time the current occurrence is processed: when it is delivered, when it is put back for a retry because its shard region is missing, or when it ends without delivery (expired or failed).
 - The next occurrence is the earliest slot whose deadline has not passed. Missed slots are skipped, not replayed.
 - Each occurrence starts with a new retry budget.
 - Each occurrence has its own absolute UTC deadline.
 - By default, a recurring occurrence expires when the next occurrence is delivered or becomes due, whichever is first. There is at most one live delivered occurrence per recurring reminder: when the next one is sent early (inside `MaxSlippage`) while the previous one is still unacked, the previous one is marked `Expired` in the same commit.
-- The next occurrence is written once. A retry of an occurrence that was already delivered finds its next slot in storage and leaves that row alone, whatever state it is in.
+- The next occurrence is written once. A retry of an occurrence finds its next slot in storage and leaves that row alone, whatever state it is in.
 - If `MaxDeliveryWindow` is configured, the effective deadline is `min(due + window, next due)`.
 - A late ack for an old occurrence is a harmless `NotFound` because the ack is matched by `DueTimeUtc`.
 
