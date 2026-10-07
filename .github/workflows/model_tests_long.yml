@@ -1,0 +1,41 @@
+name: model_tests_long
+
+# Long run of the CsCheck model-based scheduler tests. Start it by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Generated sequences per storage"
+        required: true
+        default: "20000"
+      sql:
+        description: "Also run PostgreSQL and SQL Server (Testcontainers)"
+        type: boolean
+        default: false
+      strict:
+        description: "Turn known-issue checks back on: 1 for all, or a comma-separated list"
+        required: false
+        default: ""
+
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v7.0.0
+
+      - name: "Install .NET SDK"
+        uses: actions/setup-dotnet@v6.0.0
+        with:
+          global-json-file: "./global.json"
+
+      - name: "dotnet build"
+        run: dotnet build src/Akka.Reminders.Tests -c Release
+
+      - name: "Model-based tests"
+        env:
+          REMINDERS_CSCHECK_ITERATIONS: ${{ inputs.iterations }}
+          REMINDERS_CSCHECK_SQL: ${{ inputs.sql && '1' || '0' }}
+          REMINDERS_CSCHECK_STRICT: ${{ inputs.strict }}
+        run: dotnet test src/Akka.Reminders.Tests -c Release --no-build --filter "FullyQualifiedName~ReminderSchedulerModelSpecs"
