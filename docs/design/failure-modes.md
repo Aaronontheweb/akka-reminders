@@ -40,7 +40,9 @@ There is no explicit recovery step that resets `AwaitingAck` rows back to `Pendi
 
 Schedule and cancel handlers reply to the caller **after** `ReloadPendingOverviewAsync` and `TryScheduleFetchReminders` complete. This guarantees the Ask response is a reliable signal that the fetch timer is registered — callers can depend on the scheduler being ready to process the reminder on the next tick.
 
-If the reminder was stored but the overview reload then fails, the schedule handler still replies `Success`: it arms the fetch timer from the due time of the reminder it just stored, and the next fetch reads a fresh overview.
+If the reminder was stored but the overview reload then fails, the schedule handler still replies `Success`: it arms the fetch timer from the due time of the reminder it just stored, and the next fetch reads a fresh overview. This covers schedule only.
+
+Known limit: a cancel or cancel-all whose overview reload fails still replies `Error`, although the cancel was stored.
 
 ## Processing Pipeline
 
