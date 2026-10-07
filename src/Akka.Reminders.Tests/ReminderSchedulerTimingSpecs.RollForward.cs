@@ -316,14 +316,14 @@ public partial class ReminderSchedulerTimingSpecs
         // The overdue row arms one zero-delay tick. That fetch skips it and must not arm another.
         await AwaitAssertAsync(() =>
         {
-            VirtualTime.Advance(TimeSpan.Zero);
+            VirtualTime.Advance(TimeSpan.FromTicks(1));
             Assert.True(storage.Fetches > 0);
         }, ReplyTimeout, TimeSpan.FromMilliseconds(50), cancellationToken: Ct);
         Assert.Equal(ReminderCompletionStatus.Pending, (await StatusAsync(scheduler, entity, poison, due))?.CompletionStatus);
         var fetches = storage.Fetches;
         for (var i = 0; i < 10; i++)
         {
-            VirtualTime.Advance(TimeSpan.Zero);
+            VirtualTime.Advance(TimeSpan.FromTicks(1));
             await Task.Delay(20, Ct);
         }
         Assert.Equal(fetches, storage.Fetches);
