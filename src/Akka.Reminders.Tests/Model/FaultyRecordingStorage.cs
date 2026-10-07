@@ -187,6 +187,8 @@ public sealed class FaultyRecordingStorage : IReminderStorage
                 var genAfter = new Dictionary<RowId, int>();
                 foreach (var id in Touched(mutationBatch))
                     genAfter[id] = _log.Rows.TryGetValue(id, out var row) ? row.Gen : -1;
+                if (!reported)
+                    _log.FailedCommits++;
                 _log.Commits.Add(new CommitRecord(seq, lowerBound, start == default ? _clock.Now : start, mutationBatch,
                     applied, reported, genBefore, genAfter));
             }

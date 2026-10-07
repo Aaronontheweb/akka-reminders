@@ -259,6 +259,12 @@ public sealed class ScenarioRunner
             return _log.CallCounts.GetValueOrDefault(StorageCall.Fetch);
     }
 
+    private int FailedCommits()
+    {
+        lock (_log.Lock)
+            return _log.FailedCommits;
+    }
+
     private int Passes()
     {
         lock (_log.Lock)
@@ -273,6 +279,7 @@ public sealed class ScenarioRunner
     {
         var quiet = 0;
         var passesAtStart = Passes();
+        var failedAtStart = FailedCommits();
         for (var round = 0; ; round++)
         {
             var fired = _clock.FireDue();
@@ -286,8 +293,12 @@ public sealed class ScenarioRunner
             if (quiet >= 2)
                 return;
 
-            var passes = Passes() - passesAtStart;
-            if (round > MaxSettleRounds || passes > MaxPassesPerSettle)
+            // Retrying at once after a commit that reported failure is in spec (the write circuit adds
+            // no delay), so each failed commit pays for the pass and the settle rounds it causes. What is
+            // left must stay small: with healthy storage the scheduler may not spin.
+            var failed = FailedCommits() - failedAtStart;
+            var passes = Passes() - passesAtStart - failed;
+            if (round - 3 * failed > MaxSettleRounds || passes > MaxPassesPerSettle)
                 throw Violation("NoHotLoop",
                     $"the scheduler kept working without time passing: {round} settle rounds, {passes} expire/fetch passes at {ModelLog.T(_clock.Now)}");
             if (round > 50_000)

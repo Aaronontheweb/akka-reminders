@@ -96,6 +96,9 @@ public sealed class ModelLog
     /// <summary>Virtual time the storage spent in injected delays since the scenario began.</summary>
     public TimeSpan SlowTimeTotal { get; set; }
 
+    /// <summary>Commits that reported failure to the scheduler (whether or not they reached storage).</summary>
+    public int FailedCommits { get; set; }
+
     /// <summary>Cancel and cancel-all calls that reached storage.</summary>
     public int CancelsApplied { get; set; }
 

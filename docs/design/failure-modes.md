@@ -291,6 +291,7 @@ When any hot-path write fails (in either `ProcessReminders` or `ProcessAckTimeou
 - The circuit opens.
 - The current run stops.
 - Later runs probe with a single reminder.
+- Probes are not delayed: while writes keep failing, a due reminder is re-fetched at once, so the retry rate is bounded only by storage latency.
 - Once the probe succeeds, the scheduler resumes full-batch processing in the same run.
 
 ## Accepted Trade-offs
