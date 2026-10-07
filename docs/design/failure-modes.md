@@ -18,8 +18,9 @@ Recurring reminders are modeled as a stream of occurrences.
 - The next occurrence is the earliest slot whose deadline has not passed. Missed slots are skipped, not replayed.
 - Each occurrence starts with a new retry budget.
 - Each occurrence has its own absolute UTC deadline.
-- By default, a recurring occurrence expires when the next occurrence is delivered or becomes due, whichever is first. There is at most one live delivered occurrence per recurring reminder: when the next one is sent early (inside `MaxSlippage`) while the previous one is still unacked, the previous one is marked `Expired` in the same commit.
-- The next occurrence is written once. A retry of an occurrence finds its next slot in storage and leaves that row alone, whatever state it is in.
+- By default, a recurring occurrence expires when the next occurrence is delivered or becomes due, whichever is first. There is at most one live occurrence per recurring reminder: when the next one is sent early (inside `MaxSlippage`) while the previous one is still unacked, the previous one is marked `Expired` in the same commit.
+- The next occurrence is written once. A retry of an occurrence looks up its next slot and, when a row is there, leaves it alone whatever state it is in. If that lookup fails, the retry writes the next occurrence anyway: a possible duplicate, never a lost series. After the first failed lookup a fetch pass does no more lookups, so an outage costs one storage timeout per pass, not one per reminder.
+- If the row a retry finds on its next slot is already finished (`Cancelled`, `Delivered`, `Expired` or `Failed`), the retry logs a warning and writes nothing. Such a row can be a leftover from an older registration of the same key; in that case the series ends there.
 - If `MaxDeliveryWindow` is configured, the effective deadline is `min(due + window, next due)`.
 - A late ack for an old occurrence is a harmless `NotFound` because the ack is matched by `DueTimeUtc`.
 
@@ -255,7 +256,7 @@ Hot-path writes are batched into single round-trips:
 - **Delivery path**: `CommitReminderMutationsAsync` handles pending upserts (retries + next recurring occurrences), terminal completions, and awaiting-ack transitions in a single call per chunk.
 - **Ack path**: `AcknowledgeRemindersAsync` flushes buffered acks in batches of `AckFlushBatchSize`.
 
-This avoids one round-trip per reminder in both the delivery and acknowledgement paths.
+This avoids one round-trip per reminder for the writes in both the delivery and acknowledgement paths. Two cases add a single-row status read per reminder in the delivery path: a recurring occurrence that is sent before its due time (to find a previous occurrence that is still unacked), and a recurring occurrence that is retried (to find its next occurrence).
 
 ### 4. Pending overview excludes AwaitingAck
 
@@ -288,7 +289,7 @@ The design goal is to keep those duplicates bounded and occurrence-specific.
 
 ### Recurring reminders are latest-only, not catch-up
 
-If an old recurring occurrence is still unacked when the next occurrence is delivered or becomes due, the old one expires instead of building an unbounded replay backlog. A late ack or retry for it is a `NotFound`.
+If an old recurring occurrence is still unacked when the next occurrence is delivered or becomes due, the old one expires instead of building an unbounded replay backlog. A late ack or nack for it is a `NotFound`.
 
 This costs one extra occurrence-status read when a recurring occurrence is retried, and one when a recurring occurrence is sent before its due time.
 
