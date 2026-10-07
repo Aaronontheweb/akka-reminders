@@ -1528,6 +1528,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 {
                     foreach (var pendingReminder in occurrencesToUpsert)
                     {
+                        // A row that this commit also ends (Failed/Expired) is not pending work.
+                        if (terminalReminders.Exists(t => t.Entity == pendingReminder.Entity && t.Key == pendingReminder.Key &&
+                                                          t.DueTimeUtc == pendingReminder.DueTimeUtc))
+                            continue;
+
                         batchOverview = batchOverview.Apply(pendingReminder, fetchedAt).newOverview;
                     }
                 }

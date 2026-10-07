@@ -95,6 +95,16 @@ public sealed class ModelRegressionSpecs
         new Tick(4000),
     ]));
 
+    // The second series is registered one interval in the past, so its first slot expires and the next
+    // one is due at the exact instant of the pass. A later upsert in the same pass must not hide it.
+    [Fact(DisplayName = "Should_FetchAReminderDueExactlyNow_When_ALaterRowIsWrittenInTheSamePass")]
+    public Task OverviewKeepsARowDueExactlyNow() => RunStrictAsync(new Scenario(new ModelSettings(5000, 5000, 100, 600000, 2, 3, 1, 256),
+    [
+        new ScheduleRecurring(0, 0, 0, 1000, null),
+        new ScheduleRecurring(0, 1, -1000, 1000, null),
+        new Tick(500),
+    ]));
+
     // The delivery commit takes 2 s. The next fetch timer is "8 s from the time the pass began" but is
     // started 2 s later, so the next occurrence (due +8.001 s) is still waiting at +10 s.
     [Fact(DisplayName = "Should_FetchOnTime_When_APreviousStorageCallWasSlow")]
