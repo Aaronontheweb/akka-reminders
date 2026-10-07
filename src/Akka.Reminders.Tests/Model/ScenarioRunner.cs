@@ -7,51 +7,6 @@ namespace Akka.Reminders.Tests.Model;
 /// <summary>A broken invariant. The message names the invariant, the step, and recent history.</summary>
 public sealed class ModelViolation(string message) : Exception(message);
 
-/// <summary>Switches for checks that are known to fail on some versions. All on by default.</summary>
-public sealed record ModelChecks
-{
-    public static ModelChecks Strict { get; } = new();
-
-    /// <summary>
-    /// The deadline is checked against the clock when each chunk is committed. Off: only against the
-    /// start of the scheduler pass (1.5.73 reads the clock once per pass).
-    /// </summary>
-    public bool DeadlineCheckedForEveryChunk { get; init; } = true;
-
-    /// <summary>One commit never upserts the same occurrence twice (SQL upserts reject that).</summary>
-    public bool NoDuplicateRowInOneCommit { get; init; } = true;
-
-    /// <summary>Also require the send time (not only the commit time) to be before the occurrence deadline.</summary>
-    public bool DeliverBeforeDeadlineAtSendTime { get; init; } = true;
-
-    /// <summary>A recurring successor upsert must never touch an occurrence that was already delivered.</summary>
-    public bool NoResetOfDeliveredOccurrence { get; init; } = true;
-
-    /// <summary>Nothing due may be left unprocessed at quiescence (the fetch timer is never late).</summary>
-    public bool NoOverdueWorkAtQuiescence { get; init; } = true;
-
-    /// <summary>A retry of an older occurrence may not be delivered after a newer one of the same series.</summary>
-    public bool NoOlderRetryAfterNewerDelivery { get; init; } = true;
-
-    /// <summary>
-    /// A row written with a time equal to the instant of the pass that wrote it must not hide other due
-    /// reminders. Off: <see cref="NoOverdueWorkAtQuiescence"/> is not checked between such a write and the next fetch.
-    /// </summary>
-    public bool DueNowRowIsFetchedAtOnce { get; init; } = true;
-
-    /// <summary>
-    /// The next fetch is on time even after a slow storage call. Off: a due row may be late by the
-    /// virtual time storage calls were slowed in this scenario.
-    /// </summary>
-    public bool FetchTimerSurvivesSlowStorage { get; init; } = true;
-
-    /// <summary>The scheduler may not spin without time passing.</summary>
-    public bool NoHotLoop { get; init; } = true;
-
-    /// <summary>A schedule/cancel that reached storage without any injected fault must report success.</summary>
-    public bool ResponsesMatchStorage { get; init; } = true;
-}
-
 /// <summary>
 /// Runs one <see cref="Scenario"/> against a real <see cref="ReminderScheduler"/> on a virtual clock and
 /// checks the model's invariants after every step.
@@ -68,7 +23,6 @@ public sealed class ScenarioRunner
     private readonly IModelStorageFactory _factory;
     private readonly Scenario _scenario;
     private readonly ModelSettings _settings;
-    private readonly ModelChecks _checks;
     private readonly ModelLog _log = new();
     private readonly RecordingShardRegionResolver _resolver;
     private readonly List<string> _trace = [];
@@ -91,8 +45,6 @@ public sealed class ScenarioRunner
     private readonly Dictionary<int, DateTimeOffset> _maxAttemptedDue = new();
     private readonly Dictionary<RowId, ReminderOccurrenceStatus> _possiblyActive = new();
     private readonly HashSet<(RowId Row, int Gen)> _everAwaiting = [];
-    private readonly HashSet<(RowId Row, int Gen)> _resetRows = [];
-    private int _overviewPoisonedAtFetch = -1;
     private int _deliveriesSeen;
     private int _commitsSeen;
     private int _step = -1;
@@ -106,26 +58,25 @@ public sealed class ScenarioRunner
         public bool NackedSinceLastDelivery;
     }
 
-    public ScenarioRunner(ModelHost host, IModelStorageFactory factory, Scenario scenario, ModelChecks? checks = null)
+    public ScenarioRunner(ModelHost host, IModelStorageFactory factory, Scenario scenario)
     {
         _host = host;
         _clock = host.Clock;
         _factory = factory;
         _scenario = scenario;
         _settings = scenario.Settings;
-        _checks = checks ?? ModelChecks.Strict;
         _resolver = new RecordingShardRegionResolver(_clock, _log);
     }
 
     /// <summary>Runs a scenario on a pooled host and storage from <paramref name="factory"/>.</summary>
     /// <returns>Every delivery the scheduler made, in order.</returns>
-    public static async Task<IReadOnlyList<DeliveryRecord>> RunAsync(Scenario scenario, IModelStorageFactory factory, ModelChecks? checks = null)
+    public static async Task<IReadOnlyList<DeliveryRecord>> RunAsync(Scenario scenario, IModelStorageFactory factory)
     {
         var host = ModelHost.Rent();
         var reusable = true;
         try
         {
-            var runner = new ScenarioRunner(host, factory, scenario, checks);
+            var runner = new ScenarioRunner(host, factory, scenario);
             await runner.RunAsync();
             lock (runner._log.Lock)
                 return runner._log.Deliveries.ToList();
@@ -332,7 +283,7 @@ public sealed class ScenarioRunner
                 return;
 
             var passes = Passes() - passesAtStart;
-            if (_checks.NoHotLoop && (round > MaxSettleRounds || passes > MaxPassesPerSettle))
+            if (round > MaxSettleRounds || passes > MaxPassesPerSettle)
                 throw Violation("NoHotLoop",
                     $"the scheduler kept working without time passing: {round} settle rounds, {passes} expire/fetch passes at {ModelLog.T(_clock.Now)}");
             if (round > 50_000)
@@ -457,7 +408,7 @@ public sealed class ScenarioRunner
             _maxDueByGen[gen] = anchor;
             _possiblyActive[row] = null!;
 
-            if (_checks.ResponsesMatchStorage && !faulted && response.ResponseCode != ReminderScheduleResponseCode.Success)
+            if (!faulted && response.ResponseCode != ReminderScheduleResponseCode.Success)
                 throw Violation("ScheduleResponseMatchesStorage",
                     $"the reminder was stored, no fault was injected, but the reply was {response.ResponseCode}: {response.Message}");
         }
@@ -493,7 +444,7 @@ public sealed class ScenarioRunner
 
         if (!applied && response.ResponseCode != ReminderCancelResponseCode.Error)
             throw Violation("CancelResponseMatchesStorage", $"cancel answered {response.ResponseCode} but never reached storage");
-        if (_checks.ResponsesMatchStorage && !faulted && response.ResponseCode == ReminderCancelResponseCode.Error)
+        if (!faulted && response.ResponseCode == ReminderCancelResponseCode.Error)
             throw Violation("CancelResponseMatchesStorage", $"cancel failed without an injected fault: {response.Message}");
     }
 
@@ -669,7 +620,7 @@ public sealed class ScenarioRunner
             {
                 // PostgreSQL and SQL Server reject one upsert statement that names the same row twice.
                 var twice = c.Batch.PendingUpserts.GroupBy(u => new RowId(u.Entity, u.Key, u.DueTimeUtc)).FirstOrDefault(g => g.Count() > 1);
-                if (twice is not null && _checks.NoDuplicateRowInOneCommit)
+                if (twice is not null)
                     throw Violation("NoDuplicateRowInOneCommit",
                         $"commit at {ModelLog.T(c.Start)} upserts {twice.Key} {twice.Count()} times (attempts {string.Join(", ", twice.Select(u => u.AttemptCount))})");
                 if (c.Applied)
@@ -703,13 +654,10 @@ public sealed class ScenarioRunner
             throw Violation("CommitBeforeDelivery", $"delivered {d.Row} g{d.Gen} without a new committed AwaitingAck transition");
 
         var deadline = reg.Deadline(d.Row.Due);
-        var decidedBy = _checks.DeadlineCheckedForEveryChunk ? d.Awaiting.CommitStart : d.Awaiting.DecidedNoEarlierThan;
-        if (decidedBy >= deadline)
+        // The commit time is what counts: a slow commit may still put the send itself after the deadline.
+        if (d.Awaiting.CommitStart >= deadline)
             throw Violation("NoDeliveryAfterDeadline",
                 $"{d.Row} g{d.Gen} was committed for delivery at {ModelLog.T(d.Awaiting.CommitStart)}, at or after its deadline {ModelLog.T(deadline)}");
-        if (_checks.DeliverBeforeDeadlineAtSendTime && d.At >= deadline)
-            throw Violation("NoDeliveryAfterDeadline",
-                $"{d.Row} g{d.Gen} was sent at {ModelLog.T(d.At)}, at or after its deadline {ModelLog.T(deadline)} (commit started {ModelLog.T(d.Awaiting.CommitStart)})");
 
         // Not early: at most MaxSlippage before the row's due (or retry) time.
         if (d.Awaiting.CommitStart < d.Awaiting.RowWhen - _settings.MaxSlippage)
@@ -734,11 +682,9 @@ public sealed class ScenarioRunner
         if (occ.Deliveries + 1 > _settings.MaxAttempts)
             throw Violation("MaxDeliveryAttempts", $"{d.Row} g{d.Gen} delivered {occ.Deliveries + 1} times; MaxDeliveryAttempts is {_settings.MaxAttempts}");
 
+        // Latest-only: once a later occurrence was delivered, an older one is never delivered again.
         if (_maxDeliveredDue.TryGetValue(d.Gen, out var maxDue) && d.Row.Due < maxDue)
-        {
-            if (_checks.NoOlderRetryAfterNewerDelivery)
-                throw Violation("InDueOrder", $"a retry of {d.Row} g{d.Gen} was delivered after the later occurrence at {ModelLog.T(maxDue)}");
-        }
+            throw Violation("LatestOnly", $"{d.Row} g{d.Gen} was delivered after the later occurrence at {ModelLog.T(maxDue)}");
 
         if (!_maxDeliveredDue.TryGetValue(d.Gen, out var m) || d.Row.Due > m)
             _maxDeliveredDue[d.Gen] = d.Row.Due;
@@ -757,30 +703,16 @@ public sealed class ScenarioRunner
             var id = new RowId(u.Entity, u.Key, u.DueTimeUtc);
             var gen = ModelLog.GenOf(u.Message);
             _possiblyActive[id] = null!;
-            // Known issue: an upsert whose time is exactly the pass time makes the in-memory overview forget
-            // every other pending reminder until the next fetch.
-            if (u.When >= c.DecidedNoEarlierThan && u.When <= c.Start)
-                _overviewPoisonedAtFetch = Fetches();
             if (!_regs.TryGetValue(gen, out var reg))
                 throw Violation("UpsertHasRegistration", $"commit upserted {id} with unknown generation g{gen}");
             if (!_maxDueByGen.TryGetValue(gen, out var maxDue) || id.Due > maxDue)
                 _maxDueByGen[gen] = id.Due;
 
             var existed = c.GenBefore.TryGetValue(id, out var before) && before == gen;
-            if (u.AttemptCount == 0 && existed && _occ.TryGetValue((id, gen), out var occ) && occ.Deliveries > 0 &&
-                !_checks.NoResetOfDeliveredOccurrence)
-            {
-                // Known issue: forget the occurrence so the duplicate delivery that follows is not reported again.
-                Trace($"known issue: commit reset delivered occurrence {id} g{gen}");
-                _occ.Remove((id, gen));
-                _resetRows.Add((id, gen));
-                continue;
-            }
-
             if (existed && _occ.TryGetValue((id, gen), out var acked) && acked.AckedSuccess)
                 throw Violation("AckIsFinal",
                     $"commit at {ModelLog.T(c.Start)} rewrote {id} g{gen} (attempt {u.AttemptCount}, due {ModelLog.T(u.When)}) after its ack succeeded");
-            if (u.AttemptCount == 0 && existed && _occ.TryGetValue((id, gen), out occ) && occ.Deliveries > 0)
+            if (u.AttemptCount == 0 && existed && _occ.TryGetValue((id, gen), out var occ) && occ.Deliveries > 0)
             {
                 throw Violation("NoResetOfDeliveredOccurrence",
                     $"commit at {ModelLog.T(c.Start)} rewrote {id} g{gen} as a fresh Pending occurrence (attempt 0, due {ModelLog.T(u.When)}) although it was already delivered {occ.Deliveries} time(s){(occ.AckedSuccess ? " and acked" : "")}");
@@ -839,7 +771,7 @@ public sealed class ScenarioRunner
             var id = new RowId(a.Entity, a.Key, a.DueTimeUtc);
             var gen = c.GenAfter.GetValueOrDefault(id, -1);
             // First attempts of a series happen in due-time order.
-            if (_everAwaiting.Add((id, gen)) && !_resetRows.Contains((id, gen)))
+            if (_everAwaiting.Add((id, gen)))
             {
                 if (_maxAttemptedDue.TryGetValue(gen, out var newest) && id.Due < newest)
                     throw Violation("InDueOrder", $"{id} g{gen} was first attempted after the later occurrence at {ModelLog.T(newest)}");
@@ -887,17 +819,9 @@ public sealed class ScenarioRunner
     /// </summary>
     private async Task CheckProgressAsync()
     {
-        if (!_checks.NoOverdueWorkAtQuiescence)
-            return;
         var now = _clock.Now;
         var due = await _inner.GetNextRemindersAsync(now, now, new ReminderBatchSize(1000));
-        TimeSpan slack;
-        lock (_log.Lock)
-            slack = _checks.FetchTimerSurvivesSlowStorage ? TimeSpan.Zero : _log.SlowTimeTotal;
-        var overdue = due.Reminders
-            .Where(x => x.When <= now - slack)
-            .Where(_ => _checks.DueNowRowIsFetchedAtOnce || _overviewPoisonedAtFetch != Fetches())
-            .ToList();
+        var overdue = due.Reminders;
         if (overdue.Count > 0)
         {
             var r = overdue[0];
@@ -972,6 +896,11 @@ public sealed class ScenarioRunner
                                           !_everAwaiting.Contains((r, reg.Gen))).ToList();
             if (fresh.Count > 1)
                 throw Violation("SeriesNeverForks", $"{reg} has {fresh.Count} undelivered Pending occurrences: {string.Join(", ", fresh)}");
+
+            // Latest-only: at most one attempted occurrence is still live (delivering the next one expires it).
+            var attempted = active.Where(r => _everAwaiting.Contains((r, reg.Gen))).ToList();
+            if (attempted.Count > 1)
+                throw Violation("LatestOnly", $"{reg} has {attempted.Count} attempted occurrences still live: {string.Join(", ", attempted)}");
         }
 
         await CheckListsAsync();

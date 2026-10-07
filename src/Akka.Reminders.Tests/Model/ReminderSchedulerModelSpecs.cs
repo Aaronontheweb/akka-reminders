@@ -38,9 +38,8 @@ public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
     /// </summary>
     private static bool Survey => Environment.GetEnvironmentVariable("REMINDERS_CSCHECK_SURVEY") == "1";
 
-    private async Task SampleAsync(IModelStorageFactory factory, long iterations, GenOptions? options = null, ModelChecks? checks = null)
+    private async Task SampleAsync(IModelStorageFactory factory, long iterations, GenOptions? options = null)
     {
-        checks ??= KnownIssues.DefaultChecks;
         var survey = Survey;
         var failures = new System.Collections.Concurrent.ConcurrentDictionary<string, (int Count, string Report)>();
         var gate = new SemaphoreSlim(1, 1);
@@ -51,7 +50,7 @@ public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
             Interlocked.Increment(ref ran);
             try
             {
-                await ScenarioRunner.RunAsync(scenario, factory, checks);
+                await ScenarioRunner.RunAsync(scenario, factory);
             }
             catch (Exception ex)
             {
@@ -62,7 +61,7 @@ public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
                     try
                     {
                         var (minimal, failure) = await ScenarioMinimizer.MinimizeAsync(scenario, ex,
-                            candidate => ScenarioRunner.RunAsync(candidate, factory, checks));
+                            candidate => ScenarioRunner.RunAsync(candidate, factory));
                         failures[invariant] = (failures[invariant].Count, $"Minimal failing scenario:\n{minimal}\n\n{failure.Message}");
                     }
                     finally
@@ -84,7 +83,7 @@ public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
         var started = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            await ModelGen.Scenario(options ?? KnownIssues.DefaultGen).SampleAsync(
+            await ModelGen.Scenario(options ?? GenOptions.All).SampleAsync(
                 RunOne,
                 writeLine: output.WriteLine,
                 seed: Seed,
@@ -157,31 +156,4 @@ public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
         await container.StartAsync(TestContext.Current.CancellationToken);
         await SampleAsync(new SqlServerModelStorageFactory(container.GetConnectionString()), Iterations(20));
     }
-}
-
-/// <summary>
-/// Checks that fail on the current code and are therefore off in the default run. Each has a skipped
-/// regression test in <c>ModelRegressionSpecs</c>. REMINDERS_CSCHECK_STRICT=1 turns all of them
-/// on; a comma-separated list of names (for example "NoResetOfDeliveredOccurrence,StrandingFaults")
-/// turns on just those. Remove an entry here when its bug is fixed.
-/// </summary>
-public static class KnownIssues
-{
-    private static readonly string[] StrictNames =
-        (Environment.GetEnvironmentVariable("REMINDERS_CSCHECK_STRICT") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-
-    private static bool On(string name) => StrictNames.Contains("1") || StrictNames.Contains(name, StringComparer.OrdinalIgnoreCase);
-
-    public static GenOptions DefaultGen { get; } = GenOptions.All with { StrandingFaults = On(nameof(GenOptions.StrandingFaults)) };
-
-    public static ModelChecks DefaultChecks { get; } = ModelChecks.Strict with
-    {
-        NoDuplicateRowInOneCommit = On(nameof(ModelChecks.NoDuplicateRowInOneCommit)),
-        DeadlineCheckedForEveryChunk = On(nameof(ModelChecks.DeadlineCheckedForEveryChunk)),
-        DeliverBeforeDeadlineAtSendTime = On(nameof(ModelChecks.DeliverBeforeDeadlineAtSendTime)),
-        NoResetOfDeliveredOccurrence = On(nameof(ModelChecks.NoResetOfDeliveredOccurrence)),
-        DueNowRowIsFetchedAtOnce = On(nameof(ModelChecks.DueNowRowIsFetchedAtOnce)),
-        FetchTimerSurvivesSlowStorage = On(nameof(ModelChecks.FetchTimerSurvivesSlowStorage)),
-        NoOlderRetryAfterNewerDelivery = On(nameof(ModelChecks.NoOlderRetryAfterNewerDelivery)),
-    };
 }

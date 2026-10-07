@@ -12,10 +12,6 @@ on:
         description: "Also run PostgreSQL and SQL Server (Testcontainers)"
         type: boolean
         default: false
-      strict:
-        description: "Turn known-issue checks back on: 1 for all, or a comma-separated list"
-        required: false
-        default: ""
 
 jobs:
   model:
@@ -37,5 +33,4 @@ jobs:
         env:
           REMINDERS_CSCHECK_ITERATIONS: ${{ inputs.iterations }}
           REMINDERS_CSCHECK_SQL: ${{ inputs.sql && '1' || '0' }}
-          REMINDERS_CSCHECK_STRICT: ${{ inputs.strict }}
         run: dotnet test src/Akka.Reminders.Tests -c Release --no-build --filter "FullyQualifiedName~ReminderSchedulerModelSpecs"

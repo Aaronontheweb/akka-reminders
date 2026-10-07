@@ -173,8 +173,7 @@ public sealed record Scenario(ModelSettings Settings, ModelOp[] Ops)
 }
 
 /// <summary>Which parts of the generator are switched on.</summary>
-/// <param name="StrandingFaults">Include the faults described by <see cref="ModelGen.Strands"/>.</param>
-public sealed record GenOptions(bool StrandingFaults = true, bool Faults = true, bool Restarts = true, bool Lags = true, bool RegionToggles = true,
+public sealed record GenOptions(bool Faults = true, bool Restarts = true, bool Lags = true, bool RegionToggles = true,
     bool RecipientModes = true, int MinOps = 4, int MaxOps = 40)
 {
     public static GenOptions All { get; } = new();
@@ -254,7 +253,7 @@ public static class ModelGen
         (2, Gen.Int[30_000, 600_000]),
         (1, Gen.Int[600_000, 6 * 3_600_000])).Select(ms => (ModelOp)new Lag(ms));
 
-    private static Gen<ModelOp> FaultGen(bool strandingFaults) =>
+    private static readonly Gen<ModelOp> FaultGen =
         from call in Gen.Frequency(
             (8, Gen.Const(StorageCall.Commit)),
             (3, Gen.Const(StorageCall.Fetch)),
@@ -277,17 +276,8 @@ public static class ModelGen
             (2, Gen.Int[2_000, 15_000]),
             (1, Gen.Int[15_000, 120_000]))
         from fire in Gen.Bool
-        where strandingFaults || !Strands(call, kind)
         select (ModelOp)new InjectFault(call, kind, count, kind == FaultKind.Slow ? delay : 0, fire);
 
-    /// <summary>
-    /// Faults that fail a handler after its write reached storage (a read that fails right after the write,
-    /// or a write that is applied but reported as failed). The scheduler then sets no timer for the rows it
-    /// just wrote, so they wait for unrelated activity or a restart.
-    /// </summary>
-    public static bool Strands(StorageCall call, FaultKind kind) =>
-        (call is StorageCall.Overview or StorageCall.NextAckDeadline && kind != FaultKind.Slow) ||
-        (call is StorageCall.Schedule or StorageCall.Cancel or StorageCall.Commit && kind == FaultKind.AppliedThenFail);
 
     public static Gen<ModelSettings> Settings { get; } =
         from slip in Gen.OneOfConst(0, 1, 500, 1_000, 5_000)
@@ -323,7 +313,7 @@ public static class ModelGen
         }
 
         if (o.Faults)
-            choices.Add((8, FaultGen(o.StrandingFaults)));
+            choices.Add((8, FaultGen));
         return Gen.Frequency(choices.Select(c => (c.Item1, (IGen<ModelOp>)c.Item2)).ToArray());
     }
 
