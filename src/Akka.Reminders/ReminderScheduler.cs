@@ -1507,6 +1507,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                 if (writeFailed)
                 {
+                    // The commit may have landed even though it reported failure. Arm the ack-timeout
+                    // check so the normal timeout path finds and retries any rows left AwaitingAck.
+                    TrackAckDeadlines(remindersToAwaitAck);
+
                     _writeCircuitOpen = true;
                     _log.Warning("Write circuit OPEN — database writes are failing. " +
                                  "Pausing batch processing until writes recover. " +
