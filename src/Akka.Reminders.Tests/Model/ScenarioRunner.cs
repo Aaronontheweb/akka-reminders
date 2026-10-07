@@ -594,7 +594,10 @@ public sealed class ScenarioRunner
             var faulted = FaultsFired != faultsBefore;
             Trace($"nack {d.Row} g{d.Gen} -> {response.ResponseCode} next {ModelLog.T(response.NextAttemptAtUtc)} (expected {expected} {ModelLog.T(retryAt)})");
 
-            if (!faulted && (response.ResponseCode != expected ||
+            // A row past its deadline may be cleaned up by a queued expiry pass before the nack is handled.
+            var deadAlready = expected == ReminderNackResponseCode.Expired && deadline <= now &&
+                              response.ResponseCode == ReminderNackResponseCode.NotFound;
+            if (!faulted && !deadAlready && (response.ResponseCode != expected ||
                              (expected == ReminderNackResponseCode.RetryScheduled && response.NextAttemptAtUtc != retryAt)))
                 throw Violation("NackSemantics",
                     $"nack of {d.Row} g{d.Gen} answered {response.ResponseCode} (next attempt {ModelLog.T(response.NextAttemptAtUtc)}), expected {expected} ({ModelLog.T(retryAt)})");
