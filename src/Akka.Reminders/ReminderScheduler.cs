@@ -1102,13 +1102,20 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// </summary>
     private async Task AddNextOccurrenceAsync(ScheduledReminder reminder, DateTimeOffset now, List<ScheduledReminder> occurrencesToUpsert)
     {
-        if (reminder.AttemptCount > 0 && await OccurrenceIsActiveOrExistsAsync(reminder, reminder.RepeatInterval!.Value, activeOnly: false))
-            return;
-
         var next = CreateNextRecurringOccurrence(reminder, now);
         if (next is null)
         {
             _log.Error("Recurring reminder {0} has no valid next occurrence; the series ends here.", reminder);
+            return;
+        }
+
+        if (reminder.AttemptCount > 0 && await NeighbourStatusAsync(reminder, reminder.RepeatInterval!.Value) is { } existing)
+        {
+            // A finished row on the next slot may be a leftover from an older registration or version
+            // rather than this series' own next occurrence; if so, the series ends here.
+            if (existing is not (ReminderCompletionStatus.Pending or ReminderCompletionStatus.AwaitingAck))
+                _log.Warning("Retried recurring reminder {0} did not write its next occurrence: the slot at [{1}] already holds a {2} row.",
+                    reminder, reminder.DueTimeUtc + reminder.RepeatInterval.Value, existing);
             return;
         }
 
@@ -1118,23 +1125,33 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     }
 
     /// <summary>
-    /// Looks up the occurrence of the same reminder that is <paramref name="offset"/> away. A failed
-    /// read answers false, which errs towards a duplicate rather than a lost or stuck series.
+    /// Set by the first failed neighbour lookup of a fetch pass. The rest of the pass does no more
+    /// lookups, so a storage outage costs one timeout, not one per reminder.
     /// </summary>
-    private async Task<bool> OccurrenceIsActiveOrExistsAsync(ScheduledReminder reminder, TimeSpan offset, bool activeOnly)
+    private bool _neighbourLookupFailed;
+
+    /// <summary>
+    /// Status of the occurrence of the same reminder that is <paramref name="offset"/> away, or null
+    /// when there is no such row. A failed read also answers null, which errs towards a duplicate
+    /// rather than a lost or stuck series.
+    /// </summary>
+    private async Task<ReminderCompletionStatus?> NeighbourStatusAsync(ScheduledReminder reminder, TimeSpan offset)
     {
+        if (_neighbourLookupFailed)
+            return null;
+
         try
         {
             using var cts = new CancellationTokenSource(Settings.StorageTimeout);
             var status = await Storage.GetReminderOccurrenceStatusAsync(
                 reminder.Entity, reminder.Key, reminder.DueTimeUtc + offset, cts.Token);
-            return status is not null && (!activeOnly || status.CompletionStatus is ReminderCompletionStatus.Pending
-                or ReminderCompletionStatus.AwaitingAck);
+            return status?.CompletionStatus;
         }
         catch (Exception ex)
         {
-            _log.Warning(ex, "Failed to look up a neighbouring occurrence of {0}", reminder);
-            return false;
+            _neighbourLookupFailed = true;
+            _log.Warning(ex, "Failed to look up a neighbouring occurrence of {0}; no more lookups in this pass", reminder);
+            return null;
         }
     }
 
@@ -1346,6 +1363,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         var latestOverview = PendingReminders;
         var fetchedAt = _overviewAsOf;
         var needsOverviewReload = false;
+        _neighbourLookupFailed = false;
 
         // When the write circuit is open, probe with a single reminder to test
         // write availability before resuming full-batch processing. This limits
@@ -1386,6 +1404,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             var stopProcessing = false;
             var recoveredFromProbe = false;
             var batchOverview = batch.NextOverview;
+            var expiredAsPrevious = new HashSet<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc)>();
 
             // Process the fetched batch in smaller chunks to cap duplicate blast radius
             // if writes fail after delivery.
@@ -1412,6 +1431,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                 foreach (var reminder in chunk)
                 {
+                    // Already ended in this batch because its next occurrence was sent first.
+                    if (expiredAsPrevious.Contains(ToOccurrenceKey(reminder.Entity, reminder.Key, reminder.DueTimeUtc)))
+                        continue;
+
                     if (reminder.DeliveryDeadlineUtc.HasValue && reminder.DeliveryDeadlineUtc.Value <= completedAt)
                     {
                         terminalReminders.Add(new CompletedReminder(
@@ -1484,19 +1507,23 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                             // Latest-only: sending this occurrence ends the previous one if it is still
                             // unacked. Once this one is due the previous one is past its deadline and
-                            // expires anyway, so only an early send (inside MaxSlippage) needs this.
-                            var previousDue = reminder.DueTimeUtc - reminder.RepeatInterval.Value;
-                            bool IsPrevious(ReminderEntity e, ReminderKey k, DateTimeOffset due) =>
-                                e == reminder.Entity && k == reminder.Key && due == previousDue;
-                            if (untilDeadline - Settings.MaxSlippage < reminder.DueTimeUtc &&
-                                !terminalReminders.Exists(t => IsPrevious(t.Entity, t.Key, t.DueTimeUtc)) &&
-                                (deliveries.RemoveAll(d => IsPrevious(d.Reminder.Entity, d.Reminder.Key, d.Reminder.DueTimeUtc)) > 0 ||
-                                 await OccurrenceIsActiveOrExistsAsync(reminder, -reminder.RepeatInterval.Value, activeOnly: true)))
+                            // dead anyway, so only an early send (inside MaxSlippage) needs this.
+                            var interval = reminder.RepeatInterval.Value;
+                            if (completedAt < reminder.DueTimeUtc && reminder.DueTimeUtc.UtcTicks > interval.Ticks)
                             {
-                                remindersToAwaitAck.RemoveAll(a => IsPrevious(a.Entity, a.Key, a.DueTimeUtc));
-                                terminalReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, previousDue,
-                                    completedAt, ReminderCompletionStatus.Expired));
-                                chunkExpired += 1;
+                                var previous = ToOccurrenceKey(reminder.Entity, reminder.Key, reminder.DueTimeUtc - interval);
+                                bool IsPrevious(ReminderEntity e, ReminderKey k, DateTimeOffset due) => ToOccurrenceKey(e, k, due) == previous;
+                                if (!terminalReminders.Exists(t => IsPrevious(t.Entity, t.Key, t.DueTimeUtc)) &&
+                                    (deliveries.RemoveAll(d => IsPrevious(d.Reminder.Entity, d.Reminder.Key, d.Reminder.DueTimeUtc)) > 0 ||
+                                     await NeighbourStatusAsync(reminder, -interval) is ReminderCompletionStatus.Pending
+                                         or ReminderCompletionStatus.AwaitingAck))
+                                {
+                                    remindersToAwaitAck.RemoveAll(a => IsPrevious(a.Entity, a.Key, a.DueTimeUtc));
+                                    terminalReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, previous.DueTimeUtc,
+                                        completedAt, ReminderCompletionStatus.Expired));
+                                    expiredAsPrevious.Add(previous);
+                                    chunkExpired += 1;
+                                }
                             }
                         }
 
