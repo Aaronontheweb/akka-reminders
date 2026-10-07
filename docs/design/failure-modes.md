@@ -46,6 +46,8 @@ Schedule and cancel handlers reply to the caller **after** `ReloadPendingOvervie
 
 Each tick is triggered by a `FetchReminders` timer. The timer delay is derived from the pending overview's `TimeUntilNext` value, plus the `MaxSlippage` setting (which causes the scheduler to fetch reminders slightly ahead of their due time to avoid re-scheduling overhead).
 
+`TimeUntilNext` counts from the clock reading the overview was computed against. The scheduler keeps that reading and, when it arms the timer, subtracts the time that has passed since, so slow storage calls in between do not make the next fetch late.
+
 ```text
 Flush buffered ack writes (if any)
   -> Expire stale occurrences (best effort)
