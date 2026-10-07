@@ -32,8 +32,44 @@ public partial class ReminderSchedulerTimingSpecs
         ? new InMemoryReminderStorage()
         : new SqliteReminderStorage(SqliteReminderStorageSettings.Create(SqliteConnectionString()), Sys);
 
-    private static string SqliteConnectionString()
-        => $"Data Source={Path.Combine(Path.GetTempPath(), $"akka-reminders-{Guid.NewGuid():N}.db")};Mode=ReadWriteCreate;Cache=Shared";
+    private string? _sqliteDirectory;
+
+    /// <summary>
+    /// A new database file in this test's own temp directory, which <see cref="AfterAllAsync"/> deletes.
+    /// </summary>
+    private string SqliteConnectionString()
+    {
+        _sqliteDirectory ??= Directory.CreateTempSubdirectory("akka-reminders-").FullName;
+        return $"Data Source={Path.Combine(_sqliteDirectory, $"{Guid.NewGuid():N}.db")};Mode=ReadWriteCreate;Cache=Shared";
+    }
+
+    protected override async Task AfterAllAsync()
+    {
+        await base.AfterAllAsync();
+        if (_sqliteDirectory is null)
+            return;
+
+        // Stop the scheduler and release pooled connections before deleting the database files.
+        await Sys.Terminate();
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        Directory.Delete(_sqliteDirectory, recursive: true);
+    }
+
+    /// <summary>
+    /// A SQLite storage holding <paramref name="poison"/> with a payload whose message type is gone.
+    /// </summary>
+    private async Task<SqliteReminderStorage> SqliteWithUnreadableRowAsync(ScheduledReminder poison)
+    {
+        var connectionString = SqliteConnectionString();
+        var storage = new SqliteReminderStorage(SqliteReminderStorageSettings.Create(connectionString), Sys);
+        await storage.ScheduleReminderAsync(poison, Ct);
+        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection(connectionString);
+        await connection.OpenAsync(Ct);
+        var command = connection.CreateCommand();
+        command.CommandText = $"UPDATE scheduled_reminders SET serializer_id = 987654 WHERE reminder_key = '{poison.Key.Name}'";
+        Assert.Equal(1, await command.ExecuteNonQueryAsync(Ct));
+        return storage;
+    }
 
     private static async Task<ReminderOccurrenceStatus?> StatusAsync(IActorRef scheduler, ReminderEntity entity, ReminderKey key, DateTimeOffset due)
         => (await scheduler.Ask<ReminderProtocol.ReminderOccurrenceStatusResponse>(
@@ -62,7 +98,10 @@ public partial class ReminderSchedulerTimingSpecs
         for (var i = 0; i < 100 && !region.HasMessages; i++)
         {
             await Task.Delay(20, Ct);
-            VirtualTime.Advance(TimeSpan.Zero);
+
+            // Not TimeSpan.Zero: TestScheduler.Advance drops an item that the actor adds to the bucket
+            // it is draining, and a zero-delay re-arm during a zero advance lands in that bucket.
+            VirtualTime.Advance(TimeSpan.FromTicks(1));
         }
 
         return (await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct)).DueTimeUtc;
@@ -241,19 +280,10 @@ public partial class ReminderSchedulerTimingSpecs
     [Fact]
     public async Task Should_NotBlockOtherReminders_When_StaleRecurringPayloadIsUnreadable()
     {
-        var connectionString = SqliteConnectionString();
-        var storage = new SqliteReminderStorage(SqliteReminderStorageSettings.Create(connectionString), Sys);
         var (entity, poison, t0) = (new ReminderEntity("poison-region", "e1"), new ReminderKey("poison"), VirtualTime.Now);
         var due = t0.AddSeconds(-15);
-        await storage.ScheduleReminderAsync(new ScheduledReminder(entity, poison, due, "payload", TimeSpan.FromSeconds(2),
-            DeliveryDeadlineUtc: due.AddSeconds(2), OccurrenceDueTimeUtc: due), Ct);
-        await using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(connectionString))
-        {
-            await connection.OpenAsync(Ct);
-            var command = connection.CreateCommand();
-            command.CommandText = "UPDATE scheduled_reminders SET serializer_id = 987654 WHERE reminder_key = 'poison'";
-            Assert.Equal(1, await command.ExecuteNonQueryAsync(Ct)); // the message type is gone
-        }
+        var storage = await SqliteWithUnreadableRowAsync(new ScheduledReminder(entity, poison, due, "payload", TimeSpan.FromSeconds(2),
+            DeliveryDeadlineUtc: due.AddSeconds(2), OccurrenceDueTimeUtc: due));
 
         var region = CreateTestProbe();
         _resolver.RegisterShardRegion("poison-region", region);
@@ -263,11 +293,129 @@ public partial class ReminderSchedulerTimingSpecs
         // The overdue poison row arms a zero-delay tick; the fetch must fail that row, not throw.
         await AwaitAssertAsync(async () =>
         {
-            VirtualTime.Advance(TimeSpan.Zero);
+            // One tick, not zero: see NextDeliveryAsync.
+            VirtualTime.Advance(TimeSpan.FromTicks(1));
             Assert.Equal(ReminderCompletionStatus.Failed, (await StatusAsync(scheduler, entity, poison, due))?.CompletionStatus);
         }, ReplyTimeout, TimeSpan.FromMilliseconds(50), cancellationToken: Ct);
         VirtualTime.Advance(TimeSpan.FromSeconds(2));
         Assert.Equal("innocent", (await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct)).Message);
+    }
+
+    [Fact]
+    public async Task Should_SkipLiveUnreadablePayload_WithoutBlockingOrHotLooping()
+    {
+        var (entity, poison, t0) = (new ReminderEntity("live-poison-region", "e1"), new ReminderKey("poison"), VirtualTime.Now);
+        var due = t0.AddSeconds(-1); // overdue, but its deadline (t0+9) has not passed
+        var storage = new FailableReminderStorage(await SqliteWithUnreadableRowAsync(new ScheduledReminder(entity, poison, due,
+            "payload", TimeSpan.FromSeconds(10), DeliveryDeadlineUtc: due.AddSeconds(10), OccurrenceDueTimeUtc: due)));
+        var region = CreateTestProbe();
+        _resolver.RegisterShardRegion("live-poison-region", region);
+        var scheduler = StartScheduler(DedicatedSettings(), storage, "live-poison");
+        await ScheduleAsync(scheduler, entity, new ReminderKey("innocent"), t0.AddSeconds(2), null, message: "innocent");
+
+        // The overdue row arms one zero-delay tick. That fetch skips it and must not arm another.
+        await AwaitAssertAsync(() =>
+        {
+            VirtualTime.Advance(TimeSpan.FromTicks(1));
+            Assert.True(storage.Fetches > 0);
+        }, ReplyTimeout, TimeSpan.FromMilliseconds(50), cancellationToken: Ct);
+        Assert.Equal(ReminderCompletionStatus.Pending, (await StatusAsync(scheduler, entity, poison, due))?.CompletionStatus);
+        var fetches = storage.Fetches;
+        for (var i = 0; i < 10; i++)
+        {
+            VirtualTime.Advance(TimeSpan.FromTicks(1));
+            await Task.Delay(20, Ct);
+        }
+        Assert.Equal(fetches, storage.Fetches);
+
+        VirtualTime.Advance(TimeSpan.FromSeconds(2));
+        Assert.Equal("innocent", (await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct)).Message);
+        Assert.Equal(ReminderCompletionStatus.Pending, (await StatusAsync(scheduler, entity, poison, due))?.CompletionStatus);
+    }
+
+    [Fact]
+    public async Task Should_ExpireLaterChunks_When_EarlierCommitsAreSlow()
+    {
+        var storage = new FailableReminderStorage(new InMemoryReminderStorage());
+        var (scheduler, entity, region) = Setup("slow-commit", storage, DedicatedSettings() with { DeliveryCommitChunkSize = 1 });
+        var due = VirtualTime.Now.AddSeconds(1);
+        var keys = Enumerable.Range(1, 4).Select(i => new ReminderKey("k" + i)).ToList();
+        foreach (var key in keys)
+            await ScheduleAsync(scheduler, entity, key, due, null, TimeSpan.FromMilliseconds(300));
+
+        // Each commit takes 400 ms, longer than the 300 ms window: only the first chunk is still live.
+        storage.OnCommit = _ => VirtualTime.Advance(TimeSpan.FromMilliseconds(400));
+        VirtualTime.Advance(TimeSpan.FromSeconds(1));
+
+        var delivered = (await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct)).Key;
+        foreach (var key in keys.Where(k => k != delivered))
+            await AwaitStatusAsync(scheduler, entity, key, due, ReminderCompletionStatus.Expired);
+        await region.ExpectNoMsgAsync(TimeSpan.FromMilliseconds(300), Ct);
+    }
+
+    [Fact]
+    public async Task Should_UpsertEachOccurrenceOnce_When_StaleRetryRollsOntoRetriedSuccessor()
+    {
+        var storage = new FailableReminderStorage(new InMemoryReminderStorage());
+        var (scheduler, entity, region) = Setup("dup", storage, DedicatedSettings(5, ackTimeout: TimeSpan.FromSeconds(2)));
+        var duplicates = 0;
+        storage.OnCommit = batch =>
+        {
+            if (batch.PendingUpserts.GroupBy(r => (r.Entity, r.Key, r.DueTimeUtc)).Any(g => g.Count() > 1))
+                Interlocked.Increment(ref duplicates);
+        };
+        var key = new ReminderKey("dup");
+        var t0 = VirtualTime.Now;
+        await ScheduleAsync(scheduler, entity, key, t0.AddSeconds(5), TimeSpan.FromSeconds(10));
+
+        VirtualTime.Advance(TimeSpan.FromSeconds(5)); // delivered; successor t0+15 created; no ack
+        Assert.Equal(t0.AddSeconds(5), await NextDeliveryAsync(region));
+        VirtualTime.Advance(TimeSpan.FromSeconds(2)); // ack timeout: back to Pending, retry at t0+8
+        await AwaitStatusAsync(scheduler, entity, key, t0.AddSeconds(5), ReminderCompletionStatus.Pending);
+
+        // At t0+16 one chunk holds the stale retry, which rolls forward to t0+15, and the live t0+15
+        // successor, which is retried because its region is missing: two rows for one key.
+        Assert.True(_resolver.UnregisterShardRegion(entity.ShardRegionName));
+        VirtualTime.Advance(TimeSpan.FromSeconds(9));
+        await AwaitStatusAsync(scheduler, entity, key, t0.AddSeconds(5), ReminderCompletionStatus.Expired);
+        Assert.Equal(0, Volatile.Read(ref duplicates));
+
+        // The successor's retry (at t0+17) is the row that was kept.
+        _resolver.RegisterShardRegion(entity.ShardRegionName, region);
+        VirtualTime.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(t0.AddSeconds(15), await NextDeliveryAsync(region));
+    }
+
+    [Fact]
+    public async Task Should_KeepRetry_When_StaleRollForwardIsAddedAfterRetriedSuccessor()
+    {
+        var inner = new InMemoryReminderStorage();
+        var storage = new FailableReminderStorage(inner);
+        var entity = new ReminderEntity("order-region", "e1");
+        var key = new ReminderKey("order");
+        var t0 = VirtualTime.Now;
+        var interval = TimeSpan.FromSeconds(20);
+
+        // The successor (slot t0+20) sorts before the stale row, whose when_utc is later. The stale
+        // row's deadline has passed by t0+26, so it rolls forward onto the successor's slot.
+        Assert.True(await inner.CommitReminderMutationsAsync(new ReminderMutationBatch(
+        [
+            new ScheduledReminder(entity, key, t0.AddSeconds(20), "payload", interval,
+                DeliveryDeadlineUtc: t0.AddSeconds(40), OccurrenceDueTimeUtc: t0.AddSeconds(20)),
+            new ScheduledReminder(entity, key, t0.AddSeconds(25), "payload", interval,
+                DeliveryDeadlineUtc: t0.AddSeconds(20), OccurrenceDueTimeUtc: t0)
+        ], [], []), Ct));
+
+        // The region is never registered, so the successor is retried in the same chunk.
+        var scheduler = StartScheduler(DedicatedSettings(), storage, "order");
+        await StatusAsync(scheduler, entity, key, t0); // the scheduler has loaded both rows before time moves
+        var slotRows = new List<ScheduledReminder>();
+        storage.OnCommit = batch => slotRows.AddRange(batch.PendingUpserts.Where(r => r.DueTimeUtc == t0.AddSeconds(20)));
+        VirtualTime.Advance(TimeSpan.FromSeconds(26));
+        await AwaitStatusAsync(scheduler, entity, key, t0, ReminderCompletionStatus.Expired);
+
+        var row = Assert.Single(slotRows);
+        Assert.Equal(1, row.AttemptCount);
     }
 
     public static TheoryData<double, double?, double, double?> Slots => new()

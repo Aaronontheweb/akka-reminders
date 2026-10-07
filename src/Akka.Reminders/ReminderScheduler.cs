@@ -136,17 +136,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     private bool _writeCircuitOpen;
 
     /// <summary>
-    /// Guards against re-entrant FetchReminders processing. RunTask suspends the mailbox,
-    /// but the timer could fire again before FetchRemindersCompleted is processed.
-    /// </summary>
-    private bool _processingReminders;
-
-    /// <summary>
-    /// Same guard for CheckAckTimeouts — prevents overlapping ack-timeout scans.
-    /// </summary>
-    private bool _processingAckTimeouts;
-
-    /// <summary>
     /// Debounce flag for ack flush scheduling. Multiple ReminderAck messages can arrive
     /// while the actor is processing other work; this flag ensures only one
     /// FlushBufferedAcks self-message is queued at a time.
@@ -194,15 +183,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
-    private sealed class FetchRemindersCompleted : INoSerializationVerificationNeeded
-    {
-        public static readonly FetchRemindersCompleted Instance = new();
-
-        private FetchRemindersCompleted()
-        {
-        }
-    }
-
     /// <summary>
     /// Time to prune completed reminders
     /// </summary>
@@ -224,15 +204,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         public static readonly CheckAckTimeouts Instance = new();
 
         private CheckAckTimeouts()
-        {
-        }
-    }
-
-    private sealed class CheckAckTimeoutsCompleted : INoSerializationVerificationNeeded
-    {
-        public static readonly CheckAckTimeoutsCompleted Instance = new();
-
-        private CheckAckTimeoutsCompleted()
         {
         }
     }
@@ -576,32 +547,21 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         {
             case FetchReminders:
             {
-                if (_processingReminders)
-                    break;
-
-                _processingReminders = true;
+                // RunTask suspends the mailbox until the task ends, so two fetches cannot overlap.
+                // Never drop a tick here: the tick armed at the end of a fetch can reach the mailbox
+                // before that fetch's task is done, and a dropped tick is never armed again.
                 // Each tick: flush any pending acks first (so the fetch sees up-to-date
                 // storage state), then expire stale reminders, then process due reminders.
                 // MaxSlippage causes the scheduler to fetch slightly ahead of the current
                 // time, avoiding a re-schedule for reminders about to become due.
                 RunTask(async () =>
                 {
-                    try
-                    {
-                        await FlushBufferedAcksIfAnyAsync();
-                        await ExpireRemindersAsync(TimeProvider.Now);
-                        await ProcessReminders(TimeProvider.Now + Settings.MaxSlippage);
-                    }
-                    finally
-                    {
-                        Self.Tell(FetchRemindersCompleted.Instance);
-                    }
+                    await FlushBufferedAcksIfAnyAsync();
+                    await ExpireRemindersAsync(TimeProvider.Now);
+                    await ProcessReminders(TimeProvider.Now + Settings.MaxSlippage);
                 });
                 break;
             }
-            case FetchRemindersCompleted:
-                _processingReminders = false;
-                break;
             case ReminderProtocol.ScheduleReminder scheduleSingle:
             {
                 _log.Debug("Scheduling reminder {0}", scheduleSingle);
@@ -850,30 +810,18 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             // actually acked but not yet flushed.
             case CheckAckTimeouts:
             {
-                if (_processingAckTimeouts)
-                    break;
-
+                // As with FetchReminders: the mailbox is suspended while the task runs, and a
+                // dropped tick would leave _nextAckTimeoutAt set with no timer behind it.
                 _nextAckTimeoutAt = null;
 
-                _processingAckTimeouts = true;
                 RunTask(async () =>
                 {
-                    try
-                    {
-                        await FlushBufferedAcksIfAnyAsync();
-                        await ExpireRemindersAsync(TimeProvider.Now);
-                        await ProcessAckTimeouts();
-                    }
-                    finally
-                    {
-                        Self.Tell(CheckAckTimeoutsCompleted.Instance);
-                    }
+                    await FlushBufferedAcksIfAnyAsync();
+                    await ExpireRemindersAsync(TimeProvider.Now);
+                    await ProcessAckTimeouts();
                 });
                 break;
             }
-            case CheckAckTimeoutsCompleted:
-                _processingAckTimeouts = false;
-                break;
             default:
                 Unhandled(message);
                 break;
@@ -1093,7 +1041,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     }
 
     /// <summary>
-    /// Adds the next occurrence of a recurring reminder to the commit, once per occurrence identity.
+    /// Adds the next occurrence of a recurring reminder to the commit, unless the commit already
+    /// holds a row for that slot.
     /// </summary>
     private void AddNextOccurrence(ScheduledReminder reminder, DateTimeOffset now, List<ScheduledReminder> occurrencesToUpsert)
     {
@@ -1104,9 +1053,21 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             return;
         }
 
-        // Two stale occurrences of one series can roll forward to the same slot in one chunk.
+        // A retry or terminal row for the same slot always beats a roll-forward, whatever the order.
         if (!occurrencesToUpsert.Exists(r => r.Entity == next.Entity && r.Key == next.Key && r.DueTimeUtc == next.DueTimeUtc))
             occurrencesToUpsert.Add(next);
+    }
+
+    /// <summary>
+    /// Adds a retry or terminal row to a commit, replacing any earlier row for the same occurrence.
+    /// One chunk can produce two rows for one slot, e.g. a stale occurrence rolling forward onto a
+    /// successor that is retried in the same chunk, and PostgreSQL and SQL Server reject an upsert
+    /// that names the same key twice.
+    /// </summary>
+    private static void AddUpsert(List<ScheduledReminder> occurrencesToUpsert, ScheduledReminder row)
+    {
+        occurrencesToUpsert.RemoveAll(r => r.Entity == row.Entity && r.Key == row.Key && r.DueTimeUtc == row.DueTimeUtc);
+        occurrencesToUpsert.Add(row);
     }
 
     /// <summary>
@@ -1214,12 +1175,12 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 const string failureReason = "Ack timeout";
                 if (TryCreateRetryReminder(reminder, now, failureReason, out var retryReminder, out var terminalStatus))
                 {
-                    occurrencesToUpsert.Add(retryReminder);
+                    AddUpsert(occurrencesToUpsert, retryReminder);
                     batchRetried += 1;
                 }
                 else
                 {
-                    occurrencesToUpsert.Add(CreateTerminalAttempt(reminder, failureReason));
+                    AddUpsert(occurrencesToUpsert, CreateTerminalAttempt(reminder, failureReason));
                     terminalReminders.Add(new CompletedReminder(
                         reminder.Entity,
                         reminder.Key,
@@ -1305,10 +1266,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         var totalFailed = 0;
         var totalExpired = 0;
         var latestOverview = PendingReminders;
-
-        // One clock reading per run for the expiry decision, the next-slot math, and the
-        // retry/terminal decision, so they cannot disagree.
-        var slotNow = TimeProvider.Now;
         var needsOverviewReload = false;
 
         // When the write circuit is open, probe with a single reminder to test
@@ -1359,9 +1316,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     .Take(Settings.DeliveryCommitChunkSize)
                     .ToList();
 
-                // Use a single completion timestamp so storage can batch UPDATEs
-                // by (Status, When) efficiently.
-                var completedAt = slotNow;
+                // One clock reading per chunk, used for the expiry check, the next-slot math, the
+                // retry/terminal decision and the completion timestamp, so they cannot disagree.
+                // It is read per chunk because earlier commits take time: a later chunk must not be
+                // checked against a stale clock and delivered past its deadline.
+                var completedAt = TimeProvider.Now;
 
                 var occurrencesToUpsert = new List<ScheduledReminder>();
                 var terminalReminders = new List<CompletedReminder>();
@@ -1385,7 +1344,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                         // Never deliver a stale occurrence late, but keep a recurring series alive.
                         if (reminder.RepeatInterval.HasValue)
-                            AddNextOccurrence(reminder, slotNow, occurrencesToUpsert);
+                            AddNextOccurrence(reminder, completedAt, occurrencesToUpsert);
                         continue;
                     }
 
@@ -1398,18 +1357,18 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                         if (TryCreateRetryReminder(
                                 reminder,
-                                slotNow,
+                                completedAt,
                                 failureReason,
                                 out var retryReminder,
                                 out var terminalStatus))
                         {
-                            occurrencesToUpsert.Add(retryReminder);
+                            AddUpsert(occurrencesToUpsert, retryReminder);
                             _log.Info("Scheduling retry for reminder {0} at {1}", reminder.Key, retryReminder.When);
                             chunkRetried += 1;
                         }
                         else
                         {
-                            occurrencesToUpsert.Add(CreateTerminalAttempt(reminder, failureReason));
+                            AddUpsert(occurrencesToUpsert, CreateTerminalAttempt(reminder, failureReason));
                             terminalReminders.Add(new CompletedReminder(
                                 reminder.Entity,
                                 reminder.Key,
@@ -1418,7 +1377,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                                 terminalStatus));
 
                             if (reminder.RepeatInterval.HasValue)
-                                AddNextOccurrence(reminder, slotNow, occurrencesToUpsert);
+                                AddNextOccurrence(reminder, completedAt, occurrencesToUpsert);
 
                             if (terminalStatus == ReminderCompletionStatus.Expired)
                                 chunkExpired += 1;
@@ -1435,7 +1394,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         // This means the next occurrence exists in storage even if the
                         // scheduler crashes after delivery — no occurrences are lost.
                         if (reminder.RepeatInterval.HasValue)
-                            AddNextOccurrence(reminder, slotNow, occurrencesToUpsert);
+                            AddNextOccurrence(reminder, completedAt, occurrencesToUpsert);
 
                         // Move the current occurrence to AwaitingAck. It stays there
                         // until the entity acks it or the ack deadline elapses.

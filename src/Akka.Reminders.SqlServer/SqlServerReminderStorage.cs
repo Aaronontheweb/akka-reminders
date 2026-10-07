@@ -172,36 +172,62 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = connection.CreateCommand();
-        command.CommandText = _dialect.GetSelectDueRemindersSql(_settings.SchemaName, _settings.TableName, maxCount.Value);
-        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
-        _dialect.AddParameter(command, "@UntilDeadline", untilDeadline.UtcDateTime);
-        _dialect.AddParameter(command, "@Now", now.UtcDateTime);
-
         var unreadable = new List<CompletedReminder>();
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        var skipped = 0;
+        UnreadablePayloadException? firstSkipped = null;
+        var seen = new HashSet<(ReminderEntity, ReminderKey, DateTimeOffset)>();
+
+        // A live row whose payload cannot be read is skipped and stays Pending, so the page is
+        // widened past such rows until it holds maxCount readable rows or no more rows are due.
+        // The limit doubles each pass, and rows already seen are skipped before their payload is read.
+        for (var limit = maxCount.Value; ; limit = (int)Math.Min(int.MaxValue, Math.Max(limit * 2L, (long)maxCount.Value + skipped + unreadable.Count)))
         {
+            var unusable = skipped + unreadable.Count;
+            var rows = 0;
+            await using var command = connection.CreateCommand();
+            command.CommandText = _dialect.GetSelectDueRemindersSql(_settings.SchemaName, _settings.TableName, limit);
+            command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+            _dialect.AddParameter(command, "@UntilDeadline", untilDeadline.UtcDateTime);
+            _dialect.AddParameter(command, "@Now", now.UtcDateTime);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                rows++;
+                if (!seen.Add(ReadKeyFromReader(reader)))
+                    continue;
+
                 try
                 {
                     reminders.Add(ReadReminderFromReader(reader));
+                    if (reminders.Count >= maxCount.Value)
+                        break;
                 }
                 catch (UnreadablePayloadException ex)
                 {
-                    // A row whose payload can no longer be read would fail every fetch and block
-                    // all other reminders, so it is ended as Failed and left out.
-                    var row = new CompletedReminder(
-                        new ReminderEntity(reader.GetString(reader.GetOrdinal("ShardRegionName")), reader.GetString(reader.GetOrdinal("EntityId"))),
-                        new ReminderKey(reader.GetString(reader.GetOrdinal("ReminderKey"))),
-                        ReadUtc(reader, "DueTimeUtc")!.Value,
-                        now,
-                        ReminderCompletionStatus.Failed);
-                    _log.Error(ex, "Marking reminder occurrence {0} as Failed", row);
-                    unreadable.Add(row);
+                    if (ex.DeliveryDeadlineUtc <= now)
+                    {
+                        // Past its deadline, where storage expired it before 1.5.73: end it as Failed.
+                        var row = new CompletedReminder(ex.Entity, ex.Key, ex.DueTimeUtc, now, ReminderCompletionStatus.Failed);
+                        _log.Error(ex, "Marking reminder occurrence {0} as Failed", row);
+                        unreadable.Add(row);
+                    }
+                    else
+                    {
+                        // Still live: it stays Pending, so fixing the type mapping recovers it.
+                        skipped++;
+                        firstSkipped ??= ex;
+                    }
                 }
             }
+
+            if (reminders.Count >= maxCount.Value || skipped + unreadable.Count == unusable || rows < limit)
+                break;
         }
+
+        if (firstSkipped is not null)
+            _log.Error(firstSkipped, "Skipped [{0}] pending reminder occurrence(s) whose payload could not be deserialized; they stay Pending. First: [{1}] / [{2}] due at [{3}]",
+                skipped, firstSkipped.Entity, firstSkipped.Key, firstSkipped.DueTimeUtc);
 
         if (unreadable.Count > 0)
             await MarkRemindersAsCompletedAsync(connection, null, unreadable, cancellationToken);
@@ -220,7 +246,10 @@ public sealed class SqlServerReminderStorage : IReminderStorage
                 totalPending = reader2.GetInt32(reader2.GetOrdinal("TotalCount"));
         }
 
-        var remainingCount = totalPending - reminders.Count;
+        // Skipped rows stay Pending ahead of the rest. Leave them out of the count and the next due
+        // time, or an overdue skipped row would arm an immediate tick after every fetch.
+        var consumed = reminders.Count + skipped;
+        var remainingCount = totalPending - consumed;
         var timeUntilNext = TimeSpan.MaxValue;
 
         if (remainingCount > 0)
@@ -228,7 +257,7 @@ public sealed class SqlServerReminderStorage : IReminderStorage
             await using var cmd3 = conn2.CreateCommand();
             cmd3.CommandText = _dialect.GetNextReminderTimeSql(_settings.SchemaName, _settings.TableName);
             cmd3.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
-            _dialect.AddParameter(cmd3, "@Skip", reminders.Count);
+            _dialect.AddParameter(cmd3, "@Skip", consumed);
             _dialect.AddParameter(cmd3, "@Now", now.UtcDateTime);
 
             var result = await cmd3.ExecuteScalarAsync(cancellationToken);
@@ -416,7 +445,14 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            reminders.Add(ReadReminderFromReader(reader));
+            try
+            {
+                reminders.Add(ReadReminderFromReader(reader));
+            }
+            catch (UnreadablePayloadException ex)
+            {
+                _log.Error(ex, "Skipping reminder [{0}] / [{1}] due at [{2}] in listing: payload could not be deserialized", ex.Entity, ex.Key, ex.DueTimeUtc);
+            }
         }
 
         return reminders.Skip(skip).Take(take).ToList();
@@ -835,6 +871,11 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         return _serialization.Deserialize(payload, serializerId, manifest ?? string.Empty);
     }
 
+    private static (ReminderEntity, ReminderKey, DateTimeOffset) ReadKeyFromReader(IDataReader reader)
+        => (new ReminderEntity(reader.GetString(reader.GetOrdinal("ShardRegionName")), reader.GetString(reader.GetOrdinal("EntityId"))),
+            new ReminderKey(reader.GetString(reader.GetOrdinal("ReminderKey"))),
+            new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(reader.GetOrdinal("DueTimeUtc")), DateTimeKind.Utc)));
+
     private ScheduledReminder ReadReminderFromReader(IDataReader reader)
     {
         var shardRegionName = reader.GetString(reader.GetOrdinal("ShardRegionName"));
@@ -874,7 +915,8 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         }
         catch (Exception ex)
         {
-            throw new UnreadablePayloadException(serializerId, manifest, ex);
+            throw new UnreadablePayloadException(new ReminderEntity(shardRegionName, entityId), new ReminderKey(reminderKey),
+                new DateTimeOffset(DateTime.SpecifyKind(dueTimeUtc, DateTimeKind.Utc)), deliveryDeadlineUtc, serializerId, manifest, ex);
         }
 
         return new ScheduledReminder(
@@ -890,6 +932,13 @@ public sealed class SqlServerReminderStorage : IReminderStorage
             new DateTimeOffset(DateTime.SpecifyKind(dueTimeUtc, DateTimeKind.Utc)));
     }
 
-    private sealed class UnreadablePayloadException(int serializerId, string? manifest, Exception inner)
-        : Exception($"Reminder payload could not be deserialized (serializer [{serializerId}], manifest [{manifest}]): {inner.Message}", inner);
+    private sealed class UnreadablePayloadException(ReminderEntity entity, ReminderKey key, DateTimeOffset dueTimeUtc,
+        DateTimeOffset? deliveryDeadlineUtc, int serializerId, string? manifest, Exception inner)
+        : Exception($"Reminder payload could not be deserialized (serializer [{serializerId}], manifest [{manifest}]): {inner.Message}", inner)
+    {
+        public ReminderEntity Entity { get; } = entity;
+        public ReminderKey Key { get; } = key;
+        public DateTimeOffset DueTimeUtc { get; } = dueTimeUtc;
+        public DateTimeOffset? DeliveryDeadlineUtc { get; } = deliveryDeadlineUtc;
+    }
 }
