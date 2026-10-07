@@ -183,10 +183,11 @@ Delivery-state writes now happen **before** user messages are sent.
 
 ### Delivery-state commit lands but reports failure
 
-- A commit can reach the database while the scheduler sees an error (a dropped connection, or `StorageTimeout` firing during `COMMIT`). The rows are then `AwaitingAck` in storage, but nothing was sent.
-- The scheduler arms the ack-timeout check after any delivery-commit error, using the ack deadlines of that chunk. It does not try to tell a landed commit from a failed one.
-- When the check fires, the normal ack-timeout path finds the `AwaitingAck` rows and retries them. If the commit really failed, the check finds nothing, refreshes from storage and cancels itself.
-- Costs: the reminder goes out one ack timeout late, the unsent attempt counts as one delivery attempt, and with `MaxDeliveryAttempts = 1` the row can end `Failed` without ever being sent.
+- A commit can reach the database while the scheduler sees an error (a dropped connection, or `StorageTimeout` firing during `COMMIT`). The scheduler cannot tell a landed commit from a failed one, so each commit that reports failure also covers the landed case.
+- **Delivery commit:** the rows may be `AwaitingAck` with nothing sent. The scheduler arms the ack-timeout check from that chunk's ack deadlines. The normal ack-timeout path then finds and retries the rows; if the commit really failed, the check finds nothing, refreshes from storage and cancels itself.
+- **Ack-timeout commit:** the retries may be `Pending` in storage. The scheduler re-arms the ack-timeout check at `StorageTimeout * 2`, then reloads the pending overview and arms the fetch timer. If the reload fails, it logs a warning and the re-armed check is the next wake-up.
+- **Negative acknowledgement commit:** the retry may be `Pending` in storage. The scheduler reloads the overview and arms the fetch timer, then still replies `Error`.
+- Costs: a delivery-commit retry goes out one ack timeout late, an unsent attempt counts as one delivery attempt, and with `MaxDeliveryAttempts = 1` the row can end `Failed` without ever being sent. If the database keeps failing, the write circuit limits fetches to one reminder at a time but adds no delay; see "Write circuit breaker".
 
 ### Scheduler restart / singleton handoff
 
@@ -234,8 +235,8 @@ row during the fetch, so it cannot block other reminders:
 ### Negative acknowledgement write fails
 
 - The scheduler returns `Error` to the caller.
-- The occurrence remains `AwaitingAck`.
-- The normal ack-timeout path will retry it later.
+- If the write really failed, the occurrence remains `AwaitingAck` and the normal ack-timeout path will retry it later.
+- If the write landed but reported failure, the retry (or terminal result) is already in storage. The scheduler reloads the overview and arms the fetch timer, so a `Pending` retry is still delivered after its backoff. The caller still sees `Error`.
 
 ### Restart after a negative acknowledgement
 
