@@ -36,4 +36,15 @@
     <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!--
+    The golden databases are written by Fixtures/golden-1.5.73/generator, a separate console project
+    that references the released 1.5.73 packages. It is not part of this build, so keep its sources out.
+  -->
+  <ItemGroup>
+    <Compile Remove="Fixtures\golden-1.5.73\generator\**" />
+    <None Remove="Fixtures\golden-1.5.73\generator\**" />
+    <EmbeddedResource Remove="Fixtures\golden-1.5.73\generator\**" />
+    <None Include="Fixtures\golden-1.5.73\*.db" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
