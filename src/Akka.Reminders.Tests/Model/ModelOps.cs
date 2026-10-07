@@ -63,6 +63,13 @@ public sealed record ModelSettings(
 
     public static readonly TimeSpan StorageTimeout = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// "Enough time" to get over a storage failure or a missing shard region: the longest waits the
+    /// design documents, added up. An unsent attempt is retried one AckTimeout later, after a backoff
+    /// of at most MaxRetryBackoff; a failed reload is retried after StorageTimeout * 2.
+    /// </summary>
+    public TimeSpan RecoveryTime => AckTimeout + MaxBackoff + StorageTimeout * 2;
+
     public TimeSpan MaxSlippage => TimeSpan.FromMilliseconds(MaxSlippageMs);
     public TimeSpan AckTimeout => TimeSpan.FromMilliseconds(AckTimeoutMs);
     public TimeSpan BackoffBase => TimeSpan.FromMilliseconds(BackoffBaseMs);
@@ -152,6 +159,12 @@ public sealed record AckOutstanding : ModelOp
     public override string ToString() => "new AckOutstanding()";
 }
 
+/// <summary>Ask which reminders an entity has.</summary>
+public sealed record ListReminders(int Entity) : ModelOp
+{
+    public override string ToString() => $"new ListReminders({Entity})";
+}
+
 /// <summary>Make the next <c>Count</c> storage calls of one kind misbehave.</summary>
 public sealed record InjectFault(StorageCall Call, FaultKind Kind, int Count, int DelayMs, bool FireTimersWhileSlow) : ModelOp
 {
@@ -197,6 +210,10 @@ public static class ModelGen
     public static int RegionOf(int entity) => entity == 2 ? 1 : 0;
 
     public static ReminderKey KeyOf(int index) => new($"k{index}");
+
+    public static int IndexOf(ReminderEntity entity) => Enumerable.Range(0, Entities).First(i => EntityOf(i) == entity);
+
+    public static int IndexOf(ReminderKey key) => Enumerable.Range(0, Keys).First(i => KeyOf(i) == key);
 
     private static readonly Gen<int> Entity = Gen.Int[0, Entities - 1];
     private static readonly Gen<int> Key = Gen.Int[0, Keys - 1];
@@ -278,7 +295,6 @@ public static class ModelGen
         from fire in Gen.Bool
         select (ModelOp)new InjectFault(call, kind, count, kind == FaultKind.Slow ? delay : 0, fire);
 
-
     public static Gen<ModelSettings> Settings { get; } =
         from slip in Gen.OneOfConst(0, 1, 500, 1_000, 5_000)
         from ack in Gen.OneOfConst(500, 2_000, 5_000, 10_000, 30_000)
@@ -298,6 +314,7 @@ public static class ModelGen
             (12, ScheduleRecurringGen),
             (5, Gen.Select(Entity, Key, (e, k) => (ModelOp)new Cancel(e, k))),
             (2, Entity.Select(e => (ModelOp)new CancelAll(e))),
+            (4, Entity.Select(e => (ModelOp)new ListReminders(e))),
             (30, TickGen),
         };
         if (o.Lags)

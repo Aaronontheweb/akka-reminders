@@ -45,19 +45,11 @@ public sealed class ModelHost : IAsyncDisposable
 
 /// <summary>
 /// Shard-region resolver for the model: regions can be switched on and off, and every delivery is
-/// recorded (with the virtual time) instead of being sent to an actor.
+/// written to the <see cref="Journal"/> (with the virtual time) instead of being sent to an actor.
 /// </summary>
-public sealed class RecordingShardRegionResolver : IShardRegionResolver
+public sealed class RecordingShardRegionResolver(Journal journal, HarnessSignals signals) : IShardRegionResolver
 {
-    private readonly VirtualClock _clock;
-    private readonly ModelLog _log;
     private readonly bool[] _present = Enumerable.Repeat(true, ModelGen.Regions).ToArray();
-
-    public RecordingShardRegionResolver(VirtualClock clock, ModelLog log)
-    {
-        _clock = clock;
-        _log = log;
-    }
 
     public void SetPresent(int region, bool present)
     {
@@ -65,31 +57,17 @@ public sealed class RecordingShardRegionResolver : IShardRegionResolver
             _present[region] = present;
     }
 
-    public bool IsPresent(int region)
+    public IActorRef? TryResolve(ReminderEntity entity)
     {
         lock (_present)
-            return _present[region];
+            return _present[ModelGen.RegionOf(ModelGen.IndexOf(entity))] ? ActorRefs.Nobody : null;
     }
-
-    private static int RegionIndex(ReminderEntity entity) => entity.ShardRegionName == "region-1" ? 1 : 0;
-
-    public IActorRef? TryResolve(ReminderEntity entity) => IsPresent(RegionIndex(entity)) ? ActorRefs.Nobody : null;
 
     public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope, IActorRef? sender = null)
     {
-        _log.Touch();
-        var row = new RowId(entity, envelope.Key, envelope.DueTimeUtc);
-        lock (_log.Lock)
-        {
-            _log.Rows.TryGetValue(row, out var info);
-            _log.Deliveries.Add(new DeliveryRecord(
-                _log.NextSeq(),
-                _clock.Now,
-                row,
-                ModelLog.GenOf(envelope.Message),
-                envelope.Deadline,
-                info?.LastAwaiting));
-        }
+        signals.Touch();
+        journal.Add(new Delivered(Journal.IdOf(envelope.Message), ModelGen.IndexOf(entity), ModelGen.IndexOf(envelope.Key),
+            envelope.DueTimeUtc, envelope.Deadline.UtcDateTime));
     }
 }
 
@@ -121,10 +99,10 @@ public sealed class InMemoryModelStorageFactory : IModelStorageFactory
 public sealed class SchedulerSupervisor : UntypedActor
 {
     private readonly Props _child;
-    private readonly ModelLog _log;
+    private readonly HarnessSignals _log;
     private readonly TaskCompletionSource<IActorRef> _started;
 
-    public SchedulerSupervisor(Props child, ModelLog log, TaskCompletionSource<IActorRef> started)
+    public SchedulerSupervisor(Props child, HarnessSignals log, TaskCompletionSource<IActorRef> started)
     {
         _child = child;
         _log = log;

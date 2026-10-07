@@ -2,12 +2,12 @@ namespace Akka.Reminders.Tests.Model;
 
 /// <summary>
 /// Shrinks a failing scenario by delta debugging: drop operations, reset settings to defaults and round
-/// numbers, keeping each change only if the same invariant still breaks. CsCheck's own shrinking is
+/// numbers, keeping each change only if the same rule still breaks. CsCheck's own shrinking is
 /// random and needs many more iterations to get this far on long operation sequences.
 /// </summary>
 public static class ScenarioMinimizer
 {
-    public static string InvariantOf(Exception ex) =>
+    public static string RuleOf(Exception ex) =>
         ex is ModelViolation v ? v.Message.Split('\n')[0].Trim() : ex.GetType().Name;
 
     public static async Task<(Scenario Scenario, Exception Failure)> MinimizeAsync(
@@ -16,11 +16,11 @@ public static class ScenarioMinimizer
         Func<Scenario, Task> run,
         int maxRuns = 4_000)
     {
-        var invariant = InvariantOf(failure);
+        var rule = RuleOf(failure);
         var runs = 0;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         // Each run of an unresponsive scheduler costs a real-time ask timeout, so keep those few.
-        if (invariant.Contains("SchedulerResponds"))
+        if (rule.Contains("SchedulerResponds"))
             maxRuns = 40;
 
         async Task<bool> StillFails(Scenario candidate)
@@ -32,7 +32,7 @@ public static class ScenarioMinimizer
                 await run(candidate);
                 return false;
             }
-            catch (Exception ex) when (InvariantOf(ex) == invariant)
+            catch (Exception ex) when (RuleOf(ex) == rule)
             {
                 failure = ex;
                 return true;

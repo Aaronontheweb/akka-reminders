@@ -1,13 +1,12 @@
 namespace Akka.Reminders.Tests.Model;
 
 /// <summary>
-/// Fixed scenarios found by <see cref="ReminderSchedulerModelSpecs"/>, replayed as plain tests.
-/// Nothing here is skipped: a failing test is an open bug.
+/// Fixed scenarios found by <see cref="ReminderSchedulerModelSpecs"/>, replayed as plain tests with every
+/// check on. Nothing here is skipped: a failing test is an open bug or an open question.
 /// </summary>
 public sealed class ModelRegressionSpecs
 {
-    // Every check on, no known-issue allowances.
-    private static Task RunStrictAsync(Scenario scenario) =>
+    private static Task<History> RunStrictAsync(Scenario scenario) =>
         ScenarioRunner.RunAsync(scenario, InMemoryModelStorageFactory.Instance);
 
     [Fact(DisplayName = "Should_KeepRecurringSeriesAlive_When_SchedulerLagsPastAnInterval (#143)")]
@@ -136,16 +135,21 @@ public sealed class ModelRegressionSpecs
         new Tick(20000),
     ]));
 
-    // The save reaches storage but the call reports a failure. The caller gets Error (correct: it
-    // cannot know), but the stored reminder gets no fetch timer and waits for unrelated activity.
-    // No ruling yet on what the scheduler should do here.
+    // OPEN QUESTION, not a rule of the model. The save reaches storage but the call reports a failure.
+    // The caller gets Error, so the model does not know whether the reminder exists and asks for
+    // nothing. The reminder is in fact stored and listed, gets no fetch timer, and is never sent.
+    // This test asks for the delivery directly; it stays red until the maintainers rule.
     [Fact(DisplayName = "Should_DeliverStoredReminder_When_SaveSucceededButReportedFailure")]
-    public Task ReminderIsNotStrandedAfterAmbiguousSave() => RunStrictAsync(new Scenario(new ModelSettings(1000, 30000, 100, 10000, 3, 4, 1, 256),
-    [
-        new InjectFault(StorageCall.Schedule, FaultKind.AppliedThenFail, 1, 0, false),
-        new ScheduleRecurring(0, 0, 0, 1000, null),
-        new Tick(5000),
-    ]));
+    public async Task ReminderIsNotStrandedAfterAmbiguousSave()
+    {
+        var history = await RunStrictAsync(new Scenario(new ModelSettings(1000, 30000, 100, 10000, 3, 4, 1, 256),
+        [
+            new InjectFault(StorageCall.Schedule, FaultKind.AppliedThenFail, 1, 0, false),
+            new ScheduleRecurring(0, 0, 0, 1000, null),
+            new Tick(5000),
+        ]));
+        Assert.True(history.Deliveries.Count > 0, "the stored reminder was never delivered");
+    }
 
     // A nack stores the retry, then the overview read fails. The retry must still be sent (#151's fix
     // re-arms a check when that reload fails).
@@ -158,18 +162,24 @@ public sealed class ModelRegressionSpecs
         new Tick(3000),
     ]));
 
-    // An ack-timeout pass stores a retry, then its overview read fails. The read failure escapes the
-    // pass, the scheduler actor restarts, and the next overview read fails too, so the retry (due at
-    // 16 s) waits for the restart timer and is still unsent at 20 s. Tied to the open question on
-    // restarting the actor after a storage read failure; no ruling yet.
+    // OPEN QUESTION, not a rule of the model. An ack-timeout pass stores a retry, then its overview read
+    // fails. The read failure escapes the pass, the scheduler actor restarts, and the next overview
+    // read fails too, so the retry (due at 16 s) goes out at 30 s. The model allows a late retry until
+    // RecoveryTime after a storage failure, so no rule breaks. This test asks for the retry by 20 s;
+    // it stays red until the maintainers rule on restarting the actor after a read failure.
     [Fact(DisplayName = "Should_SendTheRetryOnTime_When_OverviewReadsFailAfterAnAckTimeout")]
-    public Task RetryIsNotLateWhenOverviewReadsFailAfterAckTimeout() => RunStrictAsync(new Scenario(new ModelSettings(1000, 10000, 1000, 1000, 10, 1000, 100, 256),
-    [
-        new SetRecipient(0, Recipient.Ignore),
-        new InjectFault(StorageCall.Overview, FaultKind.Timeout, 3, 0, false),
-        new ScheduleOnce(0, 0, 0, null),
-        new Tick(10000),
-    ]));
+    public async Task RetryIsNotLateWhenOverviewReadsFailAfterAckTimeout()
+    {
+        var history = await RunStrictAsync(new Scenario(new ModelSettings(1000, 10000, 1000, 1000, 10, 1000, 100, 256),
+        [
+            new SetRecipient(0, Recipient.Ignore),
+            new InjectFault(StorageCall.Overview, FaultKind.Timeout, 3, 0, false),
+            new ScheduleOnce(0, 0, 0, null),
+            new Tick(10000),
+        ]));
+        var retry = history.Deliveries.Skip(1).FirstOrDefault();
+        Assert.True(retry is not null && retry.At <= VirtualClock.Origin.AddSeconds(20), $"the retry went out at {Journal.T(retry?.At)}");
+    }
 
     // The reminder is stored, then reloading the overview fails. The caller gets Error and no fetch
     // timer is set, so the stored reminder is not delivered.

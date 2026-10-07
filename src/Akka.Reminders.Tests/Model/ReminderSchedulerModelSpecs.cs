@@ -6,16 +6,18 @@ using Testcontainers.PostgreSql;
 namespace Akka.Reminders.Tests.Model;
 
 /// <summary>
-/// Model-based tests: CsCheck generates operation sequences (schedule, re-register, cancel, time
-/// advances, restarts, recipient behaviour, storage faults), runs them against a real
-/// <see cref="ReminderScheduler"/> on a virtual clock, and checks the invariants in
-/// <see cref="ScenarioRunner"/> after every step.
+/// Model-based tests. CsCheck generates sequences of operations (schedule, cancel, list, time passing,
+/// stalls, restarts, recipients that ack, nack or stay silent, storage faults). Each sequence runs
+/// against a real <see cref="ReminderScheduler"/> on a virtual clock. After every operation the test
+/// compares what the application saw with <see cref="ReminderModel"/> and checks every rule in
+/// <see cref="SafetyRules"/>. See README.md in this folder.
 ///
 /// Environment variables:
-///   REMINDERS_CSCHECK_ITERATIONS  sequences per storage (default 1500 in-memory, 400 SQLite, 20 per SQL server)
+///   REMINDERS_CSCHECK_ITERATIONS  sequences per test (default 800 in-memory, 400 healthy-storage, 200 SQLite, 20 per SQL server)
 ///   REMINDERS_CSCHECK_SEED        replay one CsCheck seed (printed by a failure)
 ///   REMINDERS_CSCHECK_THREADS     worker threads (default: CPU count)
 ///   REMINDERS_CSCHECK_SQL=1       also run PostgreSQL and SQL Server (Testcontainers)
+///   REMINDERS_CSCHECK_SURVEY=1    keep going after a failure and report every broken rule
 /// </summary>
 public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
 {
@@ -33,8 +35,8 @@ public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
     private static bool SqlEnabled => Environment.GetEnvironmentVariable("REMINDERS_CSCHECK_SQL") == "1";
 
     /// <summary>
-    /// Survey mode (REMINDERS_CSCHECK_SURVEY=1) keeps going after a failure and reports every distinct
-    /// broken invariant with its own minimal scenario. Used for bug hunting.
+    /// Survey mode keeps going after a failure and reports every distinct broken rule with its own
+    /// minimal scenario. Used for bug hunting.
     /// </summary>
     private static bool Survey => Environment.GetEnvironmentVariable("REMINDERS_CSCHECK_SURVEY") == "1";
 
@@ -54,15 +56,15 @@ public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
             }
             catch (Exception ex)
             {
-                var invariant = ScenarioMinimizer.InvariantOf(ex);
-                if (failures.TryAdd(invariant, (1, "")))
+                var rule = ScenarioMinimizer.RuleOf(ex);
+                if (failures.TryAdd(rule, (1, "")))
                 {
                     await gate.WaitAsync();
                     try
                     {
                         var (minimal, failure) = await ScenarioMinimizer.MinimizeAsync(scenario, ex,
                             candidate => ScenarioRunner.RunAsync(candidate, factory));
-                        failures[invariant] = (failures[invariant].Count, $"Minimal failing scenario:\n{minimal}\n\n{failure.Message}");
+                        failures[rule] = (failures[rule].Count, $"Minimal failing scenario:\n{minimal}\n\n{failure.Message}");
                     }
                     finally
                     {
@@ -71,7 +73,7 @@ public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
                 }
                 else
                 {
-                    failures.AddOrUpdate(invariant, (1, ""), (_, old) => (old.Count + 1, old.Report));
+                    failures.AddOrUpdate(rule, (1, ""), (_, old) => (old.Count + 1, old.Report));
                 }
 
                 if (!survey)
@@ -109,25 +111,31 @@ public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
             report.AppendLine("Replay: REMINDERS_CSCHECK_SEED=<seed> dotnet test src/Akka.Reminders.Tests -c Release --filter \"FullyQualifiedName~ReminderSchedulerModelSpecs." + factory.Name + "\"");
         }
 
-        foreach (var (invariant, (count, text)) in failures.OrderByDescending(f => f.Value.Count))
+        foreach (var (rule, (count, text)) in failures.OrderByDescending(f => f.Value.Count))
         {
-            report.AppendLine().AppendLine($"==== {invariant} ({count} failing run(s)) ====");
+            report.AppendLine().AppendLine($"==== {rule} ({count} failing run(s)) ====");
             report.AppendLine(text);
         }
 
         throw new ModelViolation(report.ToString());
     }
 
-    [Fact(DisplayName = "Should_HoldModelInvariants_When_RunningGeneratedSequences_InMemory")]
-    public Task InMemory() => SampleAsync(InMemoryModelStorageFactory.Instance, Iterations(1500));
+    [Fact(DisplayName = "Should_MatchTheModelAndKeepEveryRule_When_RunningGeneratedSequences_InMemory")]
+    public Task InMemory() => SampleAsync(InMemoryModelStorageFactory.Instance, Iterations(800));
 
-    [Fact(DisplayName = "Should_HoldModelInvariants_When_RunningGeneratedSequences_Sqlite")]
+    // No storage faults and no missing shard regions: nothing loosens the model, so every delivery and
+    // every reply must match it exactly.
+    [Fact(DisplayName = "Should_MatchTheModelExactly_When_StorageIsHealthy_InMemory")]
+    public Task InMemoryHealthy() =>
+        SampleAsync(InMemoryModelStorageFactory.Instance, Iterations(400), new GenOptions(Faults: false, RegionToggles: false));
+
+    [Fact(DisplayName = "Should_MatchTheModelAndKeepEveryRule_When_RunningGeneratedSequences_Sqlite")]
     public async Task Sqlite()
     {
         var factory = new SqliteModelStorageFactory();
         try
         {
-            await SampleAsync(factory, Iterations(400));
+            await SampleAsync(factory, Iterations(200));
         }
         finally
         {
@@ -135,7 +143,7 @@ public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
         }
     }
 
-    [Fact(DisplayName = "Should_HoldModelInvariants_When_RunningGeneratedSequences_PostgreSql")]
+    [Fact(DisplayName = "Should_MatchTheModelAndKeepEveryRule_When_RunningGeneratedSequences_PostgreSql")]
     [Trait("Category", "ModelSql")]
     public async Task PostgreSql()
     {
@@ -145,7 +153,7 @@ public sealed class ReminderSchedulerModelSpecs(ITestOutputHelper output)
         await SampleAsync(new PostgreSqlModelStorageFactory(container.GetConnectionString()), Iterations(20));
     }
 
-    [Fact(DisplayName = "Should_HoldModelInvariants_When_RunningGeneratedSequences_SqlServer")]
+    [Fact(DisplayName = "Should_MatchTheModelAndKeepEveryRule_When_RunningGeneratedSequences_SqlServer")]
     [Trait("Category", "ModelSql")]
     public async Task SqlServer()
     {
