@@ -125,6 +125,17 @@ public sealed class ModelRegressionSpecs
         new Tick(20000),
     ]));
 
+    // The save reaches storage but the call reports a failure. The caller gets Error (correct: it
+    // cannot know), but the stored reminder gets no fetch timer and waits for unrelated activity.
+    // No ruling yet on what the scheduler should do here.
+    [Fact(DisplayName = "Should_DeliverStoredReminder_When_SaveSucceededButReportedFailure")]
+    public Task ReminderIsNotStrandedAfterAmbiguousSave() => RunStrictAsync(new Scenario(new ModelSettings(1000, 30000, 100, 10000, 3, 4, 1, 256),
+    [
+        new InjectFault(StorageCall.Schedule, FaultKind.AppliedThenFail, 1, 0, false),
+        new ScheduleRecurring(0, 0, 0, 1000, null),
+        new Tick(5000),
+    ]));
+
     // The reminder is stored, then reloading the overview fails. The caller gets Error and no fetch
     // timer is set, so the stored reminder is not delivered.
     [Fact(DisplayName = "Should_DeliverStoredReminder_When_OverviewReloadFailsAfterSchedule")]

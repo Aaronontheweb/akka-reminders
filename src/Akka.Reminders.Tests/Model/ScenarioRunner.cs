@@ -898,7 +898,8 @@ public sealed class ScenarioRunner
                 throw Violation("SeriesNeverForks", $"{reg} has {fresh.Count} undelivered Pending occurrences: {string.Join(", ", fresh)}");
 
             // Latest-only: at most one attempted occurrence is still live (delivering the next one expires it).
-            var attempted = active.Where(r => _everAwaiting.Contains((r, reg.Gen))).ToList();
+            // A row past its deadline is dead even before cleanup marks it (cleanup is best effort).
+            var attempted = active.Where(r => _everAwaiting.Contains((r, reg.Gen)) && reg.Deadline(r.Due) > _clock.Now).ToList();
             if (attempted.Count > 1)
                 throw Violation("LatestOnly", $"{reg} has {attempted.Count} attempted occurrences still live: {string.Join(", ", attempted)}");
         }
