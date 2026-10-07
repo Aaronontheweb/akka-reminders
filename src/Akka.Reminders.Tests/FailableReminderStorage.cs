@@ -32,6 +32,12 @@ internal sealed class FailableReminderStorage : IReminderStorage
     public bool FailWrites { get; set; }
 
     /// <summary>
+    /// When true, the next mutation commit is applied to the inner storage and then reports failure
+    /// (once), like a commit that reaches the server while the client sees a timeout or a dropped connection.
+    /// </summary>
+    public bool ApplyNextCommitThenReportFailure { get; set; }
+
+    /// <summary>
     /// When true, all read operations throw.
     /// </summary>
     public bool FailReads { get; set; }
@@ -83,7 +89,18 @@ internal sealed class FailableReminderStorage : IReminderStorage
             _firstCommitMutationFailure.TrySetResult();
             throw new TimeoutException("Simulated database write timeout");
         }
+        if (ApplyNextCommitThenReportFailure)
+        {
+            ApplyNextCommitThenReportFailure = false;
+            return ApplyThenReportFailureAsync(mutationBatch, ct);
+        }
         return _inner.CommitReminderMutationsAsync(mutationBatch, ct);
+    }
+
+    private async Task<bool> ApplyThenReportFailureAsync(ReminderMutationBatch mutationBatch, CancellationToken ct)
+    {
+        await _inner.CommitReminderMutationsAsync(mutationBatch, ct);
+        return false;
     }
 
     public Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(ReminderEntity entity, ReminderKey key, CancellationToken ct = default)

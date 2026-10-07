@@ -90,7 +90,7 @@ Buffered acks are also flushed at the start of each `FetchReminders` tick and ea
 
 ### Ack-timeout checker
 
-Ack-timeout checking is **event-driven**, not periodic. After delivering reminders, the scheduler computes the earliest ack deadline in the batch and schedules a one-shot `CheckAckTimeouts` timer at exactly that deadline. The timer is replaced if an earlier deadline is found.
+Ack-timeout checking is **event-driven**, not periodic. After each delivery commit (whether it reports success or failure), the scheduler computes the earliest ack deadline in the batch and schedules a one-shot `CheckAckTimeouts` timer at exactly that deadline. The timer is replaced if an earlier deadline is found.
 
 ```text
 CheckAckTimeouts fires:
@@ -175,6 +175,13 @@ Delivery-state writes now happen **before** user messages are sent.
 - The occurrence stays `AwaitingAck` in storage.
 - When the ack deadline elapses, `CheckAckTimeouts` re-encounters the row and retries delivery.
 - The consumer may receive a duplicate delivery; idempotency handles this.
+
+### Delivery-state commit lands but reports failure
+
+- A commit can reach the database while the scheduler sees an error (a dropped connection, or `StorageTimeout` firing during `COMMIT`). The rows are then `AwaitingAck` in storage, but nothing was sent.
+- The scheduler arms the ack-timeout check after any delivery-commit error, using the ack deadlines of that chunk. It does not try to tell a landed commit from a failed one.
+- When the check fires, the normal ack-timeout path finds the `AwaitingAck` rows and retries them. If the commit really failed, the check finds nothing, refreshes from storage and cancels itself.
+- Costs: the reminder goes out one ack timeout late, the unsent attempt counts as one delivery attempt, and with `MaxDeliveryAttempts = 1` the row can end `Failed` without ever being sent.
 
 ### Scheduler restart / singleton handoff
 
