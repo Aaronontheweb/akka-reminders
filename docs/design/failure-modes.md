@@ -14,12 +14,11 @@ Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
 
 Recurring reminders are modeled as a stream of occurrences.
 
-- The next occurrence is persisted, in the same commit, the first time the current occurrence is processed: when it is delivered, when it is put back for a retry because its shard region is missing, or when it ends without delivery (expired or failed).
+- The next occurrence is persisted, in the same commit, when the current occurrence is delivered or ends without delivery (expired, or failed because its shard region is missing).
 - The next occurrence is the earliest slot whose deadline has not passed. Missed slots are skipped, not replayed.
 - Each occurrence starts with a new retry budget.
 - Each occurrence has its own absolute UTC deadline.
-- By default, a recurring occurrence expires when the next occurrence is delivered or becomes due, whichever is first. There is at most one live delivered occurrence per recurring reminder: when the next one is sent early (inside `MaxSlippage`) while the previous one is still unacked, the previous one is marked `Expired` in the same commit.
-- The next occurrence is written once. A retry of an occurrence finds its next slot in storage and leaves that row alone, whatever state it is in.
+- By default, a recurring occurrence expires when the next occurrence becomes due.
 - If `MaxDeliveryWindow` is configured, the effective deadline is `min(due + window, next due)`.
 - A late ack for an old occurrence is a harmless `NotFound` because the ack is matched by `DueTimeUtc`.
 
@@ -41,15 +40,11 @@ There is no explicit recovery step that resets `AwaitingAck` rows back to `Pendi
 
 Schedule and cancel handlers reply to the caller **after** `ReloadPendingOverviewAsync` and `TryScheduleFetchReminders` complete. This guarantees the Ask response is a reliable signal that the fetch timer is registered — callers can depend on the scheduler being ready to process the reminder on the next tick.
 
-If the reminder was stored but the overview reload then fails, the schedule handler still replies `Success`: it arms the fetch timer from the due time of the reminder it just stored, and the next fetch reads a fresh overview.
-
 ## Processing Pipeline
 
 ### Scheduler tick
 
 Each tick is triggered by a `FetchReminders` timer. The timer delay is derived from the pending overview's `TimeUntilNext` value, plus the `MaxSlippage` setting (which causes the scheduler to fetch reminders slightly ahead of their due time to avoid re-scheduling overhead).
-
-`TimeUntilNext` counts from the clock reading the overview was computed against. The scheduler keeps that reading and, when it arms the timer, subtracts the time that has passed since, so slow storage calls in between do not make the next fetch late.
 
 ```text
 Flush buffered ack writes (if any)
@@ -282,8 +277,6 @@ Pending-overview queries only count actionable `Pending` rows.
 
 The scheduler maintains the `ReminderOverview` incrementally during batch processing by applying each upserted reminder to the in-memory overview. A full storage reload only happens when a fetch or write fails. This avoids an extra query per tick.
 
-Only rows that stay `Pending` are applied. A row the same commit ends (`Failed` or `Expired`) is written with its final attempt count but is not pending work, so it is left out. An empty overview is `TimeUntilNext = TimeSpan.MaxValue`; zero means "due right now" and is never treated as empty.
-
 ### 6. Write circuit breaker
 
 When any hot-path write fails (in either `ProcessReminders` or `ProcessAckTimeouts`):
@@ -302,9 +295,7 @@ The design goal is to keep those duplicates bounded and occurrence-specific.
 
 ### Recurring reminders are latest-only, not catch-up
 
-If an old recurring occurrence is still unacked when the next occurrence is delivered or becomes due, the old one expires instead of building an unbounded replay backlog. A late ack or retry for it is a `NotFound`.
-
-This costs one extra occurrence-status read when a recurring occurrence is retried, and one when a recurring occurrence is sent before its due time.
+If an old recurring occurrence is still unacked when the next occurrence becomes due, the old one expires instead of building an unbounded replay backlog.
 
 ### Deadline expiration is best-effort cleanup
 

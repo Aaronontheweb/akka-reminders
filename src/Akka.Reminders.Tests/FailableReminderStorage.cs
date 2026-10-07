@@ -52,11 +52,6 @@ internal sealed class FailableReminderStorage : IReminderStorage
     /// </summary>
     public bool FailScheduleWrites { get; set; }
 
-    /// <summary>
-    /// The next this-many overview reads throw; other reads keep working.
-    /// </summary>
-    public int FailNextOverviewReads { get; set; }
-
     public FailableReminderStorage(IReminderStorage inner)
     {
         _inner = inner;
@@ -147,12 +142,6 @@ internal sealed class FailableReminderStorage : IReminderStorage
 
     public Task<ReminderOverview> GetRemindersOverviewAsync(DateTimeOffset now, CancellationToken ct = default)
     {
-        if (FailNextOverviewReads > 0)
-        {
-            FailNextOverviewReads--;
-            throw new TimeoutException("Simulated overview read timeout");
-        }
-
         return _inner.GetRemindersOverviewAsync(now, ct);
     }
 

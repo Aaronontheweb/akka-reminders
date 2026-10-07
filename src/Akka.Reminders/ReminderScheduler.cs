@@ -128,12 +128,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     public ReminderOverview PendingReminders { get; set; } = ReminderOverview.Empty;
 
     /// <summary>
-    /// The clock reading <see cref="PendingReminders"/> was computed against. Its
-    /// <see cref="ReminderOverview.TimeUntilNext"/> counts from here, not from when a timer is armed.
-    /// </summary>
-    private DateTimeOffset _overviewAsOf;
-
-    /// <summary>
     /// Write circuit breaker. When database writes fail (mark-complete, schedule), this flag
     /// is set to prevent fetching and delivering full batches against a database that can't
     /// persist completions. While open, ProcessReminders probes with a single reminder to
@@ -251,8 +245,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             // and the immediate fetch re-delivers it ~12 times/second).
             // StartSingleTimer with the same key cancels any prior pending timer,
             // naturally debouncing rapid TryScheduleFetchReminders calls.
-            // Storage calls since the overview was read took time; count the delay from now.
-            var delay = PendingReminders.TimeUntilNext - (TimeProvider.Now - _overviewAsOf);
+            var delay = PendingReminders.TimeUntilNext;
             if (delay < TimeSpan.Zero)
                 delay = TimeSpan.Zero;
             Timers.StartSingleTimer(FetchReminders.Instance, FetchReminders.Instance, delay);
@@ -516,7 +509,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             case InitResult init:
                 _log.Info("Loaded reminder overview from storage: {0}", init.Overview);
                 PendingReminders = init.Overview;
-                _overviewAsOf = init.AsOf;
 
                 // Schedule ack timeout check BEFORE unstashing so the mailbox is
                 // fully ready when client messages are replayed — no RunTask gap.
@@ -602,18 +594,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             return;
                         }
 
-                        try
-                        {
-                            await ReloadPendingOverviewAsync();
-                        }
-                        catch (Exception ex)
-                        {
-                            // The reminder is stored. Its due time is known, so the fetch timer can be
-                            // armed from it alone; the next fetch brings a fresh overview.
-                            _log.Warning(ex, "Failed to reload the overview after storing {0}; arming the fetch timer from its due time", scheduleSingle);
-                            PendingReminders = PendingReminders.Apply(reminder, _overviewAsOf).newOverview;
-                        }
-
+                        await ReloadPendingOverviewAsync();
                         TryScheduleFetchReminders();
 
                         // Reply AFTER the fetch timer is scheduled so the caller
@@ -872,9 +853,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     private async Task ReloadPendingOverviewAsync()
     {
         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-        var now = TimeProvider.Now;
-        PendingReminders = await Storage.GetRemindersOverviewAsync(now, cts.Token);
-        _overviewAsOf = now;
+        PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
     }
 
     /// <summary>
@@ -916,7 +895,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// initialization completes in a single PipeTo — no stashed RunTask to block
     /// the mailbox after UnstashAll.
     /// </summary>
-    private sealed record InitResult(ReminderOverview Overview, DateTimeOffset AsOf, DateTimeOffset? NextAckDeadline) : Akka.Actor.INoSerializationVerificationNeeded;
+    private sealed record InitResult(ReminderOverview Overview, DateTimeOffset? NextAckDeadline) : Akka.Actor.INoSerializationVerificationNeeded;
 
     private Task LoadReminderOverview()
     {
@@ -924,10 +903,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         {
             await ExpireRemindersAsync(TimeProvider.Now);
             using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-            var now = TimeProvider.Now;
-            var overview = await Storage.GetRemindersOverviewAsync(now, cts.Token);
+            var overview = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
             var nextAckDeadline = await Storage.GetNextAwaitingAckDeadlineAsync(cts.Token);
-            return new InitResult(overview, now, nextAckDeadline);
+            return new InitResult(overview, nextAckDeadline);
         }
 
         var init = LoadAsync();
@@ -1083,16 +1061,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
     /// <summary>
     /// Adds the next occurrence of a recurring reminder to the commit, unless the commit already
-    /// holds a row for that slot. The next occurrence is written the first time an occurrence is
-    /// processed (attempt 0). A retried occurrence already wrote it (always at due + interval), and
-    /// that row must never be reset, so a retry only writes it when storage has no row there at all
-    /// (a retry row stored by a version that wrote the next occurrence later).
+    /// holds a row for that slot.
     /// </summary>
-    private async Task AddNextOccurrenceAsync(ScheduledReminder reminder, DateTimeOffset now, List<ScheduledReminder> occurrencesToUpsert)
+    private void AddNextOccurrence(ScheduledReminder reminder, DateTimeOffset now, List<ScheduledReminder> occurrencesToUpsert)
     {
-        if (reminder.AttemptCount > 0 && await OccurrenceIsActiveOrExistsAsync(reminder, reminder.RepeatInterval!.Value, activeOnly: false))
-            return;
-
         var next = CreateNextRecurringOccurrence(reminder, now);
         if (next is null)
         {
@@ -1103,27 +1075,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         // A retry or terminal row for the same slot always beats a roll-forward, whatever the order.
         if (!occurrencesToUpsert.Exists(r => r.Entity == next.Entity && r.Key == next.Key && r.DueTimeUtc == next.DueTimeUtc))
             occurrencesToUpsert.Add(next);
-    }
-
-    /// <summary>
-    /// Looks up the occurrence of the same reminder that is <paramref name="offset"/> away. A failed
-    /// read answers false, which errs towards a duplicate rather than a lost or stuck series.
-    /// </summary>
-    private async Task<bool> OccurrenceIsActiveOrExistsAsync(ScheduledReminder reminder, TimeSpan offset, bool activeOnly)
-    {
-        try
-        {
-            using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-            var status = await Storage.GetReminderOccurrenceStatusAsync(
-                reminder.Entity, reminder.Key, reminder.DueTimeUtc + offset, cts.Token);
-            return status is not null && (!activeOnly || status.CompletionStatus is ReminderCompletionStatus.Pending
-                or ReminderCompletionStatus.AwaitingAck);
-        }
-        catch (Exception ex)
-        {
-            _log.Warning(ex, "Failed to look up a neighbouring occurrence of {0}", reminder);
-            return false;
-        }
     }
 
     /// <summary>
@@ -1339,7 +1290,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         var totalFailed = 0;
         var totalExpired = 0;
         var latestOverview = PendingReminders;
-        var fetchedAt = _overviewAsOf;
         var needsOverviewReload = false;
 
         // When the write circuit is open, probe with a single reminder to test
@@ -1360,8 +1310,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             try
             {
                 using var fetchCts = new CancellationTokenSource(Settings.StorageTimeout);
-                fetchedAt = TimeProvider.Now;
-                batch = await Storage.GetNextRemindersAsync(untilDeadline, fetchedAt,
+                batch = await Storage.GetNextRemindersAsync(untilDeadline, TimeProvider.Now,
                     new ReminderBatchSize(effectiveBatchSize), fetchCts.Token);
                 _log.Info("Fetched {0} due reminders (batch)", batch.Reminders.Count);
                 latestOverview = batch.NextOverview;
@@ -1419,7 +1368,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                         // Never deliver a stale occurrence late, but keep a recurring series alive.
                         if (reminder.RepeatInterval.HasValue)
-                            await AddNextOccurrenceAsync(reminder, completedAt, occurrencesToUpsert);
+                            AddNextOccurrence(reminder, completedAt, occurrencesToUpsert);
                         continue;
                     }
 
@@ -1440,11 +1389,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             AddUpsert(occurrencesToUpsert, retryReminder);
                             _log.Info("Scheduling retry for reminder {0} at {1}", reminder.Key, retryReminder.When);
                             chunkRetried += 1;
-
-                            // The next occurrence is written the first time this one is processed, whatever
-                            // the outcome, so later retries never need to write (and possibly reset) it.
-                            if (reminder.RepeatInterval.HasValue)
-                                await AddNextOccurrenceAsync(reminder, completedAt, occurrencesToUpsert);
                         }
                         else
                         {
@@ -1457,7 +1401,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                                 terminalStatus));
 
                             if (reminder.RepeatInterval.HasValue)
-                                await AddNextOccurrenceAsync(reminder, completedAt, occurrencesToUpsert);
+                                AddNextOccurrence(reminder, completedAt, occurrencesToUpsert);
 
                             if (terminalStatus == ReminderCompletionStatus.Expired)
                                 chunkExpired += 1;
@@ -1474,26 +1418,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         // This means the next occurrence exists in storage even if the
                         // scheduler crashes after delivery — no occurrences are lost.
                         if (reminder.RepeatInterval.HasValue)
-                        {
-                            await AddNextOccurrenceAsync(reminder, completedAt, occurrencesToUpsert);
-
-                            // Latest-only: sending this occurrence ends the previous one if it is still
-                            // unacked. Once this one is due the previous one is past its deadline and
-                            // expires anyway, so only an early send (inside MaxSlippage) needs this.
-                            var previousDue = reminder.DueTimeUtc - reminder.RepeatInterval.Value;
-                            bool IsPrevious(ReminderEntity e, ReminderKey k, DateTimeOffset due) =>
-                                e == reminder.Entity && k == reminder.Key && due == previousDue;
-                            if (untilDeadline - Settings.MaxSlippage < reminder.DueTimeUtc &&
-                                !terminalReminders.Exists(t => IsPrevious(t.Entity, t.Key, t.DueTimeUtc)) &&
-                                (deliveries.RemoveAll(d => IsPrevious(d.Reminder.Entity, d.Reminder.Key, d.Reminder.DueTimeUtc)) > 0 ||
-                                 await OccurrenceIsActiveOrExistsAsync(reminder, -reminder.RepeatInterval.Value, activeOnly: true)))
-                            {
-                                remindersToAwaitAck.RemoveAll(a => IsPrevious(a.Entity, a.Key, a.DueTimeUtc));
-                                terminalReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, previousDue,
-                                    completedAt, ReminderCompletionStatus.Expired));
-                                chunkExpired += 1;
-                            }
-                        }
+                            AddNextOccurrence(reminder, completedAt, occurrencesToUpsert);
 
                         // Move the current occurrence to AwaitingAck. It stays there
                         // until the entity acks it or the ack deadline elapses.
@@ -1563,12 +1488,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 {
                     foreach (var pendingReminder in occurrencesToUpsert)
                     {
-                        // A row that this commit also ends (Failed/Expired) is not pending work.
-                        if (terminalReminders.Exists(t => t.Entity == pendingReminder.Entity && t.Key == pendingReminder.Key &&
-                                                          t.DueTimeUtc == pendingReminder.DueTimeUtc))
-                            continue;
-
-                        batchOverview = batchOverview.Apply(pendingReminder, fetchedAt).newOverview;
+                        batchOverview = batchOverview.Apply(pendingReminder, completedAt).newOverview;
                     }
                 }
 
@@ -1624,9 +1544,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             try
             {
                 using var overviewCts = new CancellationTokenSource(Settings.StorageTimeout);
-                var now = TimeProvider.Now;
-                PendingReminders = await Storage.GetRemindersOverviewAsync(now, overviewCts.Token);
-                _overviewAsOf = now;
+                PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, overviewCts.Token);
             }
             catch (Exception ex)
             {
@@ -1636,7 +1554,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         else
         {
             PendingReminders = latestOverview;
-            _overviewAsOf = fetchedAt;
         }
 
         _log.Info(
