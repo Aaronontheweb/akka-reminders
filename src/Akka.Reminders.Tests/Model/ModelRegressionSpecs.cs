@@ -158,6 +158,19 @@ public sealed class ModelRegressionSpecs
         new Tick(3000),
     ]));
 
+    // An ack-timeout pass stores a retry, then its overview read fails. The read failure escapes the
+    // pass, the scheduler actor restarts, and the next overview read fails too, so the retry (due at
+    // 16 s) waits for the restart timer and is still unsent at 20 s. Tied to the open question on
+    // restarting the actor after a storage read failure; no ruling yet.
+    [Fact(DisplayName = "Should_SendTheRetryOnTime_When_OverviewReadsFailAfterAnAckTimeout")]
+    public Task RetryIsNotLateWhenOverviewReadsFailAfterAckTimeout() => RunStrictAsync(new Scenario(new ModelSettings(1000, 10000, 1000, 1000, 10, 1000, 100, 256),
+    [
+        new SetRecipient(0, Recipient.Ignore),
+        new InjectFault(StorageCall.Overview, FaultKind.Timeout, 3, 0, false),
+        new ScheduleOnce(0, 0, 0, null),
+        new Tick(10000),
+    ]));
+
     // The reminder is stored, then reloading the overview fails. The caller gets Error and no fetch
     // timer is set, so the stored reminder is not delivered.
     [Fact(DisplayName = "Should_DeliverStoredReminder_When_OverviewReloadFailsAfterSchedule")]
