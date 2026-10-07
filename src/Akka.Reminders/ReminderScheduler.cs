@@ -1561,7 +1561,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 // per chunk — the overview is only reloaded from storage on failure.
                 if (occurrencesToUpsert.Count > 0)
                 {
-                    foreach (var pendingReminder in occurrencesToUpsert)
+                    // A row this commit also ends (Failed/Expired) is not pending work.
+                    foreach (var pendingReminder in occurrencesToUpsert.Where(u => !terminalReminders.Exists(t =>
+                                 t.Entity == u.Entity && t.Key == u.Key && t.DueTimeUtc == u.DueTimeUtc)))
                     {
                         batchOverview = batchOverview.Apply(pendingReminder, fetchedAt).newOverview;
                     }
