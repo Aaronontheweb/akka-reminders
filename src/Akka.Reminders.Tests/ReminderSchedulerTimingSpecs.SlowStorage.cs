@@ -31,7 +31,7 @@ public partial class ReminderSchedulerTimingSpecs
         await AwaitStatusAsync(scheduler, entity, key, t0.AddSeconds(9), ReminderCompletionStatus.Pending);
 
         VirtualTime.Advance(TimeSpan.FromSeconds(6)); // exactly t0+9
-        var second = await region.ExpectMsgAsync<ReminderEnvelope<string>>(TimeSpan.FromSeconds(2), cancellationToken: Ct);
+        var second = await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct);
         Assert.Equal(t0.AddSeconds(9), second.DueTimeUtc);
     }
 }

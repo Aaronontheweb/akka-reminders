@@ -252,7 +252,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             // StartSingleTimer with the same key cancels any prior pending timer,
             // naturally debouncing rapid TryScheduleFetchReminders calls.
             // Storage calls since the overview was read took time; count the delay from now.
-            var delay = PendingReminders.TimeUntilNext - (TimeProvider.Now - _overviewAsOf);
+            // MaxValue means "no deadline"; subtracting from it would overflow if the clock stepped back.
+            var delay = PendingReminders.TimeUntilNext;
+            if (delay != TimeSpan.MaxValue)
+                delay -= TimeProvider.Now - _overviewAsOf;
             if (delay < TimeSpan.Zero)
                 delay = TimeSpan.Zero;
             Timers.StartSingleTimer(FetchReminders.Instance, FetchReminders.Instance, delay);
