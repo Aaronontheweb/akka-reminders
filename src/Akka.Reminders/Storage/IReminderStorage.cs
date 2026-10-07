@@ -20,8 +20,9 @@ public sealed record ReminderOverview
     public (ReminderOverview newOverview, bool hasNewerDate) Apply(ScheduledReminder newReminder, DateTimeOffset now)
     {
         var newTimespan = newReminder.When - now;
-        // If TimeUntilNext is Zero (no reminders), any new reminder is "newer"
-        var hasNewerDate = TimeUntilNext == TimeSpan.Zero || newTimespan <= TimeUntilNext;
+        // An empty overview has TimeUntilNext = MaxValue, so any reminder is sooner. Zero is a real
+        // value ("due right now") and must not be replaced by a later reminder.
+        var hasNewerDate = newTimespan <= TimeUntilNext;
 
         return (new ReminderOverview
         {
