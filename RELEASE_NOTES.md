@@ -1,3 +1,24 @@
+#### 1.6.0-beta3 October 7th 2026 ####
+
+Built against Akka.NET 1.6.0-beta3.
+
+**Breaking Changes**
+
+- **net10.0 only** - All packages now target net10.0. Akka.NET 1.6 targets net10.0 only, so net9.0 is no longer supported.
+- **Requires Akka.NET 1.6** - Depends on Akka.Cluster.Hosting 1.6.0-beta3. Applications must upgrade to Akka.NET 1.6.
+
+**Included**
+
+- Everything in 1.5.73, including the recurring reminder fix ([#143](https://github.com/Aaronontheweb/akka-reminders/issues/143), [#146](https://github.com/Aaronontheweb/akka-reminders/pull/146)).
+
+**Dependency Updates**
+
+- Akka.Cluster.Hosting and Akka.Hosting.TestKit to 1.6.0-beta3
+- Microsoft.Extensions.Hosting from 9.0.8 to 10.0.12
+- Microsoft.Data.Sqlite from 10.0.5 to 10.0.12
+- Testcontainers.MsSql and Testcontainers.PostgreSql from 4.11.0 to 4.15.0
+- Microsoft.SourceLink.GitHub from 10.0.201 to 10.0.401
+
 #### 1.5.73.1 October 7th 2026 ####
 
 **Bug Fixes**

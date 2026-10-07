@@ -1,13 +1,13 @@
 <Project>
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-    <!-- Akka.Hosting packages (github.com/akkadotnet/Akka.Hosting) -->
-    <AkkaHostingVersion>1.5.73</AkkaHostingVersion>
+    <!-- Akka.Hosting packages (shipped from github.com/akkadotnet/akka.net as of 1.6) -->
+    <AkkaHostingVersion>1.6.0-beta3</AkkaHostingVersion>
   </PropertyGroup>
   <!-- Akka.Hosting packages - brings in core Akka transitively -->
   <ItemGroup>
     <PackageVersion Include="Akka.Cluster.Hosting" Version="$(AkkaHostingVersion)" />
-    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="9.0.8" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Data.SqlClient" Version="6.1.4" />
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.12" />
     <PackageVersion Include="Npgsql" Version="10.0.2" />
@@ -18,8 +18,8 @@
     <PackageVersion Include="coverlet.collector" Version="8.0.0" />
     <PackageVersion Include="FluentAssertions" Version="8.10.0" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
-    <PackageVersion Include="Testcontainers.MsSql" Version="4.11.0" />
-    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.11.0" />
+    <PackageVersion Include="Testcontainers.MsSql" Version="4.15.0" />
+    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.15.0" />
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.v3" Version="3.2.2" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
@@ -30,6 +30,6 @@
   </ItemGroup>
   <!-- SourceLink support for all Akka.NET projects -->
   <ItemGroup>
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.201" />
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.401" />
   </ItemGroup>
 </Project>
