@@ -382,6 +382,38 @@ public partial class ReminderSchedulerTimingSpecs
         Assert.Equal(t0.AddSeconds(15), await NextDeliveryAsync(region));
     }
 
+    [Fact]
+    public async Task Should_KeepRetry_When_StaleRollForwardIsAddedAfterRetriedSuccessor()
+    {
+        var inner = new InMemoryReminderStorage();
+        var storage = new FailableReminderStorage(inner);
+        var entity = new ReminderEntity("order-region", "e1");
+        var key = new ReminderKey("order");
+        var t0 = VirtualTime.Now;
+        var interval = TimeSpan.FromSeconds(20);
+
+        // The successor (slot t0+20) sorts before the stale row, whose when_utc is later. The stale
+        // row's deadline has passed by t0+26, so it rolls forward onto the successor's slot.
+        Assert.True(await inner.CommitReminderMutationsAsync(new ReminderMutationBatch(
+        [
+            new ScheduledReminder(entity, key, t0.AddSeconds(20), "payload", interval,
+                DeliveryDeadlineUtc: t0.AddSeconds(40), OccurrenceDueTimeUtc: t0.AddSeconds(20)),
+            new ScheduledReminder(entity, key, t0.AddSeconds(25), "payload", interval,
+                DeliveryDeadlineUtc: t0.AddSeconds(20), OccurrenceDueTimeUtc: t0)
+        ], [], []), Ct));
+
+        // The region is never registered, so the successor is retried in the same chunk.
+        var scheduler = StartScheduler(DedicatedSettings(), storage, "order");
+        await StatusAsync(scheduler, entity, key, t0); // the scheduler has loaded both rows before time moves
+        var slotRows = new List<ScheduledReminder>();
+        storage.OnCommit = batch => slotRows.AddRange(batch.PendingUpserts.Where(r => r.DueTimeUtc == t0.AddSeconds(20)));
+        VirtualTime.Advance(TimeSpan.FromSeconds(26));
+        await AwaitStatusAsync(scheduler, entity, key, t0, ReminderCompletionStatus.Expired);
+
+        var row = Assert.Single(slotRows);
+        Assert.Equal(1, row.AttemptCount);
+    }
+
     public static TheoryData<double, double?, double, double?> Slots => new()
     {
         // interval s, window s, now (s after due), expected next due (s after due); null = no next slot

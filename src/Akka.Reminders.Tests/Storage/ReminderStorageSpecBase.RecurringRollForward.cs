@@ -11,7 +11,7 @@ public abstract partial class ReminderStorageSpecBase
     /// <summary>
     /// Whole seconds, so every provider (PostgreSQL stores microseconds) round-trips the value exactly.
     /// </summary>
-    private static DateTimeOffset WholeSecondNow()
+    protected static DateTimeOffset WholeSecondNow()
         => new(DateTimeOffset.UtcNow.UtcTicks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, TimeSpan.Zero);
 
     private static ScheduledReminder StaleRecurring(ReminderEntity entity, string key, DateTimeOffset due)
@@ -117,5 +117,23 @@ public abstract partial class ReminderStorageSpecBase
         // The skipped rows are left out of the overview, so they cannot arm an immediate tick.
         Assert.Equal(1, batch.NextOverview.TotalPendingReminders);
         Assert.Equal(TimeSpan.FromSeconds(30), batch.NextOverview.TimeUntilNext);
+    }
+
+    [Fact]
+    public async Task GetRemindersForEntityAsync_Should_SkipLiveUnreadableOccurrence_And_ListTheRest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var now = WholeSecondNow();
+        var entity = CreateTestEntity("list-poison", "e1");
+        var poison = new ScheduledReminder(entity, new ReminderKey("poison"), now.AddMinutes(5), "payload");
+        var healthy = new ScheduledReminder(entity, new ReminderKey("healthy"), now.AddMinutes(10), "healthy");
+        await Storage!.ScheduleReminderAsync(poison, ct);
+        await Storage.ScheduleReminderAsync(healthy, ct);
+        if (!await CorruptPayloadAsync(poison))
+            return;
+
+        var listed = await Storage.GetRemindersForEntityAsync(entity, ct: ct);
+
+        Assert.Equal(healthy.Key, Assert.Single(listed).Key);
     }
 }

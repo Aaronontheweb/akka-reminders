@@ -1093,7 +1093,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     }
 
     /// <summary>
-    /// Adds the next occurrence of a recurring reminder to the commit, once per occurrence identity.
+    /// Adds the next occurrence of a recurring reminder to the commit, unless the commit already
+    /// holds a row for that slot.
     /// </summary>
     private void AddNextOccurrence(ScheduledReminder reminder, DateTimeOffset now, List<ScheduledReminder> occurrencesToUpsert)
     {
@@ -1104,11 +1105,13 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             return;
         }
 
-        AddUpsert(occurrencesToUpsert, next);
+        // A retry or terminal row for the same slot always beats a roll-forward, whatever the order.
+        if (!occurrencesToUpsert.Exists(r => r.Entity == next.Entity && r.Key == next.Key && r.DueTimeUtc == next.DueTimeUtc))
+            occurrencesToUpsert.Add(next);
     }
 
     /// <summary>
-    /// Adds a row to a commit, replacing any earlier row for the same occurrence (last writer wins).
+    /// Adds a retry or terminal row to a commit, replacing any earlier row for the same occurrence.
     /// One chunk can produce two rows for one slot, e.g. a stale occurrence rolling forward onto a
     /// successor that is retried in the same chunk, and PostgreSQL and SQL Server reject an upsert
     /// that names the same key twice.

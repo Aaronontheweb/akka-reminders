@@ -122,6 +122,37 @@ public class SqliteReminderStorageSpecs : ReminderStorageSpecBase
         Assert.Equal(1, await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken));
         return true;
     }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(100)]
+    public async Task GetNextRemindersAsync_Should_FinishQuickly_When_ManyLiveRowsAreUnreadable(int batchSize)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var now = WholeSecondNow();
+        var entity = CreateTestEntity("many-poison", "e1");
+        var poison = Enumerable.Range(0, 2_000)
+            .Select(i => new ScheduledReminder(entity, new ReminderKey($"poison-{i}"), now.AddHours(-1).AddSeconds(i / 10.0), "payload"))
+            .ToList();
+        var healthy = new ScheduledReminder(entity, new ReminderKey("healthy"), now.AddSeconds(-1), "healthy");
+        Assert.True(await Storage!.CommitReminderMutationsAsync(new ReminderMutationBatch([.. poison, healthy], [], []), ct));
+        await using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(_connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE scheduled_reminders SET serializer_id = 987654 WHERE reminder_key LIKE 'poison-%'";
+            Assert.Equal(poison.Count, await command.ExecuteNonQueryAsync(ct));
+        }
+
+        // The old fetch re-read every unreadable row on every pass: seconds to minutes at batch size 1.
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        var batch = await Storage.GetNextRemindersAsync(now.AddSeconds(1), now, new ReminderBatchSize(batchSize), ct);
+        timer.Stop();
+
+        Assert.Equal(healthy.Key, Assert.Single(batch.Reminders).Key);
+        Assert.True(timer.Elapsed < TimeSpan.FromSeconds(20), $"Fetch took {timer.Elapsed}");
+    }
+
     private string? _databasePath;
 
     protected override Task<IReminderStorage> CreateStorage()

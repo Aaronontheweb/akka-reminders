@@ -185,7 +185,8 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
 
         // A live row whose payload cannot be read is skipped and stays Pending, so the page is
         // widened past such rows until it holds maxCount readable rows or no more rows are due.
-        for (var limit = maxCount.Value; ; limit = maxCount.Value + skipped + unreadable.Count)
+        // The limit doubles each pass, and rows already seen are skipped before their payload is read.
+        for (var limit = maxCount.Value; ; limit = (int)Math.Min(int.MaxValue, Math.Max(limit * 2L, (long)maxCount.Value + skipped + unreadable.Count)))
         {
             var unusable = skipped + unreadable.Count;
             var rows = 0;
@@ -199,17 +200,17 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
             while (await reader.ReadAsync(cancellationToken))
             {
                 rows++;
+                if (!seen.Add(ReadKeyFromReader(reader)))
+                    continue;
+
                 try
                 {
-                    var reminder = ReadReminderFromReader(reader);
-                    if (seen.Add((reminder.Entity, reminder.Key, reminder.DueTimeUtc)))
-                        reminders.Add(reminder);
+                    reminders.Add(ReadReminderFromReader(reader));
+                    if (reminders.Count >= maxCount.Value)
+                        break;
                 }
                 catch (UnreadablePayloadException ex)
                 {
-                    if (!seen.Add((ex.Entity, ex.Key, ex.DueTimeUtc)))
-                        continue;
-
                     if (ex.DeliveryDeadlineUtc <= now)
                     {
                         // Past its deadline, where storage expired it before 1.5.73: end it as Failed.
@@ -226,7 +227,7 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
                 }
             }
 
-            if (skipped + unreadable.Count == unusable || rows < limit)
+            if (reminders.Count >= maxCount.Value || skipped + unreadable.Count == unusable || rows < limit)
                 break;
         }
 
@@ -444,7 +445,14 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            reminders.Add(ReadReminderFromReader(reader));
+            try
+            {
+                reminders.Add(ReadReminderFromReader(reader));
+            }
+            catch (UnreadablePayloadException ex)
+            {
+                _log.Error(ex, "Skipping reminder [{0}] / [{1}] due at [{2}] in listing: payload could not be deserialized", ex.Entity, ex.Key, ex.DueTimeUtc);
+            }
         }
 
         return reminders.Skip(skip).Take(take).ToList();
@@ -894,6 +902,11 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
     {
         return _serialization.Deserialize(payload, serializerId, manifest ?? string.Empty);
     }
+
+    private static (ReminderEntity, ReminderKey, DateTimeOffset) ReadKeyFromReader(IDataReader reader)
+        => (new ReminderEntity(reader.GetString(reader.GetOrdinal("shard_region_name")), reader.GetString(reader.GetOrdinal("entity_id"))),
+            new ReminderKey(reader.GetString(reader.GetOrdinal("reminder_key"))),
+            new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(reader.GetOrdinal("due_time_utc")), DateTimeKind.Utc)));
 
     private ScheduledReminder ReadReminderFromReader(IDataReader reader)
     {
