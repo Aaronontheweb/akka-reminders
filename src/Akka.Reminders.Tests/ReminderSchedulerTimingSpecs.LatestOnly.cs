@@ -187,4 +187,26 @@ public partial class ReminderSchedulerTimingSpecs
         Assert.Contains("huge", keys);
         Assert.Contains("normal", keys);
     }
+
+    // A zero interval makes "the previous occurrence" the occurrence itself; it must not expire itself.
+    [Fact(DisplayName = "Should_DeliverEverything_When_ARepeatIntervalIsZero")]
+    public async Task Should_DeliverEverything_When_ARepeatIntervalIsZero()
+    {
+        var (scheduler, entity, region) = Setup("zero-interval", settings: LatestOnlySettings());
+        var t0 = VirtualTime.Now;
+        await ScheduleAsync(scheduler, entity, new ReminderKey("zero"), t0.AddSeconds(2), TimeSpan.Zero);
+        await ScheduleAsync(scheduler, entity, new ReminderKey("normal"), t0.AddSeconds(1.2), null);
+
+        var keys = new List<string>();
+        for (var i = 0; i < 80 && !(keys.Contains("zero") && keys.Contains("normal")); i++)
+        {
+            VirtualTime.Advance(TimeSpan.FromMilliseconds(50) + TimeSpan.FromTicks(7));
+            await Task.Delay(25, Ct);
+            while (region.HasMessages)
+                keys.Add((await region.ExpectMsgAsync<ReminderEnvelope<string>>(ReplyTimeout, cancellationToken: Ct)).Key.Name);
+        }
+
+        Assert.Contains("zero", keys);
+        Assert.Contains("normal", keys);
+    }
 }

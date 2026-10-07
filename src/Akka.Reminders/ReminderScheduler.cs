@@ -1456,7 +1456,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             // unacked. Once this one is due the previous one is past its deadline and
                             // dead anyway, so only an early send (inside MaxSlippage) needs this.
                             var interval = reminder.RepeatInterval.Value;
-                            if (completedAt < reminder.DueTimeUtc && reminder.DueTimeUtc.UtcTicks > interval.Ticks)
+                            if (interval > TimeSpan.Zero && completedAt < reminder.DueTimeUtc && reminder.DueTimeUtc.UtcTicks > interval.Ticks)
                             {
                                 var previous = ToOccurrenceKey(reminder.Entity, reminder.Key, reminder.DueTimeUtc - interval);
                                 bool IsPrevious(ReminderEntity e, ReminderKey k, DateTimeOffset due) => ToOccurrenceKey(e, k, due) == previous;
