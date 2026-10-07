@@ -10,6 +10,8 @@
     <VersionPrefix>1.6.0-beta3</VersionPrefix>
     <PackageReleaseNotes>Built against Akka.NET 1.6.0-beta3.
 
+**Upgrading to 1.6 is one-way for stored reminders.** Akka.NET 1.6 registers Akka.Remote's serializers on every actor system, including local ones. With `WithLocalReminders`, payloads of type `string`, `int` or `long`, Protobuf messages and Akka types such as `IActorRef` are now stored with their own serializers instead of the JSON fallback. 1.6 reads everything 1.5 wrote. 1.5 cannot read these new rows, so don't roll back to 1.5 after 1.6 has written reminders. Payload types bound to your own serializer, and clustered systems (`WithReminders`), are not affected.
+
 **Breaking Changes**
 
 - **net10.0 only** - All packages now target net10.0. Akka.NET 1.6 targets net10.0 only, so net9.0 is no longer supported.
@@ -17,15 +19,12 @@
 
 **Included**
 
-- Everything in 1.5.73, including the recurring reminder fix ([#143](https://github.com/Aaronontheweb/akka-reminders/issues/143), [#146](https://github.com/Aaronontheweb/akka-reminders/pull/146)).
+- Everything in 1.5.73.1, including the recurring reminder fixes ([#143](https://github.com/Aaronontheweb/akka-reminders/issues/143), [#146](https://github.com/Aaronontheweb/akka-reminders/pull/146), [#148](https://github.com/Aaronontheweb/akka-reminders/pull/148)).
 
 **Dependency Updates**
 
-- Akka.Cluster.Hosting and Akka.Hosting.TestKit to 1.6.0-beta3
-- Microsoft.Extensions.Hosting from 9.0.8 to 10.0.12
-- Microsoft.Data.Sqlite from 10.0.5 to 10.0.12
-- Testcontainers.MsSql and Testcontainers.PostgreSql from 4.11.0 to 4.15.0
-- Microsoft.SourceLink.GitHub from 10.0.201 to 10.0.401</PackageReleaseNotes>
+- Akka.Cluster.Hosting to 1.6.0-beta3
+- Test and build only, not shipped: Akka.Hosting.TestKit 1.6.0-beta3, Testcontainers.MsSql and Testcontainers.PostgreSql 4.15.0, Microsoft.SourceLink.GitHub 10.0.401</PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Visual Studio C# settings -->
