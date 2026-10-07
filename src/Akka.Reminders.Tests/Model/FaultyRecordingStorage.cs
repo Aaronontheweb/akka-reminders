@@ -87,6 +87,8 @@ public sealed class FaultyRecordingStorage : IReminderStorage
                 FaultKind.Timeout => _clock.Now + ModelSettings.StorageTimeout + _recovery,
                 _ => _clock.Now + _recovery,
             };
+            if (f.Kind == FaultKind.Slow)
+                _journal.Stalled(f.Delay + _recovery);
             _journal.Add(new Trouble(until, null, call, f.Kind));
 
             switch (f.Kind)

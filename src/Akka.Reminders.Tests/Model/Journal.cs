@@ -116,11 +116,14 @@ public sealed class Journal(VirtualClock clock)
             t.Until = clock.Now + recovery;
     }
 
-    /// <summary>A stall during trouble starts the recovery wait again when the stall ends.</summary>
+    /// <summary>
+    /// A stall or a slow storage call while the scheduler is getting over a failure or a missing region
+    /// starts the recovery wait again when it ends.
+    /// </summary>
     public void Stalled(TimeSpan stallPlusRecovery)
     {
         var now = clock.Now;
-        foreach (var t in Read().Troubles.Where(t => t.At <= now && t.Until >= now && t.Until != DateTimeOffset.MaxValue))
+        foreach (var t in Read().Troubles.Where(t => t.Kind != FaultKind.Slow && t.At <= now && t.Until >= now && t.Until != DateTimeOffset.MaxValue))
             Add(new Trouble(now + stallPlusRecovery, t.Region, null, null));
     }
 

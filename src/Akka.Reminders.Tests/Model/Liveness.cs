@@ -5,7 +5,7 @@ namespace Akka.Reminders.Tests.Model;
 /// With healthy storage "by now" is exact. Trouble (a failed or slow storage call, a missing shard
 /// region) loosens it in one way only: what was due during the trouble is owed when the trouble is
 /// over. A slow call is over when it returns. A failed call or a missing region is over
-/// <see cref="ModelSettings.RecoveryTime"/> later.
+/// <see cref="ModelSettings.RecoveryTime"/> later; a stall or a slow call during that wait starts it again.
 /// </summary>
 public static class Liveness
 {

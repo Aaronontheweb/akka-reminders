@@ -190,4 +190,17 @@ public sealed class ModelRegressionSpecs
         new ScheduleRecurring(0, 0, 0, 1000, null),
         new Tick(5000),
     ]));
+
+    // Checks the oracle, not the scheduler. Sends are committed but report failure while overview reads
+    // are slow for 30 s each. The scheduler cannot recover while it waits on a slow read, so the
+    // recovery wait must start again when the read returns.
+    [Fact(DisplayName = "Should_RestartTheRecoveryWait_When_StorageIsSlowDuringRecovery")]
+    public Task SlowStorageDuringRecoveryRestartsTheWait() => RunStrictAsync(new Scenario(new ModelSettings(1000, 10000, 100, 10000, 10, 2, 2, 256),
+    [
+        new ScheduleOnce(0, 0, 1, null),
+        new InjectFault(StorageCall.Overview, FaultKind.Slow, 1, 1, false),
+        new InjectFault(StorageCall.Overview, FaultKind.Slow, 3, 30000, false),
+        new InjectFault(StorageCall.Commit, FaultKind.AppliedThenFail, 3, 0, false),
+        new Tick(15000),
+    ]));
 }

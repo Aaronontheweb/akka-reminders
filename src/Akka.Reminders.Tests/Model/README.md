@@ -12,7 +12,7 @@ The judging reads only what an application can observe: the calls it made and th
 
 - **Occurrence**: one due time of a reminder. Its **deadline** is `due + MaxDeliveryWindow`, or the next due time if that is sooner. No window and no interval: no deadline.
 - **Awake**: the scheduler is keeping up. It is awake except during a `Lag`.
-- **Trouble**: a storage call the test made fail or run slow, or a shard region the test took down. A slow call is over when it returns. A failed call or a missing region is over `RecoveryTime` later.
+- **Trouble**: a storage call the test made fail or run slow, or a shard region the test took down. A slow call is over when it returns. A failed call or a missing region is over `RecoveryTime` later. A stall or a slow call during that wait starts the wait again when it ends.
 - **RecoveryTime** = `AckTimeout + MaxRetryBackoff + 2 × StorageTimeout`. This is "enough time": an unsent attempt is retried one ack timeout later, after a backoff; a failed reload is retried after `StorageTimeout × 2` (docs: Delivery-state commit lands but reports failure).
 
 ## Operations
