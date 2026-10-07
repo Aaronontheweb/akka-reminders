@@ -14,11 +14,12 @@ Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
 
 Recurring reminders are modeled as a stream of occurrences.
 
-- The next occurrence is persisted, in the same commit, when the current occurrence is delivered or ends without delivery (expired, or failed because its shard region is missing).
+- The next occurrence is persisted, in the same commit, the first time the current occurrence is processed: when it is delivered, when it is put back for a retry because its shard region is missing, or when it ends without delivery (expired or failed).
 - The next occurrence is the earliest slot whose deadline has not passed. Missed slots are skipped, not replayed.
 - Each occurrence starts with a new retry budget.
 - Each occurrence has its own absolute UTC deadline.
-- By default, a recurring occurrence expires when the next occurrence becomes due.
+- By default, a recurring occurrence expires when the next occurrence is delivered or becomes due, whichever is first. There is at most one live delivered occurrence per recurring reminder: when the next one is sent early (inside `MaxSlippage`) while the previous one is still unacked, the previous one is marked `Expired` in the same commit.
+- The next occurrence is written once. A retry of an occurrence finds its next slot in storage and leaves that row alone, whatever state it is in.
 - If `MaxDeliveryWindow` is configured, the effective deadline is `min(due + window, next due)`.
 - A late ack for an old occurrence is a harmless `NotFound` because the ack is matched by `DueTimeUtc`.
 
@@ -287,7 +288,9 @@ The design goal is to keep those duplicates bounded and occurrence-specific.
 
 ### Recurring reminders are latest-only, not catch-up
 
-If an old recurring occurrence is still unacked when the next occurrence becomes due, the old one expires instead of building an unbounded replay backlog.
+If an old recurring occurrence is still unacked when the next occurrence is delivered or becomes due, the old one expires instead of building an unbounded replay backlog. A late ack or retry for it is a `NotFound`.
+
+This costs one extra occurrence-status read when a recurring occurrence is retried, and one when a recurring occurrence is sent before its due time.
 
 ### Deadline expiration is best-effort cleanup
 
