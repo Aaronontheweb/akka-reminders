@@ -192,8 +192,18 @@ a recurring occurrence's deadline before it is delivered.
 - The scheduler marks the stale occurrence `Expired` (never delivered late) and writes the next live
   slot in the same commit: `due + k * interval`, with `k` the smallest value whose deadline is after now.
 - A lag of many intervals produces one occurrence, not a backlog.
-- A stored payload that can no longer be deserialized is marked `Failed` during the fetch, so one
-  bad row cannot block other reminders.
+- Each commit chunk reads the clock once, so a slow earlier chunk cannot make a later one deliver
+  past its deadline.
+
+### Stored payload can no longer be deserialized
+
+A message type was renamed or removed, or its serializer is gone. The SQL providers handle such a
+row during the fetch, so it cannot block other reminders:
+
+- Past its delivery deadline: marked `Failed` (for a recurring reminder, the series ends there).
+- Still inside its deadline, or with no deadline: logged as an error, skipped for this fetch, and
+  left `Pending`, so fixing the type mapping recovers it. The fetch pages past skipped rows, and the
+  overview it returns leaves them out, so they cannot cause a loop of immediate re-fetches.
 
 ### Late ack for superseded recurring occurrence
 
@@ -251,7 +261,8 @@ This avoids one round-trip per reminder in both the delivery and acknowledgement
 Pending-overview queries only count actionable `Pending` rows.
 
 - `AwaitingAck` rows are not treated as pending work.
-- Expired rows are excluded by deadline filters.
+- Rows past their deadline are excluded, except `Pending` recurring occurrences: the scheduler still
+  needs to see those to expire them and roll the series forward.
 - This prevents hot empty-fetch polling while the system is simply waiting for acks.
 
 ### 5. Incremental overview maintenance

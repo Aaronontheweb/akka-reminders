@@ -11,10 +11,18 @@ internal sealed class FailableReminderStorage : IReminderStorage
     private readonly IReminderStorage _inner;
     private readonly TaskCompletionSource _firstCommitMutationFailure = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _commitMutationAttempts;
+    private int _fetches;
 
     public int CommitMutationAttempts => Volatile.Read(ref _commitMutationAttempts);
 
     public Task FirstCommitMutationFailure => _firstCommitMutationFailure.Task;
+
+    public int Fetches => Volatile.Read(ref _fetches);
+
+    /// <summary>
+    /// Runs before each mutation commit is forwarded, e.g. to inspect it or to let time pass.
+    /// </summary>
+    public Action<ReminderMutationBatch>? OnCommit { get; set; }
 
     /// <summary>
     /// When true, all write operations (MarkRemindersAsCompleted, ScheduleReminder) throw.
@@ -69,6 +77,7 @@ internal sealed class FailableReminderStorage : IReminderStorage
     public Task<bool> CommitReminderMutationsAsync(ReminderMutationBatch mutationBatch, CancellationToken ct = default)
     {
         Interlocked.Increment(ref _commitMutationAttempts);
+        OnCommit?.Invoke(mutationBatch);
         if (FailWrites || FailScheduleWrites || FailMarkCompletedWrites)
         {
             _firstCommitMutationFailure.TrySetResult();
@@ -110,6 +119,7 @@ internal sealed class FailableReminderStorage : IReminderStorage
     public Task<PendingRemindersWithSummary> GetNextRemindersAsync(DateTimeOffset untilDeadline, DateTimeOffset now,
         ReminderBatchSize maxCount, CancellationToken ct = default)
     {
+        Interlocked.Increment(ref _fetches);
         return _inner.GetNextRemindersAsync(untilDeadline, now, maxCount, ct);
     }
 

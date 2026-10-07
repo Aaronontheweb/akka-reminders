@@ -90,4 +90,32 @@ public abstract partial class ReminderStorageSpecBase
         Assert.Equal(healthy.Key, Assert.Single(batch.Reminders).Key);
         Assert.Equal(ReminderCompletionStatus.Failed, await CompletionStatusAsync(poison));
     }
+
+    [Fact]
+    public async Task GetNextRemindersAsync_Should_SkipLiveUnreadableOccurrences_And_PagePastThem()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var now = WholeSecondNow();
+        var entity = CreateTestEntity("live-poison", "e1");
+        var oneOff = new ScheduledReminder(entity, new ReminderKey("poison-one-off"), now.AddSeconds(-3), "payload");
+        var recurring = new ScheduledReminder(entity, new ReminderKey("poison-recurring"), now.AddSeconds(-2), "payload",
+            TimeSpan.FromSeconds(10), DeliveryDeadlineUtc: now.AddSeconds(8), OccurrenceDueTimeUtc: now.AddSeconds(-2));
+        var healthy = new ScheduledReminder(entity, new ReminderKey("healthy"), now.AddSeconds(-1), "healthy");
+        var later = new ScheduledReminder(entity, new ReminderKey("later"), now.AddSeconds(30), "later");
+        foreach (var reminder in new[] { oneOff, recurring, healthy, later })
+            await Storage!.ScheduleReminderAsync(reminder, ct);
+        if (!await CorruptPayloadAsync(oneOff) || !await CorruptPayloadAsync(recurring))
+            return;
+
+        // The two live unreadable rows fill a page of two, so the fetch must page past them.
+        var batch = await Storage!.GetNextRemindersAsync(now.AddSeconds(1), now, new ReminderBatchSize(2), ct);
+
+        Assert.Equal(healthy.Key, Assert.Single(batch.Reminders).Key);
+        Assert.Equal(ReminderCompletionStatus.Pending, await CompletionStatusAsync(oneOff));
+        Assert.Equal(ReminderCompletionStatus.Pending, await CompletionStatusAsync(recurring));
+
+        // The skipped rows are left out of the overview, so they cannot arm an immediate tick.
+        Assert.Equal(1, batch.NextOverview.TotalPendingReminders);
+        Assert.Equal(TimeSpan.FromSeconds(30), batch.NextOverview.TimeUntilNext);
+    }
 }

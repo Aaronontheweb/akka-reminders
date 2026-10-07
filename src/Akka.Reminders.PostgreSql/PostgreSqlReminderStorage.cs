@@ -178,36 +178,61 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
         await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = connection.CreateCommand();
-        command.CommandText = _dialect.GetSelectDueRemindersSql(_settings.SchemaName, _settings.TableName, maxCount.Value);
-        command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
-        _dialect.AddParameter(command, "@UntilDeadline", TruncateToMicroseconds(untilDeadline));
-        _dialect.AddParameter(command, "@Now", TruncateToMicroseconds(now));
-
         var unreadable = new List<CompletedReminder>();
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        var skipped = 0;
+        UnreadablePayloadException? firstSkipped = null;
+        var seen = new HashSet<(ReminderEntity, ReminderKey, DateTimeOffset)>();
+
+        // A live row whose payload cannot be read is skipped and stays Pending, so the page is
+        // widened past such rows until it holds maxCount readable rows or no more rows are due.
+        for (var limit = maxCount.Value; ; limit = maxCount.Value + skipped + unreadable.Count)
         {
+            var unusable = skipped + unreadable.Count;
+            var rows = 0;
+            await using var command = connection.CreateCommand();
+            command.CommandText = _dialect.GetSelectDueRemindersSql(_settings.SchemaName, _settings.TableName, limit);
+            command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
+            _dialect.AddParameter(command, "@UntilDeadline", TruncateToMicroseconds(untilDeadline));
+            _dialect.AddParameter(command, "@Now", TruncateToMicroseconds(now));
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                rows++;
                 try
                 {
-                    reminders.Add(ReadReminderFromReader(reader));
+                    var reminder = ReadReminderFromReader(reader);
+                    if (seen.Add((reminder.Entity, reminder.Key, reminder.DueTimeUtc)))
+                        reminders.Add(reminder);
                 }
                 catch (UnreadablePayloadException ex)
                 {
-                    // A row whose payload can no longer be read would fail every fetch and block
-                    // all other reminders, so it is ended as Failed and left out.
-                    var row = new CompletedReminder(
-                        new ReminderEntity(reader.GetString(reader.GetOrdinal("shard_region_name")), reader.GetString(reader.GetOrdinal("entity_id"))),
-                        new ReminderKey(reader.GetString(reader.GetOrdinal("reminder_key"))),
-                        ReadUtc(reader, "due_time_utc")!.Value,
-                        TruncateToMicroseconds(now),
-                        ReminderCompletionStatus.Failed);
-                    _log.Error(ex, "Marking reminder occurrence {0} as Failed", row);
-                    unreadable.Add(row);
+                    if (!seen.Add((ex.Entity, ex.Key, ex.DueTimeUtc)))
+                        continue;
+
+                    if (ex.DeliveryDeadlineUtc <= now)
+                    {
+                        // Past its deadline, where storage expired it before 1.5.73: end it as Failed.
+                        var row = new CompletedReminder(ex.Entity, ex.Key, ex.DueTimeUtc, TruncateToMicroseconds(now), ReminderCompletionStatus.Failed);
+                        _log.Error(ex, "Marking reminder occurrence {0} as Failed", row);
+                        unreadable.Add(row);
+                    }
+                    else
+                    {
+                        // Still live: it stays Pending, so fixing the type mapping recovers it.
+                        skipped++;
+                        firstSkipped ??= ex;
+                    }
                 }
             }
+
+            if (skipped + unreadable.Count == unusable || rows < limit)
+                break;
         }
+
+        if (firstSkipped is not null)
+            _log.Error(firstSkipped, "Skipped [{0}] pending reminder occurrence(s) whose payload could not be deserialized; they stay Pending. First: [{1}] / [{2}] due at [{3}]",
+                skipped, firstSkipped.Entity, firstSkipped.Key, firstSkipped.DueTimeUtc);
 
         if (unreadable.Count > 0)
             await MarkRemindersAsCompletedAsync(connection, null, unreadable, cancellationToken);
@@ -226,7 +251,10 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
                 totalPending = reader2.GetInt64(reader2.GetOrdinal("total_count"));
         }
 
-        var remainingCount = totalPending - reminders.Count;
+        // Skipped rows stay Pending ahead of the rest. Leave them out of the count and the next due
+        // time, or an overdue skipped row would arm an immediate tick after every fetch.
+        var consumed = reminders.Count + skipped;
+        var remainingCount = totalPending - consumed;
         var timeUntilNext = TimeSpan.MaxValue;
 
         if (remainingCount > 0)
@@ -234,7 +262,7 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
             await using var cmd3 = conn2.CreateCommand();
             cmd3.CommandText = _dialect.GetNextReminderTimeSql(_settings.SchemaName, _settings.TableName);
             cmd3.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
-            _dialect.AddParameter(cmd3, "@Skip", reminders.Count);
+            _dialect.AddParameter(cmd3, "@Skip", consumed);
             _dialect.AddParameter(cmd3, "@Now", TruncateToMicroseconds(now));
 
             var result = await cmd3.ExecuteScalarAsync(cancellationToken);
@@ -906,7 +934,8 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
         }
         catch (Exception ex)
         {
-            throw new UnreadablePayloadException(serializerId, manifest, ex);
+            throw new UnreadablePayloadException(new ReminderEntity(shardRegionName, entityId), new ReminderKey(reminderKey),
+                new DateTimeOffset(DateTime.SpecifyKind(dueTimeUtc, DateTimeKind.Utc)), deliveryDeadlineUtc, serializerId, manifest, ex);
         }
 
         return new ScheduledReminder(
@@ -922,6 +951,13 @@ public sealed class PostgreSqlReminderStorage : IReminderStorage
             new DateTimeOffset(DateTime.SpecifyKind(dueTimeUtc, DateTimeKind.Utc)));
     }
 
-    private sealed class UnreadablePayloadException(int serializerId, string? manifest, Exception inner)
-        : Exception($"Reminder payload could not be deserialized (serializer [{serializerId}], manifest [{manifest}]): {inner.Message}", inner);
+    private sealed class UnreadablePayloadException(ReminderEntity entity, ReminderKey key, DateTimeOffset dueTimeUtc,
+        DateTimeOffset? deliveryDeadlineUtc, int serializerId, string? manifest, Exception inner)
+        : Exception($"Reminder payload could not be deserialized (serializer [{serializerId}], manifest [{manifest}]): {inner.Message}", inner)
+    {
+        public ReminderEntity Entity { get; } = entity;
+        public ReminderKey Key { get; } = key;
+        public DateTimeOffset DueTimeUtc { get; } = dueTimeUtc;
+        public DateTimeOffset? DeliveryDeadlineUtc { get; } = deliveryDeadlineUtc;
+    }
 }

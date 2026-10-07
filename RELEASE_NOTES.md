@@ -1,3 +1,18 @@
+#### 1.5.73.1 October 7th 2026 ####
+
+**Bug Fixes**
+
+- Fixed reminders delivered late, past their `MaxDeliveryWindow`, when one scheduler pass handled a large or slow batch. The scheduler now reads the clock once per commit chunk instead of once per pass ([#143](https://github.com/Aaronontheweb/akka-reminders/issues/143), [#146](https://github.com/Aaronontheweb/akka-reminders/pull/146)).
+- Fixed a PostgreSQL and SQL Server commit failure when one chunk wrote two rows for the same occurrence, for example a stale retry rolling forward onto a successor that was retried in the same chunk. The failed write opened the write circuit and stalled delivery. The scheduler now keeps only the last row per occurrence.
+- Narrowed the handling of stored payloads that can no longer be deserialized (SQL providers). Only rows already past their delivery deadline are marked `Failed`. Rows still inside their deadline are skipped with an error log and stay `Pending`, so they recover once the type mapping is fixed, and they no longer block other reminders. 1.5.73 marked every such row `Failed`, which ended the pending reminders and recurring series of a renamed or removed message type.
+
+**Upgrade notes (also apply to 1.5.73)**
+
+- A recurring series that 0.7.x already stopped (an occurrence expired before delivery) stays stopped after upgrading. Register it again.
+- Registering a recurring reminder again with a past first due time re-delivers the current slot (at-least-once).
+- Custom `IReminderStorage` providers must follow the contract in the `ExpireRemindersAsync` remarks: leave `Pending` recurring occurrences alone after their deadline, and keep returning them from the fetch, overview and entity queries.
+- A recurring interval shorter than one scheduler pass leaves a stream of `Expired` rows. Use intervals of 1 second or more.
+
 #### 1.5.73 October 6th 2026 ####
 
 **Bug Fixes**
