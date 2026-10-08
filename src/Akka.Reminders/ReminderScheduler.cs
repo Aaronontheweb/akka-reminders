@@ -1323,6 +1323,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 var completedAt = TimeProvider.Now;
 
                 var occurrencesToUpsert = new List<ScheduledReminder>();
+                // Rows upserted only to record their last attempt; this commit also ends them.
+                var finalAttempts = new HashSet<ScheduledReminder>(ReferenceEqualityComparer.Instance);
                 var terminalReminders = new List<CompletedReminder>();
                 var remindersToAwaitAck = new List<AwaitingAckReminder>();
                 var deliveries = new List<(IActorRef ShardRegion, ScheduledReminder Reminder, DateTimeOffset AckDeadline)>();
@@ -1368,7 +1370,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         }
                         else
                         {
-                            AddUpsert(occurrencesToUpsert, CreateTerminalAttempt(reminder, failureReason));
+                            var finalAttempt = CreateTerminalAttempt(reminder, failureReason);
+                            AddUpsert(occurrencesToUpsert, finalAttempt);
+                            finalAttempts.Add(finalAttempt);
                             terminalReminders.Add(new CompletedReminder(
                                 reminder.Entity,
                                 reminder.Key,
@@ -1458,7 +1462,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 // per chunk — the overview is only reloaded from storage on failure.
                 if (occurrencesToUpsert.Count > 0)
                 {
-                    foreach (var pendingReminder in occurrencesToUpsert)
+                    // A row this commit also ends (Failed/Expired) is not pending work.
+                    foreach (var pendingReminder in occurrencesToUpsert.Where(u => !finalAttempts.Contains(u)))
                     {
                         batchOverview = batchOverview.Apply(pendingReminder, completedAt).newOverview;
                     }
