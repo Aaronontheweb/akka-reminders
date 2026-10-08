@@ -48,6 +48,13 @@ internal sealed class FailableReminderStorage : IReminderStorage
     public bool FailNextOverviewRead { get; set; }
 
     /// <summary>
+    /// Fails the fetch and overview reads while leaving occurrence queries available as mailbox barriers.
+    /// </summary>
+    public bool FailFetchAndOverview { get; set; }
+
+    public bool FailFetchReads { get; set; }
+
+    /// <summary>
     /// When true, all read operations throw.
     /// </summary>
     public bool FailReads { get; set; }
@@ -150,11 +157,15 @@ internal sealed class FailableReminderStorage : IReminderStorage
         ReminderBatchSize maxCount, CancellationToken ct = default)
     {
         Interlocked.Increment(ref _fetches);
+        if (FailFetchAndOverview || FailFetchReads)
+            throw new TimeoutException("Simulated fetch read timeout");
         return _inner.GetNextRemindersAsync(untilDeadline, now, maxCount, ct);
     }
 
     public Task<ReminderOverview> GetRemindersOverviewAsync(DateTimeOffset now, CancellationToken ct = default)
     {
+        if (FailFetchAndOverview)
+            throw new TimeoutException("Simulated overview read timeout");
         if (FailNextOverviewRead)
         {
             FailNextOverviewRead = false;

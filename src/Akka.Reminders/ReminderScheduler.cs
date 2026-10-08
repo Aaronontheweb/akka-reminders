@@ -241,7 +241,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
-    private void TryScheduleFetchReminders()
+    private void TryScheduleFetchReminders(DateTimeOffset? notBefore = null)
     {
         if (PendingReminders?.TotalPendingReminders > 0)
         {
@@ -258,6 +258,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 delay -= TimeProvider.Now - _overviewAsOf;
             if (delay < TimeSpan.Zero)
                 delay = TimeSpan.Zero;
+            if (notBefore.HasValue && notBefore.Value - TimeProvider.Now > delay)
+                delay = notBefore.Value - TimeProvider.Now;
             Timers.StartSingleTimer(FetchReminders.Instance, FetchReminders.Instance, delay);
         }
     }
@@ -1323,6 +1325,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         var latestOverview = PendingReminders;
         var fetchedAt = _overviewAsOf;
         var needsOverviewReload = false;
+        var fetchFailed = false;
 
         // When the write circuit is open, probe with a single reminder to test
         // write availability before resuming full-batch processing. This limits
@@ -1354,6 +1357,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 // so the write circuit remains unchanged.
                 _log.Error(ex, "Failed to fetch due reminders from storage");
                 needsOverviewReload = true;
+                fetchFailed = true;
                 break;
             }
 
@@ -1605,7 +1609,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             totalExpired,
             PendingReminders.TimeUntilNext);
 
-        TryScheduleFetchReminders();
+        // An old, already-due overview must not turn a failed fetch into immediate polling.
+        // Count a recovery delay from the end of the failed pass, even when the overview read works.
+        TryScheduleFetchReminders(fetchFailed ? TimeProvider.Now.Add(Settings.StorageTimeout * 2) : null);
     }
 
     public ITimerScheduler Timers { get; set; } = null!;
