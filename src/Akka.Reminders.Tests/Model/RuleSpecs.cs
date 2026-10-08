@@ -84,4 +84,57 @@ public sealed class RuleSpecs
         Assert.Equal(Phase.Done, model.PhaseOf(r, T(0)));
         Assert.False(model.Ack(0, 0, T(0)));
     }
+
+    [Theory(DisplayName = "Should_CheckRetryRecovery_AfterTheHealthyObservationWindow")]
+    [InlineData(StorageCall.Overview)]
+    [InlineData(StorageCall.Status)]
+    public void RetryLivenessReturnsAfterReadTrouble(StorageCall call)
+    {
+        var model = new ReminderModel(Settings);
+        model.Schedule(new Reminder(1, 0, 0, T(0), null, null));
+        model.Delivered(1, T(0), T(0));
+        var history = HistoryOf((0, OneOff()), (0, Sent(0)),
+            (1, new Trouble(T(30), null, call, FaultKind.Fail)));
+        var rule = Liveness.All.Single(r => r.Name == "RetriedOnTime");
+
+        model.RunTo(T(29));
+        Assert.Empty(rule.Broken(model, history, Settings));
+        model.RunTo(T(30));
+        Assert.Single(rule.Broken(model, history, Settings)); // healing must not permanently excuse a missing retry
+
+        model.Delivered(1, T(0), T(30));
+        Assert.Empty(rule.Broken(model, history, Settings));
+        model.RunTo(T(42)); // second retry: ack timeout 10 s, backoff 2 s
+        Assert.Single(rule.Broken(model, history, Settings));
+    }
+
+    [Fact(DisplayName = "Should_ExtendTheRetryRecoveryWindow_When_AnotherReadFails")]
+    public void RetryRecoveryWaitsForTheLastOverlappingFailure()
+    {
+        var model = new ReminderModel(Settings);
+        model.Schedule(new Reminder(1, 0, 0, T(0), null, null));
+        model.Delivered(1, T(0), T(0));
+        var history = HistoryOf((0, OneOff()), (0, Sent(0)),
+            (1, new Trouble(T(30), null, StorageCall.Overview, FaultKind.Fail)),
+            (25, new Trouble(T(55), null, StorageCall.NextAckDeadline, FaultKind.Timeout)));
+        var rule = Liveness.All.Single(r => r.Name == "RetriedOnTime");
+
+        model.RunTo(T(54));
+        Assert.Empty(rule.Broken(model, history, Settings));
+        model.RunTo(T(55));
+        Assert.Single(rule.Broken(model, history, Settings));
+    }
+
+    [Fact(DisplayName = "Should_NotOweARetry_When_AmbiguousCommitsExhaustedItsAttempts")]
+    public void RetryRecoveryPreservesAmbiguousAttemptCosts()
+    {
+        var model = new ReminderModel(Settings);
+        model.Schedule(new Reminder(1, 0, 0, T(0), null, null));
+        model.Delivered(1, T(0), T(0));
+        var history = HistoryOf((0, OneOff()), (0, Sent(0)),
+            (11, new Trouble(T(41), null, StorageCall.Commit, FaultKind.AppliedThenFail)),
+            (22, new Trouble(T(52), null, StorageCall.Commit, FaultKind.AppliedThenFail)));
+        model.RunTo(T(60));
+        Assert.Empty(Liveness.All.Single(r => r.Name == "RetriedOnTime").Broken(model, history, Settings));
+    }
 }

@@ -13,9 +13,9 @@ public sealed record ModelSettings(int MaxSlippageMs, int AckTimeoutMs, int Back
     public TimeSpan MaxBackoff => TimeSpan.FromMilliseconds(MaxBackoffMs);
 
     /// <summary>
-    /// "Enough time" to get over a storage failure or a missing shard region: the longest waits the
-    /// design documents, added up. An unsent attempt is retried one AckTimeout later, after a backoff
-    /// of at most MaxRetryBackoff; a failed reload is retried after StorageTimeout * 2.
+    /// Test observation window after storage or region trouble: allowance for an ack timeout, retry
+    /// backoff, and a recovery tick. Later faults or stalls extend the window. This is not a production
+    /// wall-clock delivery guarantee (docs: Storage read failure and automatic recovery).
     /// </summary>
     public TimeSpan RecoveryTime => AckTimeout + MaxBackoff + StorageTimeout * 2;
 

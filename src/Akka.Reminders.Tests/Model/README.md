@@ -109,7 +109,7 @@ When the fault layer fails, it prints the operations as C# (`new Tick(9000)`). T
 - **Occurrence**: one due time of a reminder. Its **deadline** is `due + MaxDeliveryWindow`, or the next due time if that is sooner. No window and no interval: no deadline.
 - **Awake**: the scheduler is keeping up. It is awake except during a `Lag`.
 - **Trouble**: a storage call the test made fail or run slow, or a shard region the test took down. A slow call is over when it returns. A failed call or a missing region is over `RecoveryTime` later. A stall or a slow call during that wait starts the wait again when it ends.
-- **RecoveryTime** = `AckTimeout + MaxRetryBackoff + 2 × StorageTimeout`. This is "enough time": an unsent attempt is retried one ack timeout later, after a backoff; a failed reload is retried after `StorageTimeout × 2` (docs: Delivery-state commit lands but reports failure).
+- **RecoveryTime** = `AckTimeout + MaxRetryBackoff + 2 × StorageTimeout`. This is the test's observation allowance for an ack timeout, retry backoff, and a recovery tick. Later faults or stalls extend it. It is not a production wall-clock delivery guarantee (docs: Storage read failure and automatic recovery).
 
 ## First layer: `ReminderSpecs.cs`
 
@@ -128,7 +128,7 @@ The table lives at the top of `ReminderFaultSpecs.cs`; the postconditions are in
 
 | Operation | Precondition | Effect on the model | Postcondition |
 |---|---|---|---|
-| `ScheduleOnce`, `ScheduleRecurring` | none | The new reminder replaces any reminder under the same entity and key. Nothing changes if the shard region is down. | Reply is `Success`, or `ShardRegionNotFound` if the region is down. `Error` only if the save itself failed; then the model stops asking anything of that key. |
+| `ScheduleOnce`, `ScheduleRecurring` | none | The new reminder replaces any reminder under the same entity and key. Nothing changes if the shard region is down. | Reply is `Success`, or `ShardRegionNotFound` if the region is down. `Error` only if the save itself failed. Acceptance is unknown to the caller; if the injected fault is `AppliedThenFail`, the test knows it persisted and requires automatic recovery. Otherwise the model stops asking anything of that key. |
 | `Cancel`, `CancelAll` | none | The reminder ends (all reminders of the entity for `CancelAll`). | Reply is `Success` if there was work left, `NotFound` if not. `Error` only if a storage call failed; then the model stops asking anything of those keys. Not compared after trouble. |
 | `ListReminders` | none | none | Shows exactly the keys that have work left, each with the payload of the live schedule call. `Error` only if the read failed. Not compared after trouble. |
 | `Tick(ms)` | none | Time passes; the scheduler is awake all the way. | Liveness (below). |
@@ -148,13 +148,13 @@ Checked after every operation (`Liveness.cs`).
 
 | Rule | Statement | Source | Code |
 |---|---|---|---|
-| DeliveredOnTime | Every occurrence is delivered at the first moment the scheduler is awake at or after its due time (up to `MaxSlippage` early), unless its deadline has passed by then. | docs: Scheduler tick; Scheduler lag longer than the repeat interval. Rulings: a saved reminder will be picked up; a landed commit is recovered without a restart. | `Liveness.DeliveredOnTime`, `ReminderModel.Require` |
+| DeliveredOnTime | Every occurrence is delivered at the first moment the scheduler is awake at or after its due time (up to `MaxSlippage` early), unless its deadline has passed by then. | docs: Scheduler tick; Scheduler lag longer than the repeat interval; Meaning of a scheduling error; Storage read failure and automatic recovery | `Liveness.DeliveredOnTime`, `ReminderModel.Require` |
 | RetriedOnTime | A delivery that gets no ack within `AckTimeout` is sent again after the backoff, and a nacked one at the time the nack reply gave, while attempts and the deadline allow. | docs: Ack lost or recipient crashes before acking; Negative acknowledgement handler | `Liveness.RetriedOnTime`, `ReminderModel.PhaseOf` |
 
 How trouble loosens them:
 
 - **DeliveredOnTime**: an occurrence that was due during trouble is owed when the trouble is over, not before. It is not owed at all if by then its deadline has passed, the reminder was cancelled, its shard region was down, or `MaxDeliveryAttempts` sends were committed but reported failure (each one counts as an attempt; ruling).
-- **RetriedOnTime**: not checked for an occurrence that saw trouble since its first delivery.
+- **RetriedOnTime**: a retry due during trouble is owed when the recovery observation window ends, extended by later overlapping trouble. A prior read failure never permanently disables this check. Expired occurrences or attempts exhausted by landed-but-failed commits are still excused; a missing region may consume an unobservable attempt budget.
 
 ### Safety rules: what must never happen
 
@@ -178,8 +178,12 @@ One tolerance: when a slow commit ends at the moment of a delivery, the delivery
 
 `ReminderApp` also fails a run if the scheduler does not answer (`SchedulerResponds`) or keeps working while time stands still (`GoesIdle`). `RuleSpecs.cs` tests the rules themselves with a hand-written history that breaks each one.
 
+## Recovery regressions
+
+- A save that landed but answered `Error` must recover eligible persisted work without another client command or a manual restart. `Should_DeliverStoredReminder_When_SaveSucceededButReportedFailure` pins this requirement; generated `AppliedThenFail` schedules also enforce it.
+- A read failure may delay a durable retry or cause an automatic actor restart. `Should_SendTheRetryOnTime_When_OverviewReadsFailAfterAnAckTimeout` requires the retry within the model's healthy recovery observation window, accounting for subsequent trouble; it imposes no fixed deadline from the start of the scenario.
+- `RuleSpecs` verifies that a missing retry fails after recovery, that later failures extend the window, and that exhausted ambiguous attempts do not acquire a new delivery guarantee.
+
 ## Open questions (no ruling; the model takes no side)
 
 - May a new schedule call for a key deliver a due time that the old call already delivered? The model neither asks for nor forbids that delivery.
-- A save that landed but answered `Error`: the reminder is stored and listed but never sent. The model asks nothing after an `Error` reply. Pinned, red: `Should_DeliverStoredReminder_When_SaveSucceededButReportedFailure`.
-- A retry that is late because overview reads failed and the actor restarted. The model allows lateness until trouble is over. Pinned, red: `Should_SendTheRetryOnTime_When_OverviewReadsFailAfterAnAckTimeout`.

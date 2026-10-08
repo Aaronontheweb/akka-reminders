@@ -53,7 +53,8 @@ public sealed class ReminderFaultSpecs(ITestOutputHelper output)
     // operation          | precondition          | effect on the model                  | postcondition (Oracle.cs)
     // -------------------|-----------------------|--------------------------------------|--------------------------------------------
     // ScheduleOnce,      | none                  | replaces the reminder under that key;| reply Success, or ShardRegionNotFound if the
-    //  ScheduleRecurring |                       | nothing if the region is down        | region is down; Error only if the save failed
+    //  ScheduleRecurring |                       | nothing if the region is down        | region is down; Error only if the save failed;
+    //                    |                       | persisted work survives AppliedThenFail | known persisted work recovers automatically
     // Cancel, CancelAll  | none                  | the reminder(s) end                  | Success if work was left, NotFound if not;
     //                    |                       |                                      | Error only if a storage call failed
     // ListReminders      | none                  | none                                 | exactly the keys with work left

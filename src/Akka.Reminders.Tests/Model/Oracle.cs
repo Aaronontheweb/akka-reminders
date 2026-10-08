@@ -84,7 +84,10 @@ public sealed class Oracle(ReminderApp app)
             return;
         if (reply.Reply != ReminderScheduleResponseCode.Error || !FailedDuringOp(StorageCall.Schedule))
             throw Fail("ScheduleReply", $"schedule answered {reply.Reply}; the model expects {(saved ? "Success" : "ShardRegionNotFound")} unless the save itself failed");
-        _model.Doubt(reply.Entity, reply.Key);
+        // The reply alone is uncertain, but an injected AppliedThenFail tells the test that the
+        // save completed before its response was lost. That durable work must recover automatically.
+        if (!_history.Troubles.Any(t => t.Seq > _opStart && t.Call == StorageCall.Schedule && t.Kind == FaultKind.AppliedThenFail))
+            _model.Doubt(reply.Entity, reply.Key);
     }
 
     private void CancelReply(CancelAnswered reply)

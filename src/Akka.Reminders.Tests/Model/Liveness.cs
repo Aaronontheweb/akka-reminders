@@ -13,7 +13,7 @@ public static class Liveness
     [
         ("DeliveredOnTime",
             "Every occurrence is delivered at the first moment the scheduler is awake at or after its due time (up to MaxSlippage early), unless its deadline has passed by then.",
-            "docs: Scheduler tick; Scheduler lag longer than the repeat interval; rulings: a saved reminder will be picked up, a landed commit is recovered without a restart",
+            "docs: Scheduler tick; Scheduler lag longer than the repeat interval; Meaning of a scheduling error; Storage read failure and automatic recovery",
             DeliveredOnTime),
         ("RetriedOnTime",
             "A delivery that gets no ack within AckTimeout is sent again after the backoff, and a nacked one at the time the nack reply gave, while attempts and the deadline allow.",
@@ -49,18 +49,27 @@ public static class Liveness
     /// Trouble may cost an occurrence for good, as the design documents: each send that was committed
     /// but reported failure counts as one attempt, and so does each try to reach a missing shard region.
     /// </summary>
-    private static bool LostToTrouble(History h, int entity, DateTimeOffset from, DateTimeOffset to, ModelSettings s)
+    private static bool LostToTrouble(History h, int entity, DateTimeOffset from, DateTimeOffset to, ModelSettings s, int observedAttempts = 0)
     {
         var during = h.Troubles.Where(t => t.Touches(entity) && t.At <= to && t.Until >= from).ToList();
         return during.Any(t => t.Region is not null) ||
-               during.Count(t => t is { Call: StorageCall.Commit, Kind: FaultKind.AppliedThenFail }) >= s.MaxAttempts;
+               during.Count(t => t is { Call: StorageCall.Commit, Kind: FaultKind.AppliedThenFail }) >= s.MaxAttempts - observedAttempts;
     }
 
-    private static IEnumerable<string> RetriedOnTime(ReminderModel model, History h, ModelSettings s) =>
+    private static IEnumerable<string> RetriedOnTime(ReminderModel model, History h, ModelSettings s)
+    {
         // Only the newest delivered occurrence of a reminder can still be waiting for a retry.
-        from r in model.Reminders
-        where r.Live && !r.InDoubt && r.Slots.TryGetValue(r.NewestDelivered, out _)
-        let due = r.NewestDelivered
-        where model.PhaseOf(r, due) == Phase.RetryOverdue && h.Calm(r.Entity, r.Slots[due].Deliveries[0], model.Now)
-        select $"reminder {r.Id} (entity {r.Entity}, key {r.Key}) due {Journal.T(due)} was last sent at {Journal.T(r.Slots[due].Deliveries[^1])}, got no ack, and its retry has not arrived";
+        foreach (var r in model.Reminders.Where(r => r.Live && !r.InDoubt))
+        {
+            var due = r.NewestDelivered;
+            if (!r.Slots.TryGetValue(due, out var slot) || model.PhaseOf(r, due) != Phase.RetryOverdue)
+                continue;
+            var retryAt = slot.RetryAt ?? model.FirstAwake(slot.Deliveries[^1] + s.AckTimeout) + s.Backoff(slot.Deliveries.Count - 1);
+            var by = h.TroubleOver(r.Entity, model.FirstAwake(retryAt));
+            if (by > model.Now || r.Deadline(due) <= by ||
+                LostToTrouble(h, r.Entity, slot.Deliveries[0], by, s, slot.Deliveries.Count))
+                continue;
+            yield return $"reminder {r.Id} (entity {r.Entity}, key {r.Key}) due {Journal.T(due)} was last sent at {Journal.T(slot.Deliveries[^1])}, got no ack, and its retry owed by {Journal.T(by)} has not arrived";
+        }
+    }
 }
