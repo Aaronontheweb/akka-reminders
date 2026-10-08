@@ -111,5 +111,24 @@
       "storage-fixed.md"
     ],
     "limits": "Short shared-host run with wide error bars; not evidence of equivalence"
+  },
+  "post_review_validation": {
+    "source_revision": "5db864e",
+    "integrated_tests": {
+      "passed": 335,
+      "failed": 0,
+      "skipped": 0,
+      "sql_model_enabled": true,
+      "trx": "/tmp/akka-reminders-implementation-results/adversarial-qualified-integrated-final.trx",
+      "excluded_classes": [
+        "Storage.SqlServerReminderStorageSpecs",
+        "Storage.PostgreSqlReminderStorageSpecs"
+      ]
+    },
+    "adversarial_review": "runtime, storage, model, and benchmark scopes; acknowledgement corrections re-reviewed independently",
+    "checker_tests": 47,
+    "local_model_tests": 68,
+    "runtime_change_since_benchmarks": false,
+    "publication": "Existing PRs #155, #157, #159, #149; remaining merges use squash after maintainer instruction"
   }
 }

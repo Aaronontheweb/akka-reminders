@@ -48,12 +48,13 @@ This benchmark bypasses the scheduler and its conditional recurring mutations. I
 
 ## Validation and boundaries
 
-- 316 integrated tests passed, zero failed or skipped; REMINDERS_CSCHECK_SQL=1 enabled the generated model on all four providers.
+- The initial integrated run passed 316 tests. After adversarial checker corrections, 335 integrated tests passed, zero failed or skipped; REMINDERS_CSCHECK_SQL=1 enabled the generated model on all four providers.
 - Twelve shared conditional-mutation cases passed across InMemory, SQLite, PostgreSQL, and SQL Server. InMemory/SQLite cases overlap with the integrated test run.
 - Solution Release build passed with zero warnings and errors; Slopwatch found zero issues in changed C#.
 - The full per-test-container PostgreSQL/SQL Server storage fixture suites were excluded from the integrated run. The changed SQL paths were checked with focused all-provider mutation tests and generated SQL model scenarios.
 - Deadline/recovery correctness is established by virtual-clock regressions, not by the frozen-clock throughput timings. Consumer processing, acknowledgement throughput, and recovery latency are outside the timed harness.
 - Model ambiguity bounds remain conservative because injected commit failures do not identify affected rows. The oracle may include unrelated batch commits as possible unobserved attempts.
+- Adversarial review corrected lost-acknowledgement safety and batch attribution. Ack faults record submitted identities, never persisted rows or results. Known acceptance forbids redelivery; uncertain acceptance is confined to its occurrence and clears on another delivery or a successful nack. Positive and negative checker histories cover late NotFound, concurrent batches, buffered timing, and retry requirements after uncertainty resolves.
 
 ## Revisions and reproduction
 
@@ -61,4 +62,4 @@ Exact revisions, environment, harness hash, settings, and validation paths are r
 
 Use the runner and instructions in src/Akka.Reminders.Benchmarks/README.md. Raw measured runs are in scheduler-results.jsonl; medians, ranges, and call counts are in scheduler-comparison.csv. Per-run console logs and original test TRX files remain in /tmp/akka-reminders-implementation-benchmarks and /tmp/akka-reminders-implementation-results.
 
-All implementation commits are local on fix/reviewed-scheduler-recovery; PR branches have not been updated by this work.
+The implementation was published through PRs #155, #157, #159 and #149 after adversarial review. The runtime fixes have reached dev; #149 carries the behavior model, final specification clarification and benchmark evidence. The local integration branch fix/reviewed-scheduler-recovery is retained for reproducibility.
