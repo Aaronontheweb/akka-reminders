@@ -112,7 +112,7 @@ FlushBufferedAcks:
   -> Reply to all buffered senders with the result
   -> On success, refresh the ack-timeout schedule from storage
   -> On failure, reply Error to senders; an unapplied write leaves AwaitingAck
-    for timeout recovery, while a write that landed leaves Delivered
+    for timeout recovery, while an accepted acknowledgement remains Delivered
 ```
 
 Buffered acks are also flushed at the start of each `FetchReminders` tick and each `CheckAckTimeouts` tick, ensuring pending acks are committed before new work begins.
@@ -203,7 +203,8 @@ Delivery-state writes now happen **before** user messages are sent.
 
 - All buffered senders receive an `Error` response. As with other storage errors, the write may have landed.
 - If the write did not land, the occurrence stays `AwaitingAck`; `CheckAckTimeouts` re-encounters it and retries after the ack deadline. The consumer may receive a duplicate; idempotency handles this.
-- If the write landed but its reply was lost, the occurrence remains `Delivered` and must not be delivered again unless an explicit new schedule replaces its state.
+- If storage accepted the acknowledgement but its reply was lost, the occurrence remains `Delivered` and must not be delivered again unless an explicit new schedule replaces its state.
+- Reaching the acknowledgement call is not proof of acceptance: an ineligible or superseded occurrence can return `NotFound`. Losing that reply does not turn it into an acknowledged occurrence.
 
 ### Delivery-state commit lands but reports failure
 
