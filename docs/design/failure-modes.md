@@ -1,5 +1,9 @@
 # Reminder Processing: Failure Modes and Design Decisions
 
+This document is the behavioral specification for the reminder scheduler and its behavior model.
+Model assertions must follow the guarantees stated here; a regression test does not establish a new
+guarantee by itself.
+
 ## Delivery Semantics
 
 Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
@@ -42,11 +46,33 @@ There is no explicit recovery step that resets `AwaitingAck` rows back to `Pendi
 
 Schedule and cancel handlers reply to the caller **after** `ReloadPendingOverviewAsync` and `TryScheduleFetchReminders` complete. This guarantees the Ask response is a reliable signal that the fetch timer is registered — callers can depend on the scheduler being ready to process the reminder on the next tick.
 
+If the reminder was stored but the overview reload then fails, the schedule handler still replies `Success`: it arms the fetch timer from the due time of the reminder it just stored, and the next fetch reads a fresh overview. This covers schedule only.
+
+Known limit: a cancel or cancel-all whose overview reload fails still replies `Error`, although the cancel was stored.
+
+### Meaning of a scheduling error
+
+A scheduling `Error` or caller-side timeout means that acceptance is unknown.
+It does not prove that the write was rolled back or that storage was unchanged. A stored reminder may
+therefore be delivered even though the caller received `Error`.
+
+If the scheduling write persisted but reported failure, the scheduler must automatically rediscover
+the persisted work once storage is available again. Recovery must not require another client command
+or a manual restart. The scheduler processes eligible occurrences under the normal deadline,
+retry-budget, and latest-only rules; expired, exhausted, cancelled, or superseded work does not gain
+a new delivery guarantee. If the write did not persist, recovery must not create the reminder.
+
+Repeating a schedule call is a new scheduling operation, not an idempotent replay of acceptance. It can
+replace active work for the same entity and key and reset occurrence state. Consumers must remain
+idempotent if the caller schedules again after an uncertain result.
+
 ## Processing Pipeline
 
 ### Scheduler tick
 
 Each tick is triggered by a `FetchReminders` timer. The timer delay is derived from the pending overview's `TimeUntilNext` value, plus the `MaxSlippage` setting (which causes the scheduler to fetch reminders slightly ahead of their due time to avoid re-scheduling overhead).
+
+`TimeUntilNext` counts from the clock reading the overview was computed against. The scheduler keeps that reading and, when it arms the timer, subtracts the time that has passed since, so slow storage calls in between do not make the next fetch late.
 
 ```text
 Flush buffered ack writes (if any)
@@ -84,15 +110,15 @@ FlushBufferedAcks:
   -> Stale, superseded, expired, or already-acked -> return NotFound
   -> Reply to all buffered senders with the result
   -> On success, refresh the ack-timeout schedule from storage
-  -> On failure, reply Error to senders; the occurrence stays AwaitingAck
-    and will be retried after ack timeout
+  -> On failure, reply Error to senders; an unapplied write leaves AwaitingAck
+    for timeout recovery, while a write that landed leaves Delivered
 ```
 
 Buffered acks are also flushed at the start of each `FetchReminders` tick and each `CheckAckTimeouts` tick, ensuring pending acks are committed before new work begins.
 
 ### Ack-timeout checker
 
-Ack-timeout checking is **event-driven**, not periodic. After delivering reminders, the scheduler computes the earliest ack deadline in the batch and schedules a one-shot `CheckAckTimeouts` timer at exactly that deadline. The timer is replaced if an earlier deadline is found.
+Ack-timeout checking is **event-driven**, not periodic. After each delivery commit (whether it reports success or failure), the scheduler computes the earliest ack deadline in the batch and schedules a one-shot `CheckAckTimeouts` timer at exactly that deadline. The timer is replaced if an earlier deadline is found.
 
 ```text
 CheckAckTimeouts fires:
@@ -105,6 +131,7 @@ CheckAckTimeouts fires:
       -> Otherwise: mark Failed or Expired
   -> Commit mutations via CommitReminderMutationsAsync
   -> Refresh ack-timeout schedule from storage
+  -> If processing failed or changed rows, reload pending overview and arm the fetch timer
 ```
 
 ### Negative acknowledgement handler
@@ -173,16 +200,46 @@ Delivery-state writes now happen **before** user messages are sent.
 
 ### Ack buffer flush fails
 
-- The ack write is dropped. All buffered senders receive an `Error` response.
-- The occurrence stays `AwaitingAck` in storage.
-- When the ack deadline elapses, `CheckAckTimeouts` re-encounters the row and retries delivery.
-- The consumer may receive a duplicate delivery; idempotency handles this.
+- All buffered senders receive an `Error` response. As with other storage errors, the write may have landed.
+- If the write did not land, the occurrence stays `AwaitingAck`; `CheckAckTimeouts` re-encounters it and retries after the ack deadline. The consumer may receive a duplicate; idempotency handles this.
+- If the write landed but its reply was lost, the occurrence remains `Delivered` and must not be delivered again unless an explicit new schedule replaces its state.
+
+### Delivery-state commit lands but reports failure
+
+- A commit can reach the database while the scheduler sees an error (a dropped connection, or `StorageTimeout` firing during `COMMIT`). Storage can report this by returning false or by throwing. The scheduler cannot tell a landed commit from a failed one, so each of the three paths below plans for the landed case.
+- **Delivery commit:** the rows may be `AwaitingAck` with nothing sent. The scheduler arms the ack-timeout check from that chunk's ack deadlines. The normal ack-timeout path then finds and retries the rows. If the commit really failed, the check finds nothing, refreshes from storage and cancels itself, or re-arms at the next real deadline if other rows await an ack.
+- **Ack-timeout commit:** the retries may be `Pending` in storage. The scheduler re-arms the ack-timeout check at `StorageTimeout * 2`. A check that processes rows or encounters a failure reloads the pending overview and arms the fetch timer, so a landed retry is fetched. An empty successful check avoids this overview read.
+- **Negative acknowledgement commit:** the retry may be `Pending` in storage. The scheduler reloads the overview and arms the fetch timer, then still replies `Error`. A commit that throws gets the same handling.
+- If a pending-overview reload fails, the scheduler logs a warning and retains a recovery deadline at `StorageTimeout * 2` through the existing `FetchReminders` timer. Recovery is independent of ack-timeout tracking, so an unrelated acknowledgement cannot cancel it. Successful authoritative pending reads clear that recovery deadline.
+- Costs: a delivery-commit retry goes out one ack timeout late, an unsent attempt counts as one delivery attempt, and with `MaxDeliveryAttempts = 1` the row can end `Failed` without ever being sent. If the database keeps failing, the write circuit limits fetches to one reminder at a time but adds no delay; see "Write circuit breaker".
 
 ### Scheduler restart / singleton handoff
 
 - Awaiting-ack state is stored in the database, not only in memory.
 - On startup, the scheduler loads the next ack deadline from storage as part of `InitResult` and schedules the timeout check before processing any messages.
 - Late acks remain safe because they are matched by `DueTimeUtc`.
+
+### Storage read failure and automatic recovery
+
+The normal recovery path catches a storage failure and schedules another processing or recovery tick.
+Repeated failures must be paced with a finite, nonzero retry delay rather than causing a loop of immediate
+failed reads. If a failure instead causes a supervised actor restart, automatic reinitialization is
+also an acceptable recovery path.
+
+Neither path may strand durable work. Once storage is healthy and the scheduler can process messages,
+it must automatically resume eligible `Pending` occurrences and recover `AwaitingAck` occurrences
+through the normal timeout path. Recovery must not require a new client command or a manual restart.
+Completing unrelated work, such as acknowledging another occurrence, must not suppress recovery of
+work that still needs to be rediscovered after a failed read.
+
+Recovery preserves occurrence identity, attempt counts, retry backoff, and deadlines. It must not
+reset retry budgets, reopen terminal occurrences, or replay a backlog of expired recurring slots.
+The normal expiry and latest-only rules still apply when storage returns.
+
+Storage failures and restarts may delay processing. There is no fixed wall-clock delivery bound during
+these failures. The behavior model must check recovery after a sufficient healthy processing period,
+accounting for further failures or scheduler stalls during that period. Its recovery allowance is a
+test observation window, not a production delivery guarantee.
 
 ### Scheduler lag longer than the repeat interval
 
@@ -195,7 +252,8 @@ a recurring occurrence's deadline before it is delivered.
   slot in the same commit: `due + k * interval`, with `k` the smallest value whose deadline is after now.
 - A lag of many intervals produces one occurrence, not a backlog.
 - Each commit chunk reads the clock once, so a slow earlier chunk cannot make a later one deliver
-  past its deadline.
+  past its deadline according to that chunk's classification time.
+- Deadline eligibility is judged when the chunk prepares its durable mutations, before awaiting the commit. A slow commit response can delay the actual send beyond the deadline; there is no second deadline check after a successful commit. The envelope retains its absolute deadline so consumers can decline stale side effects.
 
 ### Stored payload can no longer be deserialized
 
@@ -224,8 +282,8 @@ row during the fetch, so it cannot block other reminders:
 ### Negative acknowledgement write fails
 
 - The scheduler returns `Error` to the caller.
-- The occurrence remains `AwaitingAck`.
-- The normal ack-timeout path will retry it later.
+- If the write really failed, the occurrence remains `AwaitingAck` and the normal ack-timeout path will retry it later.
+- If the write landed but reported failure (returned false or threw), the retry (or terminal result) is already in storage. The scheduler reloads the overview and arms the fetch timer, so a `Pending` retry is still delivered after its backoff. The caller still sees `Error`.
 
 ### Restart after a negative acknowledgement
 
@@ -251,12 +309,12 @@ Each fetched batch is processed in smaller chunks. This bounds the amount of sta
 
 ### 3. Batched SQL writes
 
-Hot-path writes are batched into single round-trips:
+Hot-path writes use batched statements in one atomic commit:
 
 - **Delivery path**: `CommitReminderMutationsAsync` handles pending upserts (retries + next recurring occurrences), terminal completions, and awaiting-ack transitions in a single call per chunk.
 - **Ack path**: `AcknowledgeRemindersAsync` flushes buffered acks in batches of `AckFlushBatchSize`.
 
-This avoids one round-trip per reminder for the writes in both the delivery and acknowledgement paths. Two cases add a single-row status read per reminder in the delivery path: a recurring occurrence that is sent before its due time (to find a previous occurrence that is still unacked), and a recurring occurrence that is retried (to find its next occurrence).
+This avoids a separate storage operation per reminder for the writes in both the delivery and acknowledgement paths; one commit may execute multiple SQL statements. Two cases add a single-row status read per reminder in the delivery path: a recurring occurrence that is sent before its due time (to find a previous occurrence that is still unacked), and a recurring occurrence that is retried (to find its next occurrence).
 
 ### 4. Pending overview excludes AwaitingAck
 
@@ -270,6 +328,8 @@ Pending-overview queries only count actionable `Pending` rows.
 ### 5. Incremental overview maintenance
 
 The scheduler maintains the `ReminderOverview` incrementally during batch processing by applying each upserted reminder to the in-memory overview. A full storage reload only happens when a fetch or write fails. This avoids an extra query per tick.
+
+Only rows that stay `Pending` are applied. A row the same commit ends (`Failed` or `Expired`) is written with its final attempt count but is not pending work, so it is left out. An empty overview is `TimeUntilNext = TimeSpan.MaxValue`; zero means "due right now" and is never treated as empty.
 
 ### 6. Write circuit breaker
 
