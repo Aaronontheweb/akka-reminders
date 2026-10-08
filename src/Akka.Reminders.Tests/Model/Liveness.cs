@@ -53,11 +53,25 @@ public static class Liveness
     {
         var during = h.Troubles.Where(t => t.Touches(entity) && t.At <= to && t.Until >= from).ToList();
         return during.Any(t => t.Region is not null) ||
-               during.Count(t => t is { Call: StorageCall.Commit, Kind: FaultKind.AppliedThenFail } && t.At >= from) >= s.MaxAttempts - observedAttempts;
+               AmbiguousAttempts(h, entity, from, to) >= s.MaxAttempts - observedAttempts;
     }
+
+    private static int AmbiguousAttempts(History h, int entity, DateTimeOffset from, DateTimeOffset to) =>
+        h.Troubles.Count(t => t.Touches(entity) && t.At >= from && t.At <= to &&
+                             t is { Call: StorageCall.Commit, Kind: FaultKind.AppliedThenFail });
 
     private static DateTimeOffset FirstPossibleAttempt(Reminder r, DateTimeOffset due, ModelSettings s) =>
         r.SavedAt > due - s.MaxSlippage ? r.SavedAt : due - s.MaxSlippage;
+
+    private static DateTimeOffset AfterSlowCalls(History h, int entity, DateTimeOffset at)
+    {
+        // Storage work suspends this scheduler's mailbox. An ack timeout that elapses during a slow
+        // call cannot be noticed until that call returns; the retry backoff starts when it is noticed.
+        while (h.Troubles.Where(t => t.Touches(entity) && t.Kind == FaultKind.Slow && t.At <= at && t.Until > at)
+                   .Select(t => (DateTimeOffset?)t.Until).Max() is { } until)
+            at = until;
+        return at;
+    }
 
     private static IEnumerable<string> RetriedOnTime(ReminderModel model, History h, ModelSettings s)
     {
@@ -67,10 +81,16 @@ public static class Liveness
             var due = r.NewestDelivered;
             if (!r.Slots.TryGetValue(due, out var slot) || model.PhaseOf(r, due) != Phase.RetryOverdue)
                 continue;
-            var retryAt = slot.RetryAt ?? model.FirstAwake(slot.Deliveries[^1] + s.AckTimeout) + s.Backoff(slot.Deliveries.Count - 1);
+            var attemptStart = FirstPossibleAttempt(r, due, s);
+            var possibleUnsent = AmbiguousAttempts(h, r.Entity, attemptStart, model.Now);
+            // The application sees fewer attempts when committed sends report failure. Their exact
+            // count is uncertain, so use the largest backoff consistent with the injected faults.
+            // A nack's promised time is already durable and does not get another backoff after a stall.
+            var retryAt = slot.RetryAt ?? AfterSlowCalls(h, r.Entity, model.FirstAwake(slot.Deliveries[^1] + s.AckTimeout)) +
+                s.Backoff(slot.Deliveries.Count - 1 + possibleUnsent);
             var by = h.TroubleOver(r.Entity, model.FirstAwake(retryAt));
             if (by > model.Now || r.Deadline(due) <= by ||
-                LostToTrouble(h, r.Entity, FirstPossibleAttempt(r, due, s), by, s, slot.Deliveries.Count))
+                LostToTrouble(h, r.Entity, attemptStart, by, s, slot.Deliveries.Count))
                 continue;
             yield return $"reminder {r.Id} (entity {r.Entity}, key {r.Key}) due {Journal.T(due)} was last sent at {Journal.T(slot.Deliveries[^1])}, got no ack, and its retry owed by {Journal.T(by)} has not arrived";
         }

@@ -159,7 +159,7 @@ Checked after every operation (`Liveness.cs`).
 How trouble loosens them:
 
 - **DeliveredOnTime**: an occurrence that was due during trouble is owed when the trouble is over, not before. It is not owed at all if by then its deadline has passed, the reminder was cancelled, its shard region was down, or `MaxDeliveryAttempts` sends were committed but reported failure (each one counts as an attempt; ruling).
-- **RetriedOnTime**: a retry due during trouble is owed when the recovery observation window ends, extended by later overlapping trouble. A prior read failure never permanently disables this check. Expired occurrences or attempts exhausted by landed-but-failed commits are still excused; a missing region may consume an unobservable attempt budget.
+- **RetriedOnTime**: a retry due during trouble is owed when the recovery observation window ends, extended by later overlapping trouble. A slow storage call can prevent the scheduler from noticing an elapsed ack timeout, so timeout backoff starts after that blocking call returns. A nack's already-promised retry time gets no additional backoff. Landed-but-failed commits may have consumed unobserved attempts: the oracle allows the largest capped backoff consistent with those faults, while healthy backoff remains exact. A prior read failure never permanently disables this check. Expired occurrences or exhausted attempts are still excused; a missing region may consume an unobservable attempt budget.
 
 ### Safety rules: what must never happen
 
@@ -187,7 +187,7 @@ One tolerance: when a slow commit ends at the moment of a delivery, the delivery
 
 - A save that landed but answered `Error` must recover eligible persisted work without another client command or a manual restart. `Should_DeliverStoredReminder_When_SaveSucceededButReportedFailure` pins this requirement; generated `AppliedThenFail` schedules also enforce it.
 - A read failure may delay a durable retry or cause an automatic actor restart. `Should_SendTheRetryOnTime_When_OverviewReadsFailAfterAnAckTimeout` requires the retry within the model's healthy recovery observation window, accounting for subsequent trouble; it imposes no fixed deadline from the start of the scenario.
-- `RuleSpecs` verifies that a missing retry fails after recovery, later failures extend the window, and exhausted ambiguous attempts do not acquire a new delivery guarantee. Attempt costs include commits before the first observed delivery, but never before the occurrence could exist. Lost acknowledgement responses preserve their durable outcome.
+- `RuleSpecs` verifies that a missing retry fails after recovery, later failures extend the window, and exhausted ambiguous attempts do not acquire a new delivery guarantee. Attempt costs include commits before the first observed delivery, but never before the occurrence could exist. Lost acknowledgement responses preserve their durable outcome. It also distinguishes delayed timeout detection from an already-promised nack retry and checks both healthy and uncertain attempt backoff.
 
 ## Open questions (no ruling; the model takes no side)
 

@@ -185,4 +185,56 @@ public sealed class RuleSpecs
         else
             oracle.Read();
     }
+
+    [Theory(DisplayName = "Should_AccountForUnobservedAttempts_WithoutLooseningHealthyBackoff")]
+    [InlineData(0, 102)]
+    [InlineData(2, 108)]
+    public void RetryBackoffIncludesPossibleUnsentAttempts(int hiddenAttempts, int owedAt)
+    {
+        var settings = Settings with { AckTimeoutMs = 30000, BackoffBaseMs = 1000, MaxBackoffMs = 10000, MaxAttempts = 10 };
+        var model = new ReminderModel(settings);
+        model.Schedule(new Reminder(1, 0, 0, T(0), null, null));
+        model.Delivered(1, T(0), T(0));
+        model.Delivered(1, T(0), T(70));
+        var events = new List<(double At, Event E)> { (0, OneOff()), (0, Sent(0)) };
+        for (var i = 0; i < hiddenAttempts; i++)
+            events.Add((35 + i, new Trouble(T(40), null, StorageCall.Commit, FaultKind.AppliedThenFail)));
+        events.Add((70, Sent(0)));
+        var history = HistoryOf(events.ToArray());
+        var rule = Liveness.All.Single(r => r.Name == "RetriedOnTime");
+
+        model.RunTo(T(owedAt - 1));
+        Assert.Empty(rule.Broken(model, history, settings));
+        model.RunTo(T(owedAt));
+        Assert.Single(rule.Broken(model, history, settings));
+    }
+
+    [Fact(DisplayName = "Should_StartTimeoutBackoff_When_TheSchedulerCanNoticeTheExpiredAck")]
+    public void SlowStorageDelaysTimeoutDetectionBeforeBackoff()
+    {
+        var model = new ReminderModel(Settings);
+        model.Schedule(new Reminder(1, 0, 0, T(0), null, null));
+        model.Delivered(1, T(0), T(0));
+        var history = HistoryOf((0, OneOff()), (0, Sent(0)),
+            (0, new Trouble(T(20), null, StorageCall.Cancel, FaultKind.Slow)));
+        var rule = Liveness.All.Single(r => r.Name == "RetriedOnTime");
+
+        model.RunTo(T(20)); // the ack expired at 10 s, but its timeout pass could not run
+        Assert.Empty(rule.Broken(model, history, Settings));
+        model.RunTo(T(21)); // noticed at 20 s, then 1 s backoff
+        Assert.Single(rule.Broken(model, history, Settings));
+    }
+
+    [Fact(DisplayName = "Should_NotRestartPromisedNackBackoff_AfterASlowStorageCall")]
+    public void SlowStorageDoesNotAddBackoffToAnAlreadyPendingRetry()
+    {
+        var model = new ReminderModel(Settings);
+        model.Schedule(new Reminder(1, 0, 0, T(0), null, null));
+        model.Delivered(1, T(0), T(0));
+        Assert.Equal(T(1), model.Nack(0, 0, T(0)).RetryAt);
+        var history = HistoryOf((0, OneOff()), (0, Sent(0)),
+            (0, new Trouble(T(20), null, StorageCall.Cancel, FaultKind.Slow)));
+        model.RunTo(T(20));
+        Assert.Single(Liveness.All.Single(r => r.Name == "RetriedOnTime").Broken(model, history, Settings));
+    }
 }
