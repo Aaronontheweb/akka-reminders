@@ -43,6 +43,16 @@ internal sealed class FailableReminderStorage : IReminderStorage
     public bool ApplyNextCommitThenThrow { get; set; }
 
     /// <summary>
+    /// The next scheduling write lands, but its result is Error rather than Success.
+    /// </summary>
+    public bool ApplyNextScheduleThenReportFailure { get; set; }
+
+    /// <summary>
+    /// The next scheduling write lands and then throws a timeout.
+    /// </summary>
+    public bool ApplyNextScheduleThenThrow { get; set; }
+
+    /// <summary>
     /// When true, the next overview read throws (once).
     /// </summary>
     public bool FailNextOverviewRead { get; set; }
@@ -87,7 +97,23 @@ internal sealed class FailableReminderStorage : IReminderStorage
     {
         if (FailWrites || FailScheduleWrites)
             throw new TimeoutException("Simulated database write timeout");
+        if (ApplyNextScheduleThenReportFailure || ApplyNextScheduleThenThrow)
+        {
+            var throws = ApplyNextScheduleThenThrow;
+            ApplyNextScheduleThenReportFailure = ApplyNextScheduleThenThrow = false;
+            return ApplyScheduleThenFailAsync(reminder, throws, ct);
+        }
         return _inner.ScheduleReminderAsync(reminder, ct);
+    }
+
+    private async Task<ReminderProtocol.ReminderScheduled> ApplyScheduleThenFailAsync(
+        ScheduledReminder reminder, bool throws, CancellationToken ct)
+    {
+        await _inner.ScheduleReminderAsync(reminder, ct);
+        if (throws)
+            throw new TimeoutException("Simulated scheduling timeout after the write landed");
+        return new ReminderProtocol.ReminderScheduled(reminder.ToScheduleReminder(),
+            ReminderScheduleResponseCode.Error, "Simulated scheduling error after the write landed");
     }
 
     public Task<bool> UpsertReminderOccurrencesAsync(IEnumerable<ScheduledReminder> reminders, CancellationToken ct = default)
