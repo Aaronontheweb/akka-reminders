@@ -55,22 +55,14 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             """;
     }
 
-    public string GetBatchUpsertRemindersSql(string schemaName, string tableName, int count)
+    public string GetBatchUpsertRemindersSql(string schemaName, string tableName, int count, bool insertIfAbsent = false)
     {
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
         var values = string.Join(",\n                ",
             Enumerable.Range(0, count).Select(i =>
                 $"(@ShardRegionName{i}, @EntityId{i}, @ReminderKey{i}, @WhenUtc{i}, @DueTimeUtc{i}, @RepeatIntervalTicks{i}, @SerializerId{i}, @Manifest{i}, @Payload{i}, @AttemptCount{i}, @LastFailureReason{i}, @MaxDeliveryWindowTicks{i}, @DeliveryDeadlineUtc{i}, FALSE, NULL, 'Pending', NULL, NULL)"));
 
-        return $"""
-            INSERT INTO {fullTableName}
-                (shard_region_name, entity_id, reminder_key, when_utc, due_time_utc, repeat_interval_ticks,
-                 serializer_id, manifest, payload, attempt_count, last_failure_reason,
-                 max_delivery_window_ticks, delivery_deadline_utc,
-                 is_completed, completed_at_utc, completion_status, delivered_at_utc, ack_deadline_utc)
-            VALUES
-                {values}
-            ON CONFLICT (shard_region_name, entity_id, reminder_key, due_time_utc)
+        var onConflict = insertIfAbsent ? "DO NOTHING" : """
             DO UPDATE SET
                 when_utc = EXCLUDED.when_utc,
                 repeat_interval_ticks = EXCLUDED.repeat_interval_ticks,
@@ -85,7 +77,19 @@ internal sealed class PostgreSqlDialect : ISqlDialect
                 completed_at_utc = NULL,
                 completion_status = 'Pending',
                 delivered_at_utc = NULL,
-                ack_deadline_utc = NULL;
+                ack_deadline_utc = NULL
+            """;
+
+        return $"""
+            INSERT INTO {fullTableName}
+                (shard_region_name, entity_id, reminder_key, when_utc, due_time_utc, repeat_interval_ticks,
+                 serializer_id, manifest, payload, attempt_count, last_failure_reason,
+                 max_delivery_window_ticks, delivery_deadline_utc,
+                 is_completed, completed_at_utc, completion_status, delivered_at_utc, ack_deadline_utc)
+            VALUES
+                {values}
+            ON CONFLICT (shard_region_name, entity_id, reminder_key, due_time_utc)
+            {onConflict};
             """;
     }
 
@@ -110,7 +114,7 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             """;
     }
 
-    public string GetBatchMarkCompletedSql(string schemaName, string tableName, int count)
+    public string GetBatchMarkCompletedSql(string schemaName, string tableName, int count, bool activeOnly = false)
     {
         var fullTableName = $"\"{schemaName}\".\"{tableName}\"";
         var values = string.Join(",\n                ",
@@ -130,7 +134,8 @@ internal sealed class PostgreSqlDialect : ISqlDialect
             WHERE t.shard_region_name = v.shard_region_name
               AND t.entity_id = v.entity_id
               AND t.reminder_key = v.reminder_key
-              AND t.due_time_utc = v.due_time_utc;
+              AND t.due_time_utc = v.due_time_utc
+              {(activeOnly ? "AND t.completion_status IN ('Pending', 'AwaitingAck')" : "")};
             """;
     }
 
