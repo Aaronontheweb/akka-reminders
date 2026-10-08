@@ -171,8 +171,8 @@ public sealed class History(List<Event> all)
     public List<Trouble> Troubles { get; } = all.OfType<Trouble>().ToList();
 
     /// <summary>Everything the application did and saw, one line each, with the virtual time.</summary>
-    public string Timeline() => "What the application saw:\n" +
-        string.Join("\n", all.Where(e => e is not (Done or Trouble)).Select(e => $"  {Journal.T(e.At),7}  {e}"));
+    public string Timeline(int last = int.MaxValue) => "What the application saw:\n" +
+        string.Join("\n", all.Where(e => e is not (Done or Trouble)).TakeLast(last).Select(e => $"  {Journal.T(e.At),7}  {e}"));
 
     /// <summary>The schedule call whose payload a delivery carries, or null.</summary>
     public Scheduled? Call(int id) => _calls.GetValueOrDefault(id);

@@ -45,7 +45,7 @@ Bug #150 on the scheduler as of commit `27bbaf1`: a recurring reminder that is n
    dotnet build src/Akka.Reminders.Tests -c Release
    ```
 
-2. Run the first layer with a large iteration count. CsCheck finds a failure in the first hundred lists; the rest of the count is its shrinking. About 10 s on an 8-core machine.
+2. Run the first layer with a large iteration count. CsCheck finds a failure in the first hundred lists; the rest of the count is its shrinking. 10 to 20 s on an 8-core machine.
 
    ```bash
    CsCheck_Iter=1000000 dotnet test src/Akka.Reminders.Tests -c Release --no-build --filter "FullyQualifiedName~Model.ReminderSpecs"

@@ -110,7 +110,9 @@ public sealed class ReminderApp
     {
         var late = _unanswered.Where(d => entity is null || d.Entity == entity).GroupBy(d => (d.Entity, d.Key, d.Due)).Select(g => g.Last()).ToList();
         _unanswered.RemoveAll(d => entity is null || d.Entity == entity);
-        await Task.WhenAll(late.Select(AckAsync));
+        // In batches: a long-silent entity can owe thousands of acks, and each ask has a real-time limit.
+        foreach (var batch in late.Chunk(200))
+            await Task.WhenAll(batch.Select(AckAsync));
     });
 
     /// <summary>From now on this entity acks at once, nacks at once, or stays silent.</summary>
@@ -314,7 +316,7 @@ public sealed class ReminderApp
         catch (AskTimeoutException ex)
         {
             _signals.Stuck = true;
-            throw new ModelViolation($"SchedulerResponds: no answer within {AskTimeout.TotalSeconds}s of real time: {ex.Message}");
+            throw new ModelViolation($"SchedulerResponds: no answer to {message.GetType().Name} within {AskTimeout.TotalSeconds}s of real time, at {Journal.T(Clock.Now)}: {ex.Message}\n{Journal.Read().Timeline(15)}");
         }
     }
 
