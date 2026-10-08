@@ -2,6 +2,40 @@ using Akka.Reminders.Storage;
 
 namespace Akka.Reminders.Tests.Model;
 
+/// <summary>Storage calls a fault can target.</summary>
+public enum StorageCall
+{
+    Schedule,
+    Commit,
+    Cancel,
+    CancelAll,
+    List,
+    Overview,
+    Fetch,
+    Expire,
+    TimedOutAcks,
+    GetAwaitingAck,
+    Status,
+    NextAckDeadline,
+    Ack,
+    Cleanup,
+}
+
+public enum FaultKind
+{
+    /// <summary>The call fails before touching storage (a commit returns false, other calls throw).</summary>
+    Fail,
+
+    /// <summary>The call takes some virtual time, then succeeds.</summary>
+    Slow,
+
+    /// <summary>The call takes <c>StorageTimeout</c> of virtual time, then throws without touching storage.</summary>
+    Timeout,
+
+    /// <summary>The write reaches storage, then the call reports failure (the caller cannot tell it worked).</summary>
+    AppliedThenFail,
+}
+
 /// <summary>
 /// Wraps a real <see cref="IReminderStorage"/> and injects the faults a scenario asks for. Each fault
 /// that fires is written to the <see cref="Journal"/> as <see cref="Trouble"/>. Slow calls move the
@@ -28,10 +62,10 @@ public sealed class FaultyRecordingStorage : IReminderStorage
         _recovery = recovery;
     }
 
-    public void AddFault(InjectFault fault)
+    public void AddFault(StorageCall call, FaultKind kind, int count, TimeSpan delay, bool fireTimersWhileSlow)
     {
         lock (_faults)
-            _faults.Add((fault.Call, fault.Kind, fault.Count, TimeSpan.FromMilliseconds(fault.DelayMs), fault.FireTimersWhileSlow));
+            _faults.Add((call, kind, count, delay, fireTimersWhileSlow));
     }
 
     public void ClearFaults()

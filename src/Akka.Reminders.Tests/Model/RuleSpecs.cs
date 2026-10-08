@@ -20,7 +20,7 @@ public sealed class RuleSpecs
     private static Scheduled Recurring(int id = 1) => new(id, 0, 0, T(0), TimeSpan.FromSeconds(5), null, ReminderScheduleResponseCode.Success);
     private static Scheduled OneOff(TimeSpan? window = null) => new(1, 0, 0, T(0), null, window, ReminderScheduleResponseCode.Success);
     private static Delivered Sent(double due, int id = 1, double? envelopeDeadline = null) => new(id, 0, 0, T(due), T(envelopeDeadline ?? due + 1));
-    private static AckAnswered Ack(double due, long asked) => new(asked, 0, 0, T(due), ReminderAckResponseCode.Success);
+    private static AckAnswered Ack(double due, long asked) => new(asked, 1, 0, 0, T(due), ReminderAckResponseCode.Success);
 
     public static TheoryData<string, History> BrokenHistories() => new()
     {
@@ -36,7 +36,7 @@ public sealed class RuleSpecs
         { "LateAckIsNotFound", HistoryOf((0, Recurring()), (0, Sent(0)), (4, Sent(5)), (4, Ack(0, asked: 3))) },
         { "NoRepeatWithoutCause", HistoryOf((0, OneOff()), (0, Sent(0)), (2, Sent(0))) },
         { "NoRepeatWithoutCause", HistoryOf((0, OneOff()), (0, Sent(0)),
-            (0, new NackAnswered(2, 0, 0, T(0), ReminderNackResponseCode.RetryScheduled, T(4))), (2, Sent(0))) },
+            (0, new NackAnswered(2, 1, 0, 0, T(0), ReminderNackResponseCode.RetryScheduled, T(4))), (2, Sent(0))) },
         { "ListShowsNothingCancelled", HistoryOf((0, OneOff()), (1, new CancelAnswered(0, null, ReminderCancelResponseCode.Success)),
             (2, new Listed(0, FetchRemindersResponseCode.Success, [(0, 1, T(0))]))) },
     };
@@ -49,7 +49,7 @@ public sealed class RuleSpecs
     [Fact(DisplayName = "Should_ReportNothing_When_TheHistoryIsClean")]
     public void CleanHistoryBreaksNoRule()
     {
-        var nack = new NackAnswered(5, 0, 0, T(5), ReminderNackResponseCode.RetryScheduled, T(6));
+        var nack = new NackAnswered(5, 1, 0, 0, T(5), ReminderNackResponseCode.RetryScheduled, T(6));
         var history = HistoryOf((0, Recurring()), (0, Sent(0)), (0, Ack(0, asked: 2)), (4, Sent(5)), (4, nack), (6, Sent(5)),
             (7, new Listed(0, FetchRemindersResponseCode.Success, [(0, 1, T(10))])));
         Assert.All(SafetyRules.All, rule => Assert.Empty(rule.Broken(history, Settings)));

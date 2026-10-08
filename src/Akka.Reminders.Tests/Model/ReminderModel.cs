@@ -69,7 +69,8 @@ public sealed class ReminderModel(ModelSettings settings)
     private readonly List<(DateTimeOffset From, DateTimeOffset To)> _awake = [(VirtualClock.Origin, VirtualClock.Origin)];
 
     public List<Reminder> Reminders { get; } = []; // every schedule call that may have been saved, oldest first
-    public bool[] RegionUp { get; } = Enumerable.Repeat(true, ModelGen.Regions).ToArray();
+    public List<(Reminder Reminder, DateTimeOffset Due)> Owed { get; } = []; // first deliveries not yet checked off (Liveness)
+    public bool[] RegionUp { get; } = Enumerable.Repeat(true, ReminderApp.Regions).ToArray();
     public DateTimeOffset Now => _awake[^1].To;
 
     public Reminder? Live(int entity, int key) => Reminders.LastOrDefault(r => r.Entity == entity && r.Key == key && r.Live);
@@ -100,13 +101,23 @@ public sealed class ReminderModel(ModelSettings settings)
             Require(r, to, to);
     }
 
-    /// <summary>Marks the occurrences that must be delivered while the scheduler is awake from..to.</summary>
-    private static void Require(Reminder r, DateTimeOffset from, DateTimeOffset to)
+    /// <summary>
+    /// Marks the occurrences that must be delivered while the scheduler is awake from..to.
+    /// Example, every 10 s from 10:00:00, no delivery window, so each occurrence lives 10 s:
+    ///   Tick, awake 10:00:05..10:00:25 -> 10:00:10 is owed at 10:00:10 and 10:00:20 at 10:00:20.
+    ///   Lag, awake again only at 10:00:25 -> 10:00:10 is dead (its deadline 10:00:20 has passed),
+    ///   10:00:20 is owed at 10:00:25, and nothing is owed for 10:00:30 yet.
+    /// </summary>
+    private void Require(Reminder r, DateTimeOffset from, DateTimeOffset to)
     {
         // An occurrence whose deadline is at or before `from` is dead: missed slots are skipped, not replayed.
         var dead = r.Life == TimeSpan.MaxValue ? DateTimeOffset.MinValue : from - r.Life;
         foreach (var due in r.DueIn(r.CoveredTo > dead ? r.CoveredTo : dead, to))
+        {
             r.Slot(due).RequiredAt = due > from ? due : from;
+            Owed.Add((r, due));
+        }
+
         r.CoveredTo = to;
     }
 
@@ -115,7 +126,7 @@ public sealed class ReminderModel(ModelSettings settings)
     /// <summary>Returns false when the shard region is down: the call is refused and nothing changes.</summary>
     public bool Schedule(Reminder r)
     {
-        if (!RegionUp[ModelGen.RegionOf(r.Entity)])
+        if (!RegionUp[ReminderApp.RegionOf(r.Entity)])
             return false;
         Cancel(r.Entity, r.Key);
         r.SavedAt = Now;
@@ -192,7 +203,17 @@ public sealed class ReminderModel(ModelSettings settings)
 
     // ---- questions ----
 
-    /// <summary>Where one occurrence stands now, worked out from its deliveries and the answers they got.</summary>
+    /// <summary>
+    /// Where one occurrence stands now, worked out from its deliveries and the answers they got.
+    /// Example, a one-off with AckTimeout 10 s, backoff 1 s, then 2 s, MaxDeliveryAttempts 3, never acked:
+    ///   delivered 10:00:00           -> AwaitingAck until 10:00:10
+    ///   10:00:10, no ack             -> RetryPending: the retry is due 10:00:11 (10 s + 1 s backoff)
+    ///   10:00:11, nothing arrived    -> RetryOverdue (Liveness reports it)
+    ///   delivered 10:00:11           -> AwaitingAck until 10:00:21, then retry due 10:00:23 (2 s backoff)
+    ///   delivered 10:00:23 (third)   -> AwaitingAck until 10:00:33, then Done: no attempts left
+    /// An ack while AwaitingAck makes it Done at once. So does a newer occurrence being delivered,
+    /// a passed deadline, or a cancel.
+    /// </summary>
     public Phase PhaseOf(Reminder r, DateTimeOffset due)
     {
         var slot = r.Slot(due);

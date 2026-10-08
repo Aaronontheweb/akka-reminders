@@ -35,7 +35,7 @@ public static class SafetyRules
             "README: List Reminders", ListShowsNothingCancelled),
     ];
 
-    private static string Show(Delivered d) => $"delivery of e{d.Entity}/k{d.Key} due {Journal.T(d.Due)} (call m{d.Id}) at {Journal.T(d.At)}";
+    private static string Show(Delivered d) => $"reminder {d.Id} (entity {d.Entity}, key {d.Key}) due {Journal.T(d.Due)}, delivered at {Journal.T(d.At)},";
 
     private static IEnumerable<string> OnlyWhatWasScheduled(History h, ModelSettings s) =>
         from d in h.Deliveries
@@ -111,7 +111,7 @@ public static class SafetyRules
             var before = byKey[(ack.Entity, ack.Key)].Where(d => d.Seq <= ack.Asked).ToList();
             var calls = before.Where(d => d.Due == ack.Due).Select(d => d.Id).Distinct().ToList();
             if (calls.Count > 0 && calls.All(id => before.Any(d => d.Id == id && d.Due > ack.Due)))
-                yield return $"ack of e{ack.Entity}/k{ack.Key} due {Journal.T(ack.Due)} succeeded at {Journal.T(ack.At)} after a newer occurrence was delivered";
+                yield return $"ack of reminder {ack.Id} (entity {ack.Entity}, key {ack.Key}) due {Journal.T(ack.Due)} succeeded at {Journal.T(ack.At)} after a newer occurrence was delivered";
         }
     }
 
@@ -136,5 +136,5 @@ public static class SafetyRules
         from item in list.Items
         let call = h.Call(item.Id)
         where call is null || h.EndOf(call) is { } end && end.Seq < list.Seq
-        select $"list of e{list.Entity} at {Journal.T(list.At)} shows k{item.Key} due {Journal.T(item.Due)} (call m{item.Id}), which was cancelled or replaced";
+        select $"list of entity {list.Entity} at {Journal.T(list.At)} shows reminder {item.Id} (key {item.Key}, due {Journal.T(item.Due)}), which was cancelled or replaced";
 }

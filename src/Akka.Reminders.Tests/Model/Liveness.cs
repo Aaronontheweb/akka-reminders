@@ -23,23 +23,26 @@ public static class Liveness
 
     private static IEnumerable<string> DeliveredOnTime(ReminderModel model, History h, ModelSettings s)
     {
-        foreach (var r in model.Reminders.Where(r => !r.InDoubt))
+        var late = new List<string>();
+        // Each owed delivery is judged once, when it falls due, and then taken off the list.
+        model.Owed.RemoveAll(owed =>
         {
-            foreach (var (due, slot) in r.Slots)
-            {
-                if (slot.RequiredAt is not { } at)
-                    continue;
-                var by = h.TroubleOver(r.Entity, at);
-                if (by > model.Now || (slot.Deliveries.Count > 0 && slot.Deliveries[0] <= by))
-                    continue;
-                if (by > at && (r.EndedAt <= by || r.Deadline(due) <= by || LostToTrouble(h, r.Entity, at - s.MaxSlippage, by, s)))
-                    continue;
-                if (model.OlderCallDelivered(r, due))
-                    continue; // not ruled: may a new schedule call deliver a due time the old one already delivered?
-                yield return $"e{r.Entity}/k{r.Key} due {Journal.T(due)} (call m{r.Id}) was owed by {Journal.T(by)} and " +
-                             (slot.Deliveries.Count == 0 ? "has not arrived" : $"arrived at {Journal.T(slot.Deliveries[0])}");
-            }
-        }
+            var (r, due) = owed;
+            var slot = r.Slots[due];
+            var at = slot.RequiredAt!.Value;
+            var by = h.TroubleOver(r.Entity, at);
+            if (by > model.Now)
+                return false; // not owed yet
+            var arrived = slot.Deliveries.Count > 0 && slot.Deliveries[0] <= by;
+            var excused = r.InDoubt ||
+                          (by > at && (r.EndedAt <= by || r.Deadline(due) <= by || LostToTrouble(h, r.Entity, at - s.MaxSlippage, by, s))) ||
+                          model.OlderCallDelivered(r, due); // not ruled: may a new schedule call deliver a due time the old one already delivered?
+            if (!arrived && !excused)
+                late.Add($"reminder {r.Id} (entity {r.Entity}, key {r.Key}) due {Journal.T(due)} was owed by {Journal.T(by)} and " +
+                         (slot.Deliveries.Count == 0 ? "has not arrived" : $"arrived at {Journal.T(slot.Deliveries[0])}"));
+            return true;
+        });
+        return late;
     }
 
     /// <summary>
@@ -54,9 +57,10 @@ public static class Liveness
     }
 
     private static IEnumerable<string> RetriedOnTime(ReminderModel model, History h, ModelSettings s) =>
+        // Only the newest delivered occurrence of a reminder can still be waiting for a retry.
         from r in model.Reminders
-        where r.Live && !r.InDoubt
-        from due in r.Slots.Where(x => x.Value.Deliveries.Count > 0).Select(x => x.Key).ToList()
+        where r.Live && !r.InDoubt && r.Slots.TryGetValue(r.NewestDelivered, out _)
+        let due = r.NewestDelivered
         where model.PhaseOf(r, due) == Phase.RetryOverdue && h.Calm(r.Entity, r.Slots[due].Deliveries[0], model.Now)
-        select $"e{r.Entity}/k{r.Key} due {Journal.T(due)} (call m{r.Id}) was last sent at {Journal.T(r.Slots[due].Deliveries[^1])}, got no ack, and its retry has not arrived";
+        select $"reminder {r.Id} (entity {r.Entity}, key {r.Key}) due {Journal.T(due)} was last sent at {Journal.T(r.Slots[due].Deliveries[^1])}, got no ack, and its retry has not arrived";
 }

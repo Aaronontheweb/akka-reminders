@@ -12,7 +12,7 @@ public abstract record Event
 
     public sealed override string ToString() => Text;
 
-    protected static string Name(int entity, int? key) => key is null ? $"e{entity}" : $"e{entity}/k{key}";
+    protected static string Name(int entity, int? key) => key is null ? $"entity {entity}" : $"entity {entity}, key {key}";
 }
 
 /// <summary>A schedule call and its reply. <c>Id</c> is the payload, so deliveries can be traced to the call.</summary>
@@ -22,7 +22,7 @@ public sealed record Scheduled(int Id, int Entity, int Key, DateTimeOffset First
     public Reminder Definition { get; } = new(Id, Entity, Key, FirstDue, Interval, Window);
 
     protected override string Text =>
-        $"schedule m{Id} {Name(Entity, Key)} first due {Journal.T(FirstDue)} every {Interval?.TotalMilliseconds.ToString() ?? "-"}ms window {Window?.TotalMilliseconds.ToString() ?? "-"}ms -> {Reply}";
+        $"schedule reminder {Id}: {Name(Entity, Key)}, first due {Journal.T(FirstDue)}{(Interval is { } i ? $", every {i.TotalSeconds}s" : "")}{(Window is { } w ? $", window {w.TotalSeconds}s" : "")} -> {Reply}";
 }
 
 /// <summary>A cancel call and its reply. <c>Key</c> is null for cancel-all.</summary>
@@ -34,23 +34,23 @@ public sealed record CancelAnswered(int Entity, int? Key, ReminderCancelResponse
 /// <summary>A reminder message that reached the application.</summary>
 public sealed record Delivered(int Id, int Entity, int Key, DateTimeOffset Due, DateTimeOffset EnvelopeDeadline) : Event
 {
-    protected override string Text => $"delivered m{Id} {Name(Entity, Key)} due {Journal.T(Due)} (envelope deadline {Journal.T(EnvelopeDeadline)})";
+    protected override string Text => $"reminder {Id} delivered: {Name(Entity, Key)}, due {Journal.T(Due)}";
 }
 
-/// <summary>An ack and its reply. <c>Asked</c> is the journal position when the ack was sent.</summary>
-public sealed record AckAnswered(long Asked, int Entity, int Key, DateTimeOffset Due, ReminderAckResponseCode Reply) : Event
+/// <summary>An ack and its reply. <c>Asked</c> is the journal position when the ack was sent; <c>Id</c> is the delivery it answers.</summary>
+public sealed record AckAnswered(long Asked, int Id, int Entity, int Key, DateTimeOffset Due, ReminderAckResponseCode Reply) : Event
 {
-    protected override string Text => $"ack {Name(Entity, Key)} due {Journal.T(Due)} -> {Reply}";
+    protected override string Text => $"ack reminder {Id} due {Journal.T(Due)} -> {Reply}";
 }
 
-public sealed record NackAnswered(long Asked, int Entity, int Key, DateTimeOffset Due, ReminderNackResponseCode Reply, DateTimeOffset? RetryAt) : Event
+public sealed record NackAnswered(long Asked, int Id, int Entity, int Key, DateTimeOffset Due, ReminderNackResponseCode Reply, DateTimeOffset? RetryAt) : Event
 {
-    protected override string Text => $"nack {Name(Entity, Key)} due {Journal.T(Due)} -> {Reply}, retry {Journal.T(RetryAt)}";
+    protected override string Text => $"nack reminder {Id} due {Journal.T(Due)} -> {Reply}, retry {Journal.T(RetryAt)}";
 }
 
 public sealed record Listed(int Entity, FetchRemindersResponseCode Reply, IReadOnlyList<(int Key, int Id, DateTimeOffset Due)> Items) : Event
 {
-    protected override string Text => $"list e{Entity} -> {Reply}: {string.Join(", ", Items.Select(i => $"k{i.Key} m{i.Id} due {Journal.T(i.Due)}"))}";
+    protected override string Text => $"list entity {Entity} -> {Reply}: {string.Join("; ", Items.Select(i => $"reminder {i.Id} key {i.Key} due {Journal.T(i.Due)}"))}";
 }
 
 /// <summary>
@@ -61,14 +61,32 @@ public sealed record Trouble(DateTimeOffset Until, int? Region, StorageCall? Cal
 {
     public DateTimeOffset Until { get; set; } = Until;
 
-    public bool Touches(int entity) => Region is null || Region == ModelGen.RegionOf(entity);
+    public bool Touches(int entity) => Region is null || Region == ReminderApp.RegionOf(entity);
 
     protected override string Text => (Region is { } r ? $"region {r} down" : Call is null ? "stall during trouble" : $"storage {Call} {Kind}") +
                                       $": trouble until {Journal.T(Until)}";
 }
 
+/// <summary>The scheduler was stalled until now (a Lag).</summary>
+public sealed record Lagged : Event
+{
+    protected override string Text => "the scheduler was stalled until now";
+}
+
+/// <summary>A shard region went down or came back.</summary>
+public sealed record RegionSet(int Region, bool Up) : Event
+{
+    protected override string Text => $"region {Region} is {(Up ? "up" : "down")}";
+}
+
+/// <summary>One operation is over and the scheduler is idle.</summary>
+public sealed record Done : Event
+{
+    protected override string Text => "(idle)";
+}
+
 /// <summary>The ordered list of events of one run. Thread-safe; the rules read a <see cref="History"/> of it.</summary>
-public sealed class Journal(VirtualClock clock)
+public sealed class Journal(Func<DateTimeOffset> now)
 {
     private readonly List<Event> _events = [];
     private readonly List<Delivered> _deliveries = [];
@@ -79,7 +97,7 @@ public sealed class Journal(VirtualClock clock)
         lock (_events)
         {
             e.Seq = ++_seq;
-            e.At = clock.Now;
+            e.At = now();
             _events.Add(e);
             if (e is Delivered d)
                 _deliveries.Add(d);
@@ -113,7 +131,7 @@ public sealed class Journal(VirtualClock clock)
     public void RegionUp(int region, TimeSpan recovery)
     {
         foreach (var t in Read().Troubles.Where(t => t.Region == region && t.Until == DateTimeOffset.MaxValue))
-            t.Until = clock.Now + recovery;
+            t.Until = now() + recovery;
     }
 
     /// <summary>
@@ -122,9 +140,10 @@ public sealed class Journal(VirtualClock clock)
     /// </summary>
     public void Stalled(TimeSpan stallPlusRecovery)
     {
-        var now = clock.Now;
-        foreach (var t in Read().Troubles.Where(t => t.Kind != FaultKind.Slow && t.At <= now && t.Until >= now && t.Until != DateTimeOffset.MaxValue))
-            Add(new Trouble(now + stallPlusRecovery, t.Region, null, null));
+        var at = now();
+        var recovering = Read().Troubles.Where(t => t.Kind != FaultKind.Slow && t.At <= at && t.Until >= at && t.Until != DateTimeOffset.MaxValue);
+        foreach (var region in recovering.Select(t => t.Region).Distinct().ToList())
+            Add(new Trouble(at + stallPlusRecovery, region, null, null));
     }
 
     public static string Payload(int id) => "m" + id;
@@ -133,7 +152,7 @@ public sealed class Journal(VirtualClock clock)
 
     public static string T(DateTimeOffset t) => t == DateTimeOffset.MaxValue
         ? "never"
-        : "+" + (t - VirtualClock.Origin).TotalMilliseconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "ms";
+        : (t - VirtualClock.Origin).TotalSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "s";
 
     public static string T(DateTimeOffset? t) => t is null ? "none" : T(t.Value);
 }
@@ -150,6 +169,10 @@ public sealed class History(List<Event> all)
     public List<NackAnswered> Nacks { get; } = all.OfType<NackAnswered>().ToList();
     public List<Listed> Lists { get; } = all.OfType<Listed>().ToList();
     public List<Trouble> Troubles { get; } = all.OfType<Trouble>().ToList();
+
+    /// <summary>Everything the application did and saw, one line each, with the virtual time.</summary>
+    public string Timeline() => "What the application saw:\n" +
+        string.Join("\n", all.Where(e => e is not (Done or Trouble)).Select(e => $"  {Journal.T(e.At),7}  {e}"));
 
     /// <summary>The schedule call whose payload a delivery carries, or null.</summary>
     public Scheduled? Call(int id) => _calls.GetValueOrDefault(id);
@@ -209,4 +232,7 @@ public sealed class HarnessSignals
     public int FailedCalls { get; set; }
 
     public int Crashes { get; set; }
+
+    /// <summary>The scheduler stopped answering; its actor system is not reused.</summary>
+    public bool Stuck { get; set; }
 }

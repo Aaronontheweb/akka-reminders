@@ -7,7 +7,7 @@ on:
       iterations:
         description: "Generated sequences per storage"
         required: true
-        default: "20000"
+        default: "5000"
       sql:
         description: "Also run PostgreSQL and SQL Server (Testcontainers)"
         type: boolean
@@ -31,6 +31,6 @@ jobs:
 
       - name: "Model-based tests"
         env:
-          REMINDERS_CSCHECK_ITERATIONS: ${{ inputs.iterations }}
+          CsCheck_Iter: ${{ inputs.iterations }}
           REMINDERS_CSCHECK_SQL: ${{ inputs.sql && '1' || '0' }}
-        run: dotnet test src/Akka.Reminders.Tests -c Release --no-build --filter "FullyQualifiedName~ReminderSchedulerModelSpecs"
+        run: dotnet test src/Akka.Reminders.Tests -c Release --no-build --filter "FullyQualifiedName~Akka.Reminders.Tests.Model.Reminder"

@@ -49,7 +49,7 @@ public sealed class ModelHost : IAsyncDisposable
 /// </summary>
 public sealed class RecordingShardRegionResolver(Journal journal, HarnessSignals signals) : IShardRegionResolver
 {
-    private readonly bool[] _present = Enumerable.Repeat(true, ModelGen.Regions).ToArray();
+    private readonly bool[] _present = Enumerable.Repeat(true, ReminderApp.Regions).ToArray();
 
     public void SetPresent(int region, bool present)
     {
@@ -60,13 +60,13 @@ public sealed class RecordingShardRegionResolver(Journal journal, HarnessSignals
     public IActorRef? TryResolve(ReminderEntity entity)
     {
         lock (_present)
-            return _present[ModelGen.RegionOf(ModelGen.IndexOf(entity))] ? ActorRefs.Nobody : null;
+            return _present[ReminderApp.RegionOf(ReminderApp.IndexOf(entity))] ? ActorRefs.Nobody : null;
     }
 
     public void DeliverReminder(ReminderEntity entity, ReminderEnvelope envelope, IActorRef? sender = null)
     {
         signals.Touch();
-        journal.Add(new Delivered(Journal.IdOf(envelope.Message), ModelGen.IndexOf(entity), ModelGen.IndexOf(envelope.Key),
+        journal.Add(new Delivered(Journal.IdOf(envelope.Message), ReminderApp.IndexOf(entity), ReminderApp.IndexOf(envelope.Key),
             envelope.DueTimeUtc, envelope.Deadline.UtcDateTime));
     }
 }
