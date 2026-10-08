@@ -22,7 +22,18 @@ public sealed class ReminderSpecs(ITestOutputHelper output)
     /// <summary>What we scheduled, and so what must arrive.</summary>
     private sealed class Model
     {
-        public sealed record Reminder(int Id, int Entity, int Key, DateTimeOffset FirstDue, TimeSpan? Every);
+        public sealed record Reminder(int Id, int Entity, int Key, DateTimeOffset FirstDue, TimeSpan? Every)
+        {
+            /// <summary>When it is due: once for a one-off, then again every interval for a recurring one.</summary>
+            public IEnumerable<DateTimeOffset> DueTimes()
+            {
+                yield return FirstDue;
+                if (Every is not { } every)
+                    yield break;
+                for (var due = FirstDue + every; ; due += every)
+                    yield return due;
+            }
+        }
 
         private int _lastId;
 
@@ -41,18 +52,12 @@ public sealed class ReminderSpecs(ITestOutputHelper output)
         /// <summary>Time passes. Every occurrence of a live reminder that comes due must arrive.</summary>
         public void Tick(TimeSpan by)
         {
+            var until = Now + by;
             foreach (var r in Live)
-            {
-                for (var due = r.FirstDue; due <= Now + by; due += r.Every!.Value)
-                {
-                    if (due > Now)
-                        MustArrive.Add((r.Id, due));
-                    if (r.Every is null)
-                        break; // a one-off has one occurrence
-                }
-            }
+                foreach (var due in r.DueTimes().TakeWhile(due => due <= until).Where(due => due > Now))
+                    MustArrive.Add((r.Id, due));
 
-            Now += by;
+            Now = until;
         }
     }
 
@@ -74,27 +79,27 @@ public sealed class ReminderSpecs(ITestOutputHelper output)
     //   model:         remember the reminder (it replaces any reminder under the same key)
     //   postcondition: the reply is Success
     private static readonly GenOperationAsync<ReminderApp, Model> ScheduleOnce = Operation(
-        Gen.Select(Entity, Key, Seconds),
-        x => $"ScheduleOnce(entity {x.Item1}, key {x.Item2}, due in {x.Item3}s)",
-        async (app, x) => Assert.Equal(ReminderScheduleResponseCode.Success, await app.ScheduleOnce(x.Item1, x.Item2, S(x.Item3))),
-        (model, x) => model.Schedule(x.Item1, x.Item2, S(x.Item3), null));
+        Gen.Select(Entity, Key, Seconds, (entity, key, dueIn) => (entity, key, dueIn)),
+        a => $"ScheduleOnce(entity {a.entity}, key {a.key}, due in {a.dueIn}s)",
+        async (app, a) => Assert.Equal(ReminderScheduleResponseCode.Success, await app.ScheduleOnce(a.entity, a.key, S(a.dueIn))),
+        (model, a) => model.Schedule(a.entity, a.key, S(a.dueIn), null));
 
     // ScheduleRecurring: the same, with an interval.
     private static readonly GenOperationAsync<ReminderApp, Model> ScheduleRecurring = Operation(
-        Gen.Select(Entity, Key, Seconds, Interval),
-        x => $"ScheduleRecurring(entity {x.Item1}, key {x.Item2}, first due in {x.Item3}s, every {x.Item4}s)",
-        async (app, x) => Assert.Equal(ReminderScheduleResponseCode.Success, await app.ScheduleRecurring(x.Item1, x.Item2, S(x.Item3), S(x.Item4))),
-        (model, x) => model.Schedule(x.Item1, x.Item2, S(x.Item3), S(x.Item4)));
+        Gen.Select(Entity, Key, Seconds, Interval, (entity, key, dueIn, every) => (entity, key, dueIn, every)),
+        a => $"ScheduleRecurring(entity {a.entity}, key {a.key}, first due in {a.dueIn}s, every {a.every}s)",
+        async (app, a) => Assert.Equal(ReminderScheduleResponseCode.Success, await app.ScheduleRecurring(a.entity, a.key, S(a.dueIn), S(a.every))),
+        (model, a) => model.Schedule(a.entity, a.key, S(a.dueIn), S(a.every)));
 
     // Cancel
     //   precondition:  none (cancelling nothing is allowed)
     //   model:         forget the reminder
     //   postcondition: nothing of it arrives afterwards (check 3 below)
     private static readonly GenOperationAsync<ReminderApp, Model> Cancel = Operation(
-        Gen.Select(Entity, Key),
-        x => $"Cancel(entity {x.Item1}, key {x.Item2})",
-        (app, x) => app.Cancel(x.Item1, x.Item2),
-        (model, x) => model.Cancel(x.Item1, x.Item2));
+        Gen.Select(Entity, Key, (entity, key) => (entity, key)),
+        a => $"Cancel(entity {a.entity}, key {a.key})",
+        (app, a) => app.Cancel(a.entity, a.key),
+        (model, a) => model.Cancel(a.entity, a.key));
 
     // Tick: time passes.
     //   precondition:  none
