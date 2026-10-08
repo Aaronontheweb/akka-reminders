@@ -108,8 +108,8 @@ FlushBufferedAcks:
   -> Stale, superseded, expired, or already-acked -> return NotFound
   -> Reply to all buffered senders with the result
   -> On success, refresh the ack-timeout schedule from storage
-  -> On failure, reply Error to senders; the occurrence stays AwaitingAck
-    and will be retried after ack timeout
+  -> On failure, reply Error to senders; an unapplied write leaves AwaitingAck
+    for timeout recovery, while a write that landed leaves Delivered
 ```
 
 Buffered acks are also flushed at the start of each `FetchReminders` tick and each `CheckAckTimeouts` tick, ensuring pending acks are committed before new work begins.
@@ -129,7 +129,7 @@ CheckAckTimeouts fires:
       -> Otherwise: mark Failed or Expired
   -> Commit mutations via CommitReminderMutationsAsync
   -> Refresh ack-timeout schedule from storage
-  -> Reload pending overview and arm the fetch timer
+  -> If processing failed or changed rows, reload pending overview and arm the fetch timer
 ```
 
 ### Negative acknowledgement handler
@@ -198,18 +198,17 @@ Delivery-state writes now happen **before** user messages are sent.
 
 ### Ack buffer flush fails
 
-- The ack write is dropped. All buffered senders receive an `Error` response.
-- The occurrence stays `AwaitingAck` in storage.
-- When the ack deadline elapses, `CheckAckTimeouts` re-encounters the row and retries delivery.
-- The consumer may receive a duplicate delivery; idempotency handles this.
+- All buffered senders receive an `Error` response. As with other storage errors, the write may have landed.
+- If the write did not land, the occurrence stays `AwaitingAck`; `CheckAckTimeouts` re-encounters it and retries after the ack deadline. The consumer may receive a duplicate; idempotency handles this.
+- If the write landed but its reply was lost, the occurrence remains `Delivered` and must not be delivered again unless an explicit new schedule replaces its state.
 
 ### Delivery-state commit lands but reports failure
 
 - A commit can reach the database while the scheduler sees an error (a dropped connection, or `StorageTimeout` firing during `COMMIT`). Storage can report this by returning false or by throwing. The scheduler cannot tell a landed commit from a failed one, so each of the three paths below plans for the landed case.
 - **Delivery commit:** the rows may be `AwaitingAck` with nothing sent. The scheduler arms the ack-timeout check from that chunk's ack deadlines. The normal ack-timeout path then finds and retries the rows. If the commit really failed, the check finds nothing, refreshes from storage and cancels itself, or re-arms at the next real deadline if other rows await an ack.
-- **Ack-timeout commit:** the retries may be `Pending` in storage. The scheduler re-arms the ack-timeout check at `StorageTimeout * 2`. Every check also reloads the pending overview and arms the fetch timer, so a landed retry is fetched.
+- **Ack-timeout commit:** the retries may be `Pending` in storage. The scheduler re-arms the ack-timeout check at `StorageTimeout * 2`. A check that processes rows or encounters a failure reloads the pending overview and arms the fetch timer, so a landed retry is fetched. An empty successful check avoids this overview read.
 - **Negative acknowledgement commit:** the retry may be `Pending` in storage. The scheduler reloads the overview and arms the fetch timer, then still replies `Error`. A commit that throws gets the same handling.
-- If a reload fails, the scheduler logs a warning and arms an ack-timeout check at `StorageTimeout * 2`; that check reloads again.
+- If a pending-overview reload fails, the scheduler logs a warning and retains a recovery deadline at `StorageTimeout * 2` through the existing `FetchReminders` timer. Recovery is independent of ack-timeout tracking, so an unrelated acknowledgement cannot cancel it. Successful authoritative pending reads clear that recovery deadline.
 - Costs: a delivery-commit retry goes out one ack timeout late, an unsent attempt counts as one delivery attempt, and with `MaxDeliveryAttempts = 1` the row can end `Failed` without ever being sent. If the database keeps failing, the write circuit limits fetches to one reminder at a time but adds no delay; see "Write circuit breaker".
 
 ### Scheduler restart / singleton handoff
@@ -251,7 +250,8 @@ a recurring occurrence's deadline before it is delivered.
   slot in the same commit: `due + k * interval`, with `k` the smallest value whose deadline is after now.
 - A lag of many intervals produces one occurrence, not a backlog.
 - Each commit chunk reads the clock once, so a slow earlier chunk cannot make a later one deliver
-  past its deadline.
+  past its deadline according to that chunk's classification time.
+- Deadline eligibility is judged when the chunk prepares its durable mutations, before awaiting the commit. A slow commit response can delay the actual send beyond the deadline; there is no second deadline check after a successful commit. The envelope retains its absolute deadline so consumers can decline stale side effects.
 
 ### Stored payload can no longer be deserialized
 
@@ -307,12 +307,12 @@ Each fetched batch is processed in smaller chunks. This bounds the amount of sta
 
 ### 3. Batched SQL writes
 
-Hot-path writes are batched into single round-trips:
+Hot-path writes use batched statements in one atomic commit:
 
 - **Delivery path**: `CommitReminderMutationsAsync` handles pending upserts (retries + next recurring occurrences), terminal completions, and awaiting-ack transitions in a single call per chunk.
 - **Ack path**: `AcknowledgeRemindersAsync` flushes buffered acks in batches of `AckFlushBatchSize`.
 
-This avoids one round-trip per reminder in both the delivery and acknowledgement paths.
+This avoids a separate storage operation per reminder in both the delivery and acknowledgement paths; one commit may execute multiple SQL statements.
 
 ### 4. Pending overview excludes AwaitingAck
 
