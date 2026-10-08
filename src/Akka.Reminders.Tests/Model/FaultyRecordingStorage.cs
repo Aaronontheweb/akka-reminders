@@ -109,7 +109,8 @@ public sealed class FaultyRecordingStorage : IConditionalReminderMutationStorage
     /// Runs a storage call with the fault (if any) queued for it. <paramref name="failResult"/> is what a
     /// failed call returns instead of throwing (a commit reports failure by returning false).
     /// </summary>
-    private async Task<T> Run<T>(StorageCall call, Func<Task<T>> body, Func<T>? failResult = null)
+    private async Task<T> Run<T>(StorageCall call, Func<Task<T>> body, Func<T>? failResult = null,
+        IReadOnlyList<ReminderAcknowledgement>? ackTargets = null)
     {
         _signals.Touch();
         var fault = TakeFault(call);
@@ -125,7 +126,7 @@ public sealed class FaultyRecordingStorage : IConditionalReminderMutationStorage
             };
             if (f.Kind == FaultKind.Slow)
                 _journal.Stalled(f.Delay + _recovery);
-            _journal.Add(new Trouble(until, null, call, f.Kind));
+            _journal.Add(new Trouble(until, null, call, f.Kind) { AckTargets = ackTargets ?? [] });
 
             switch (f.Kind)
             {
@@ -242,6 +243,6 @@ public sealed class FaultyRecordingStorage : IConditionalReminderMutationStorage
         CancellationToken ct = default)
     {
         var list = acknowledgements.ToList();
-        return Run(StorageCall.Ack, () => _inner.AcknowledgeRemindersAsync(list, ct));
+        return Run(StorageCall.Ack, () => _inner.AcknowledgeRemindersAsync(list, ct), ackTargets: list);
     }
 }

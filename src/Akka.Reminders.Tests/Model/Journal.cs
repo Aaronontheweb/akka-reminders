@@ -61,6 +61,9 @@ public sealed record Trouble(DateTimeOffset Until, int? Region, StorageCall? Cal
 {
     public DateTimeOffset Until { get; set; } = Until;
 
+    /// <summary>Ack inputs targeted by this injected fault, never storage results or persisted rows.</summary>
+    public IReadOnlyList<ReminderAcknowledgement> AckTargets { get; init; } = [];
+
     public bool Touches(int entity) => Region is null || Region == ReminderApp.RegionOf(entity);
 
     protected override string Text => (Region is { } r ? $"region {r} down" : Call is null ? "stall during trouble" : $"storage {Call} {Kind}") +
@@ -200,6 +203,41 @@ public sealed class History(List<Event> all)
     /// <summary>True if one of these storage calls failed (slow does not count) after event <paramref name="seq"/>.</summary>
     public bool Failed(long seq, params StorageCall[] calls) =>
         Troubles.Any(t => t.Seq > seq && t.Kind is not (null or FaultKind.Slow) && calls.Contains(t.Call!.Value));
+
+    /// <summary>A landed ack call targeting this occurrence; its storage result may still be NotFound.</summary>
+    public Trouble? AppliedAcknowledgement(AckAnswered ack) => Troubles.LastOrDefault(t =>
+        t.Seq > ack.Asked && t.Seq < ack.Seq &&
+        t is { Call: StorageCall.Ack, Kind: FaultKind.AppliedThenFail } &&
+        t.AckTargets.Any(a => a.Entity == ReminderApp.EntityOf(ack.Entity) &&
+                             a.Key == ReminderApp.KeyOf(ack.Key) && a.DueTimeUtc == ack.Due));
+
+    /// <summary>Whether observations establish that a targeted landed ack call was still eligible.</summary>
+    public bool KnownLandedAcknowledgement(ModelSettings s, AckAnswered ack)
+    {
+        var fault = AppliedAcknowledgement(ack);
+        var delivery = Deliveries.LastOrDefault(d => d.Seq <= ack.Asked &&
+            d.Entity == ack.Entity && d.Key == ack.Key && d.Due == ack.Due);
+        if (fault is null || delivery is null || Call(delivery.Id) is not { } call)
+            return false;
+
+        // Reaching the ack call can return NotFound. Only infer acceptance when independent
+        // observations still establish AwaitingAck, before timeout/deadline and without trouble
+        // or an intervening operation that could have changed this occurrence's state.
+        if (fault.At >= CommittedAt(delivery.At) + s.AckTimeout || fault.At >= call.Definition.Deadline(ack.Due))
+            return false;
+        if (Troubles.Any(t => t.Seq > delivery.Seq && t.Seq < fault.Seq && t.Touches(ack.Entity)) ||
+            Nacks.Any(n => n.Seq > delivery.Seq && n.Seq < fault.Seq &&
+                          n.Entity == ack.Entity && n.Key == ack.Key && n.Due == ack.Due) ||
+            Deliveries.Any(d => d.Seq > delivery.Seq && d.Seq < fault.Seq &&
+                               d.Id == delivery.Id && d.Due > ack.Due) ||
+            Calls.Any(c => c.Seq > delivery.Seq && c.Seq < fault.Seq &&
+                          c.Entity == ack.Entity && c.Key == ack.Key) ||
+            All.OfType<CancelAnswered>().Any(c => c.Seq > delivery.Seq && c.Seq < fault.Seq &&
+                                                  c.Entity == ack.Entity && (c.Key is null || c.Key == ack.Key)) ||
+            EndOf(call) is { } end && end.Seq < fault.Seq)
+            return false;
+        return true;
+    }
 
     /// <summary>
     /// Deadlines are judged when the send is committed. If a slow commit ended at <paramref name="at"/>,

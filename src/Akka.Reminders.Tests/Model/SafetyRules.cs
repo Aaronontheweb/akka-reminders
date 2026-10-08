@@ -69,9 +69,7 @@ public static class SafetyRules
     {
         var byOccurrence = h.Deliveries.ToLookup(d => (d.Entity, d.Key, d.Due));
         foreach (var ack in h.Acks.Where(a => a.Reply == ReminderAckResponseCode.Success ||
-                     a.Reply == ReminderAckResponseCode.Error && h.Troubles.Any(t =>
-                         t.Seq > a.Asked && t.Seq < a.Seq &&
-                         t is { Call: StorageCall.Ack, Kind: FaultKind.AppliedThenFail })))
+                     a.Reply == ReminderAckResponseCode.Error && h.KnownLandedAcknowledgement(s, a)))
         {
             var deliveries = byOccurrence[(ack.Entity, ack.Key, ack.Due)].ToList();
             var acked = deliveries.Where(d => d.Seq <= ack.Asked).Select(d => d.Id).ToHashSet();

@@ -136,11 +136,37 @@ public sealed class Oracle(ReminderApp app)
         var acked = reply.Reply == ReminderAckResponseCode.Success;
         if (sure && (acked != expected || reply.Reply == ReminderAckResponseCode.Error))
             throw Fail("AckReply", $"ack of reminder {reply.Id} (entity {reply.Entity}, key {reply.Key}) due {Journal.T(reply.Due)} answered {reply.Reply}; the model expects {(expected ? "Success" : "NotFound")}");
-        // After trouble the reply decides: the model follows what the application was told.
-        // A persisted ack whose response was lost is still terminal. The injected fault is
-        // independent evidence that the write completed; an ordinary failed ack remains uncertain.
-        if (acked != expected && !(expected && AppliedDuringOp(StorageCall.Ack)) && _model.Live(reply.Entity, reply.Key) is { } r)
-            r.Slot(reply.Due).Acked = acked;
+        if (_model.Live(reply.Entity, reply.Key) is not { } r)
+            return;
+        var slot = r.Slot(reply.Due);
+        if (acked)
+            slot.MaybeAcked = false;
+        else if (reply.Reply == ReminderAckResponseCode.Error && _history.AppliedAcknowledgement(reply) is { } fault)
+        {
+            if (_history.KnownLandedAcknowledgement(app.Settings, reply))
+            {
+                slot.Acked = true;
+                slot.MaybeAcked = false;
+                return;
+            }
+
+            var delivery = _history.Deliveries.LastOrDefault(d => d.Seq <= reply.Asked &&
+                d.Entity == reply.Entity && d.Key == reply.Key && d.Due == reply.Due);
+            var earlierTrouble = delivery is not null && _history.Troubles.Any(t =>
+                t.Seq > delivery.Seq && t.Seq < fault.Seq && t.Touches(reply.Entity));
+            var bufferedEarlier = fault.AckTargets.Any(a => a.Entity == ReminderApp.EntityOf(reply.Entity) &&
+                a.Key == ReminderApp.KeyOf(reply.Key) && a.DueTimeUtc == reply.Due && a.AckedAt < fault.At);
+            if ((expected || !slot.Acked) && (expected || earlierTrouble || bufferedEarlier))
+            {
+                // A landed call can have returned either Success or NotFound. Keep that ambiguity
+                // on this occurrence, without claiming terminal state or requiring another send.
+                slot.Acked = false;
+                slot.MaybeAcked = true;
+                return;
+            }
+        }
+        if (acked != expected)
+            slot.Acked = acked;
     }
 
     private void NackReply(NackAnswered reply)
@@ -148,6 +174,8 @@ public sealed class Oracle(ReminderApp app)
         var sure = Sure(reply.Entity, reply.Key, reply.Due);
         var expected = _model.Nack(reply.Entity, reply.Key, reply.Due);
         var live = _model.Live(reply.Entity, reply.Key);
+        if (live is not null && reply.Reply is ReminderNackResponseCode.RetryScheduled or ReminderNackResponseCode.Failed or ReminderNackResponseCode.Expired)
+            live.Slot(reply.Due).MaybeAcked = false;
         // Cleanup of an occurrence past its deadline is best effort: such a nack may say Expired or NotFound.
         var pastDeadline = expected.Code == ReminderNackResponseCode.NotFound && reply.Reply == ReminderNackResponseCode.Expired &&
                            live?.Deadline(reply.Due) <= _model.Now;

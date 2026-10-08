@@ -17,6 +17,7 @@ public sealed class Slot
     public DateTimeOffset? RequiredAt { get; set; } // the first delivery must arrive by then; null = not required
     public DateTimeOffset? RetryAt { get; set; }    // retry time promised by the reply to a nack
     public bool Acked { get; set; }
+    public bool MaybeAcked { get; set; }           // a targeted landed ack call had uncertain eligibility
     public bool NackEndedIt { get; set; }           // a nack answered Failed or Expired
 }
 
@@ -174,6 +175,7 @@ public sealed class ReminderModel(ModelSettings settings)
         if (Reminders.FirstOrDefault(x => x.Id == id) is not { } r)
             return;
         r.Slot(due).Deliveries.Add(at);
+        r.Slot(due).MaybeAcked = false; // observing another delivery resolves acceptance uncertainty
         r.Slot(due).RetryAt = null;
         if (due > r.NewestDelivered)
             r.NewestDelivered = due;

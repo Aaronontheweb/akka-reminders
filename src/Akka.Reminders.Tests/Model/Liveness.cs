@@ -79,7 +79,7 @@ public static class Liveness
         foreach (var r in model.Reminders.Where(r => r.Live && !r.InDoubt))
         {
             var due = r.NewestDelivered;
-            if (!r.Slots.TryGetValue(due, out var slot) || model.PhaseOf(r, due) != Phase.RetryOverdue)
+            if (!r.Slots.TryGetValue(due, out var slot) || slot.MaybeAcked || model.PhaseOf(r, due) != Phase.RetryOverdue)
                 continue;
             var attemptStart = FirstPossibleAttempt(r, due, s);
             var possibleUnsent = AmbiguousAttempts(h, r.Entity, attemptStart, model.Now);

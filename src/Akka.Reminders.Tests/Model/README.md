@@ -142,11 +142,18 @@ The table lives at the top of `ReminderFaultSpecs.cs`; the postconditions are in
 
 An occurrence is **awaiting an ack** when it was delivered, less than `AckTimeout` ago, it is not yet acked or nacked, its deadline has not passed, no newer occurrence of the same reminder was delivered, and the reminder was not cancelled or replaced (`ReminderModel.PhaseOf`).
 
-An acknowledgement can also persist before its response is lost. For an injected `Ack` `AppliedThenFail`,
-the model retains the expected durable acknowledgement even though the caller receives `Error`; it does
-not demand another delivery of that terminal occurrence, and the independent safety rule rejects a
-later delivery from the same registration. Explicit re-registration can reopen the same due time.
-An ack that failed before persistence still
+An acknowledgement can also persist before its response is lost. Injected ack faults record their submitted
+identities, so overlapping error replies cannot borrow another flush batch's landed write. For an
+exactly targeted `Ack` `AppliedThenFail`, the model retains a durable acknowledgement and the independent
+safety rule rejects a later delivery from the same registration when observations establish eligibility:
+before its timeout and occurrence deadline, without intervening trouble, nack, replacement or supersession.
+Reaching storage alone is insufficient: a late ack can return `NotFound` and leave a pending retry unchanged.
+If earlier trouble makes acceptance unknowable, only that occurrence is marked `MaybeAcked`. Either another
+delivery or silence is permitted; an observed delivery clears the ambiguity and restores its normal retry
+obligation. A successful nack also resolves the uncertainty. This does not put the key or future recurring
+occurrences in doubt. Independently ineligible acks after healthy timeout processing retain the retry obligation;
+an input buffered before that timeout retains acceptance uncertainty when its later flush reports failure.
+Explicit re-registration can reopen the same due time. An ack that failed before persistence still
 requires timeout recovery. This distinction uses the injected fault, not storage rows or scheduler state.
 
 ### Liveness: what must have arrived
@@ -191,6 +198,10 @@ One tolerance: when a slow commit ends at the moment of a delivery, the delivery
 - A read failure may delay a durable retry or cause an automatic actor restart. `Should_SendTheRetryOnTime_When_OverviewReadsFailAfterAnAckTimeout` requires the retry within the model's healthy recovery observation window, accounting for subsequent trouble; it imposes no fixed deadline from the start of the scenario.
 - `RuleSpecs` verifies that a missing retry fails after recovery, later failures extend the window, and exhausted ambiguous attempts do not acquire a new delivery guarantee. Attempt costs include commits before the first observed delivery, but never before the occurrence could exist. Lost acknowledgement responses preserve their durable outcome. It also distinguishes delayed timeout detection from an already-promised nack retry and checks both healthy and uncertain attempt backoff.
 
-## Open questions (no ruling; the model takes no side)
+## Explicit re-registration
 
-- May a new schedule call for a key deliver a due time that the old call already delivered? The model neither asks for nor forbids that delivery.
+A new schedule call replaces active work for the same entity and key and can reset occurrence state,
+including reopening an identity delivered by an earlier registration (docs: Meaning of a scheduling error).
+The model permits delivery of the same due time under the new registration; expired, exhausted or
+otherwise obsolete occurrences do not acquire an additional delivery obligation merely because an old
+registration delivered them.
