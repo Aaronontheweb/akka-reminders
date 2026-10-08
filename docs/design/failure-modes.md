@@ -275,6 +275,8 @@ Pending-overview queries only count actionable `Pending` rows.
 
 The scheduler maintains the `ReminderOverview` incrementally during batch processing by applying each upserted reminder to the in-memory overview. A full storage reload only happens when a fetch or write fails. This avoids an extra query per tick.
 
+Only rows that stay `Pending` are applied. A row the same commit ends (`Failed` or `Expired`) is written with its final attempt count but is not pending work, so it is left out. An empty overview is `TimeUntilNext = TimeSpan.MaxValue`; zero means "due right now" and is never treated as empty.
+
 ### 6. Write circuit breaker
 
 When any hot-path write fails (in either `ProcessReminders` or `ProcessAckTimeouts`):
