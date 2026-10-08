@@ -14,13 +14,11 @@ Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
 
 Recurring reminders are modeled as a stream of occurrences.
 
-- The next occurrence is persisted, in the same commit, the first time the current occurrence is processed: when it is delivered, when it is put back for a retry because its shard region is missing, or when it ends without delivery (expired or failed).
+- The next occurrence is persisted, in the same commit, when the current occurrence is delivered or ends without delivery (expired, or failed because its shard region is missing).
 - The next occurrence is the earliest slot whose deadline has not passed. Missed slots are skipped, not replayed.
 - Each occurrence starts with a new retry budget.
 - Each occurrence has its own absolute UTC deadline.
-- By default, a recurring occurrence expires when the next occurrence is delivered or becomes due, whichever is first. There is at most one live occurrence per recurring reminder: when the next one is sent early (inside `MaxSlippage`) while the previous one is still unacked, the previous one is marked `Expired` in the same commit.
-- The next occurrence is written once. A retry of an occurrence looks up its next slot and, when a row is there, leaves it alone whatever state it is in. If that lookup fails, the retry writes the next occurrence anyway: a possible duplicate, never a lost series. After the first failed lookup a fetch pass does no more lookups, so an outage costs one storage timeout per pass, not one per reminder.
-- If the row a retry finds on its next slot is already finished (`Cancelled`, `Delivered`, `Expired` or `Failed`), the retry logs a warning and writes nothing. Such a row can be a leftover from an older registration of the same key; in that case the series ends there.
+- By default, a recurring occurrence expires when the next occurrence becomes due.
 - If `MaxDeliveryWindow` is configured, the effective deadline is `min(due + window, next due)`.
 - A late ack for an old occurrence is a harmless `NotFound` because the ack is matched by `DueTimeUtc`.
 
@@ -42,15 +40,11 @@ There is no explicit recovery step that resets `AwaitingAck` rows back to `Pendi
 
 Schedule and cancel handlers reply to the caller **after** `ReloadPendingOverviewAsync` and `TryScheduleFetchReminders` complete. This guarantees the Ask response is a reliable signal that the fetch timer is registered — callers can depend on the scheduler being ready to process the reminder on the next tick.
 
-If the reminder was stored but the overview reload then fails, the schedule handler still replies `Success`: it arms the fetch timer from the due time of the reminder it just stored, and the next fetch reads a fresh overview.
-
 ## Processing Pipeline
 
 ### Scheduler tick
 
 Each tick is triggered by a `FetchReminders` timer. The timer delay is derived from the pending overview's `TimeUntilNext` value, plus the `MaxSlippage` setting (which causes the scheduler to fetch reminders slightly ahead of their due time to avoid re-scheduling overhead).
-
-`TimeUntilNext` counts from the clock reading the overview was computed against. The scheduler keeps that reading and, when it arms the timer, subtracts the time that has passed since, so slow storage calls in between do not make the next fetch late.
 
 ```text
 Flush buffered ack writes (if any)
@@ -96,7 +90,7 @@ Buffered acks are also flushed at the start of each `FetchReminders` tick and ea
 
 ### Ack-timeout checker
 
-Ack-timeout checking is **event-driven**, not periodic. After each delivery commit (whether it reports success or failure), the scheduler computes the earliest ack deadline in the batch and schedules a one-shot `CheckAckTimeouts` timer at exactly that deadline. The timer is replaced if an earlier deadline is found.
+Ack-timeout checking is **event-driven**, not periodic. After delivering reminders, the scheduler computes the earliest ack deadline in the batch and schedules a one-shot `CheckAckTimeouts` timer at exactly that deadline. The timer is replaced if an earlier deadline is found.
 
 ```text
 CheckAckTimeouts fires:
@@ -109,7 +103,6 @@ CheckAckTimeouts fires:
       -> Otherwise: mark Failed or Expired
   -> Commit mutations via CommitReminderMutationsAsync
   -> Refresh ack-timeout schedule from storage
-  -> Reload pending overview and arm the fetch timer
 ```
 
 ### Negative acknowledgement handler
@@ -183,15 +176,6 @@ Delivery-state writes now happen **before** user messages are sent.
 - When the ack deadline elapses, `CheckAckTimeouts` re-encounters the row and retries delivery.
 - The consumer may receive a duplicate delivery; idempotency handles this.
 
-### Delivery-state commit lands but reports failure
-
-- A commit can reach the database while the scheduler sees an error (a dropped connection, or `StorageTimeout` firing during `COMMIT`). Storage can report this by returning false or by throwing. The scheduler cannot tell a landed commit from a failed one, so each of the three paths below plans for the landed case.
-- **Delivery commit:** the rows may be `AwaitingAck` with nothing sent. The scheduler arms the ack-timeout check from that chunk's ack deadlines. The normal ack-timeout path then finds and retries the rows. If the commit really failed, the check finds nothing, refreshes from storage and cancels itself, or re-arms at the next real deadline if other rows await an ack.
-- **Ack-timeout commit:** the retries may be `Pending` in storage. The scheduler re-arms the ack-timeout check at `StorageTimeout * 2`. Every check also reloads the pending overview and arms the fetch timer, so a landed retry is fetched.
-- **Negative acknowledgement commit:** the retry may be `Pending` in storage. The scheduler reloads the overview and arms the fetch timer, then still replies `Error`. A commit that throws gets the same handling.
-- If a reload fails, the scheduler logs a warning and arms an ack-timeout check at `StorageTimeout * 2`; that check reloads again.
-- Costs: a delivery-commit retry goes out one ack timeout late, an unsent attempt counts as one delivery attempt, and with `MaxDeliveryAttempts = 1` the row can end `Failed` without ever being sent. If the database keeps failing, the write circuit limits fetches to one reminder at a time but adds no delay; see "Write circuit breaker".
-
 ### Scheduler restart / singleton handoff
 
 - Awaiting-ack state is stored in the database, not only in memory.
@@ -238,8 +222,8 @@ row during the fetch, so it cannot block other reminders:
 ### Negative acknowledgement write fails
 
 - The scheduler returns `Error` to the caller.
-- If the write really failed, the occurrence remains `AwaitingAck` and the normal ack-timeout path will retry it later.
-- If the write landed but reported failure (returned false or threw), the retry (or terminal result) is already in storage. The scheduler reloads the overview and arms the fetch timer, so a `Pending` retry is still delivered after its backoff. The caller still sees `Error`.
+- The occurrence remains `AwaitingAck`.
+- The normal ack-timeout path will retry it later.
 
 ### Restart after a negative acknowledgement
 
@@ -270,7 +254,7 @@ Hot-path writes are batched into single round-trips:
 - **Delivery path**: `CommitReminderMutationsAsync` handles pending upserts (retries + next recurring occurrences), terminal completions, and awaiting-ack transitions in a single call per chunk.
 - **Ack path**: `AcknowledgeRemindersAsync` flushes buffered acks in batches of `AckFlushBatchSize`.
 
-This avoids one round-trip per reminder for the writes in both the delivery and acknowledgement paths. Two cases add a single-row status read per reminder in the delivery path: a recurring occurrence that is sent before its due time (to find a previous occurrence that is still unacked), and a recurring occurrence that is retried (to find its next occurrence).
+This avoids one round-trip per reminder in both the delivery and acknowledgement paths.
 
 ### 4. Pending overview excludes AwaitingAck
 
@@ -285,8 +269,6 @@ Pending-overview queries only count actionable `Pending` rows.
 
 The scheduler maintains the `ReminderOverview` incrementally during batch processing by applying each upserted reminder to the in-memory overview. A full storage reload only happens when a fetch or write fails. This avoids an extra query per tick.
 
-Only rows that stay `Pending` are applied. A row the same commit ends (`Failed` or `Expired`) is written with its final attempt count but is not pending work, so it is left out. An empty overview is `TimeUntilNext = TimeSpan.MaxValue`; zero means "due right now" and is never treated as empty.
-
 ### 6. Write circuit breaker
 
 When any hot-path write fails (in either `ProcessReminders` or `ProcessAckTimeouts`):
@@ -294,7 +276,6 @@ When any hot-path write fails (in either `ProcessReminders` or `ProcessAckTimeou
 - The circuit opens.
 - The current run stops.
 - Later runs probe with a single reminder.
-- Probes are not delayed: while writes keep failing, a due reminder is re-fetched at once, so the retry rate is bounded only by storage latency.
 - Once the probe succeeds, the scheduler resumes full-batch processing in the same run.
 
 ## Accepted Trade-offs
@@ -306,9 +287,7 @@ The design goal is to keep those duplicates bounded and occurrence-specific.
 
 ### Recurring reminders are latest-only, not catch-up
 
-If an old recurring occurrence is still unacked when the next occurrence is delivered or becomes due, the old one expires instead of building an unbounded replay backlog. A late ack or nack for it is a `NotFound`.
-
-This costs one extra occurrence-status read when a recurring occurrence is retried, and one when a recurring occurrence is sent before its due time.
+If an old recurring occurrence is still unacked when the next occurrence becomes due, the old one expires instead of building an unbounded replay backlog.
 
 ### Deadline expiration is best-effort cleanup
 
