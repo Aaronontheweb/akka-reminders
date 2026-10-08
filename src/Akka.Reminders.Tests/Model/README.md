@@ -142,6 +142,11 @@ The table lives at the top of `ReminderFaultSpecs.cs`; the postconditions are in
 
 An occurrence is **awaiting an ack** when it was delivered, less than `AckTimeout` ago, it is not yet acked or nacked, its deadline has not passed, no newer occurrence of the same reminder was delivered, and the reminder was not cancelled or replaced (`ReminderModel.PhaseOf`).
 
+An acknowledgement can also persist before its response is lost. For an injected `Ack` `AppliedThenFail`,
+the model retains the expected durable acknowledgement even though the caller receives `Error`; it does
+not demand another delivery of that terminal occurrence. An ack that failed before persistence still
+requires timeout recovery. This distinction uses the injected fault, not storage rows or scheduler state.
+
 ### Liveness: what must have arrived
 
 Checked after every operation (`Liveness.cs`).
@@ -182,7 +187,7 @@ One tolerance: when a slow commit ends at the moment of a delivery, the delivery
 
 - A save that landed but answered `Error` must recover eligible persisted work without another client command or a manual restart. `Should_DeliverStoredReminder_When_SaveSucceededButReportedFailure` pins this requirement; generated `AppliedThenFail` schedules also enforce it.
 - A read failure may delay a durable retry or cause an automatic actor restart. `Should_SendTheRetryOnTime_When_OverviewReadsFailAfterAnAckTimeout` requires the retry within the model's healthy recovery observation window, accounting for subsequent trouble; it imposes no fixed deadline from the start of the scenario.
-- `RuleSpecs` verifies that a missing retry fails after recovery, that later failures extend the window, and that exhausted ambiguous attempts do not acquire a new delivery guarantee.
+- `RuleSpecs` verifies that a missing retry fails after recovery, later failures extend the window, and exhausted ambiguous attempts do not acquire a new delivery guarantee. Attempt costs include commits before the first observed delivery, but never before the occurrence could exist. Lost acknowledgement responses preserve their durable outcome.
 
 ## Open questions (no ruling; the model takes no side)
 

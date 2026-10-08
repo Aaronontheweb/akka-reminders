@@ -137,4 +137,52 @@ public sealed class RuleSpecs
         model.RunTo(T(60));
         Assert.Empty(Liveness.All.Single(r => r.Name == "RetriedOnTime").Broken(model, history, Settings));
     }
+
+    [Fact(DisplayName = "Should_CountAmbiguousAttempts_BeforeTheFirstObservedDelivery")]
+    public void RetryRecoveryCountsUnsentCommittedAttempts()
+    {
+        var model = new ReminderModel(Settings);
+        model.Schedule(new Reminder(1, 0, 0, T(0), null, null));
+        model.Delivered(1, T(0), T(22)); // two earlier sends committed without reaching the application
+        var history = HistoryOf((0, OneOff()),
+            (0, new Trouble(T(1), null, StorageCall.Commit, FaultKind.AppliedThenFail)),
+            (11, new Trouble(T(12), null, StorageCall.Commit, FaultKind.AppliedThenFail)),
+            (22, Sent(0)));
+        model.RunTo(T(60));
+        Assert.Empty(Liveness.All.Single(r => r.Name == "RetriedOnTime").Broken(model, history, Settings));
+    }
+
+    [Fact(DisplayName = "Should_NotChargeANewOccurrence_ForAmbiguousCommitsBeforeItCouldExist")]
+    public void RetryRecoveryDoesNotBorrowOlderAttemptCosts()
+    {
+        var model = new ReminderModel(Settings);
+        model.RunTo(T(60));
+        model.Schedule(new Reminder(1, 0, 0, T(60), null, null));
+        model.Delivered(1, T(60), T(60));
+        var history = HistoryOf(
+            (0, new Trouble(T(120), null, StorageCall.Commit, FaultKind.AppliedThenFail)),
+            (1, new Trouble(T(120), null, StorageCall.Commit, FaultKind.AppliedThenFail)),
+            (60, new Scheduled(1, 0, 0, T(60), null, null, ReminderScheduleResponseCode.Success)),
+            (60, Sent(60)));
+        model.RunTo(T(121));
+        Assert.Single(Liveness.All.Single(r => r.Name == "RetriedOnTime").Broken(model, history, Settings));
+    }
+
+    [Theory(DisplayName = "Should_RespectTheDurableAckOutcome_When_ItsResponseWasLost")]
+    [InlineData(FaultKind.AppliedThenFail, false)]
+    [InlineData(FaultKind.Fail, true)]
+    public void OracleDistinguishesLandedAndFailedAcknowledgements(FaultKind kind, bool retryOwed)
+    {
+        var app = new ReminderApp(Settings);
+        app.Journal.Add(OneOff());
+        app.Journal.Add(Sent(0));
+        app.Journal.Add(new Trouble(T(30), null, StorageCall.Ack, kind));
+        app.Journal.Add(new AckAnswered(2, 1, 0, 0, T(0), ReminderAckResponseCode.Error));
+        app.Journal.Add(new Done()).At = T(31);
+        var oracle = new Oracle(app);
+        if (retryOwed)
+            Assert.Contains("RetriedOnTime", Assert.Throws<ModelViolation>(oracle.Read).Message);
+        else
+            oracle.Read();
+    }
 }

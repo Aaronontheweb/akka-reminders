@@ -35,7 +35,7 @@ public static class Liveness
                 return false; // not owed yet
             var arrived = slot.Deliveries.Count > 0 && slot.Deliveries[0] <= by;
             var excused = r.InDoubt ||
-                          (by > at && (r.EndedAt <= by || r.Deadline(due) <= by || LostToTrouble(h, r.Entity, at - s.MaxSlippage, by, s))) ||
+                          (by > at && (r.EndedAt <= by || r.Deadline(due) <= by || LostToTrouble(h, r.Entity, FirstPossibleAttempt(r, due, s), by, s))) ||
                           model.OlderCallDelivered(r, due); // not ruled: may a new schedule call deliver a due time the old one already delivered?
             if (!arrived && !excused)
                 late.Add($"reminder {r.Id} (entity {r.Entity}, key {r.Key}) due {Journal.T(due)} was owed by {Journal.T(by)} and " +
@@ -53,8 +53,11 @@ public static class Liveness
     {
         var during = h.Troubles.Where(t => t.Touches(entity) && t.At <= to && t.Until >= from).ToList();
         return during.Any(t => t.Region is not null) ||
-               during.Count(t => t is { Call: StorageCall.Commit, Kind: FaultKind.AppliedThenFail }) >= s.MaxAttempts - observedAttempts;
+               during.Count(t => t is { Call: StorageCall.Commit, Kind: FaultKind.AppliedThenFail } && t.At >= from) >= s.MaxAttempts - observedAttempts;
     }
+
+    private static DateTimeOffset FirstPossibleAttempt(Reminder r, DateTimeOffset due, ModelSettings s) =>
+        r.SavedAt > due - s.MaxSlippage ? r.SavedAt : due - s.MaxSlippage;
 
     private static IEnumerable<string> RetriedOnTime(ReminderModel model, History h, ModelSettings s)
     {
@@ -67,7 +70,7 @@ public static class Liveness
             var retryAt = slot.RetryAt ?? model.FirstAwake(slot.Deliveries[^1] + s.AckTimeout) + s.Backoff(slot.Deliveries.Count - 1);
             var by = h.TroubleOver(r.Entity, model.FirstAwake(retryAt));
             if (by > model.Now || r.Deadline(due) <= by ||
-                LostToTrouble(h, r.Entity, slot.Deliveries[0], by, s, slot.Deliveries.Count))
+                LostToTrouble(h, r.Entity, FirstPossibleAttempt(r, due, s), by, s, slot.Deliveries.Count))
                 continue;
             yield return $"reminder {r.Id} (entity {r.Entity}, key {r.Key}) due {Journal.T(due)} was last sent at {Journal.T(slot.Deliveries[^1])}, got no ack, and its retry owed by {Journal.T(by)} has not arrived";
         }

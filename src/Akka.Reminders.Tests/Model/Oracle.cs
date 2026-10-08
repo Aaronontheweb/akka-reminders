@@ -86,7 +86,7 @@ public sealed class Oracle(ReminderApp app)
             throw Fail("ScheduleReply", $"schedule answered {reply.Reply}; the model expects {(saved ? "Success" : "ShardRegionNotFound")} unless the save itself failed");
         // The reply alone is uncertain, but an injected AppliedThenFail tells the test that the
         // save completed before its response was lost. That durable work must recover automatically.
-        if (!_history.Troubles.Any(t => t.Seq > _opStart && t.Call == StorageCall.Schedule && t.Kind == FaultKind.AppliedThenFail))
+        if (!AppliedDuringOp(StorageCall.Schedule))
             _model.Doubt(reply.Entity, reply.Key);
     }
 
@@ -137,7 +137,9 @@ public sealed class Oracle(ReminderApp app)
         if (sure && (acked != expected || reply.Reply == ReminderAckResponseCode.Error))
             throw Fail("AckReply", $"ack of reminder {reply.Id} (entity {reply.Entity}, key {reply.Key}) due {Journal.T(reply.Due)} answered {reply.Reply}; the model expects {(expected ? "Success" : "NotFound")}");
         // After trouble the reply decides: the model follows what the application was told.
-        if (acked != expected && _model.Live(reply.Entity, reply.Key) is { } r)
+        // A persisted ack whose response was lost is still terminal. The injected fault is
+        // independent evidence that the write completed; an ordinary failed ack remains uncertain.
+        if (acked != expected && !(expected && AppliedDuringOp(StorageCall.Ack)) && _model.Live(reply.Entity, reply.Key) is { } r)
             r.Slot(reply.Due).Acked = acked;
     }
 
@@ -162,6 +164,9 @@ public sealed class Oracle(ReminderApp app)
 
     /// <summary>True if one of these storage calls failed during the current operation.</summary>
     private bool FailedDuringOp(params StorageCall[] calls) => _history.Failed(_opStart, calls);
+
+    private bool AppliedDuringOp(StorageCall call) => _history.Troubles.Any(t =>
+        t.Seq > _opStart && t.Call == call && t.Kind == FaultKind.AppliedThenFail);
 
     /// <summary>True when the model knows what this key holds: no Error reply, and no trouble since it was saved.</summary>
     private bool Sure(int entity, int key, DateTimeOffset? due = null)
