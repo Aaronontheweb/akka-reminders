@@ -18,11 +18,14 @@ Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
 
 Recurring reminders are modeled as a stream of occurrences.
 
-- The next occurrence is persisted, in the same commit, when the current occurrence is delivered or ends without delivery (expired, or failed because its shard region is missing).
+- The next occurrence is persisted, in the same commit, the first time the current occurrence is processed: when it is delivered, when it is put back for a retry because its shard region is missing, or when it ends without delivery (expired or failed).
 - The next occurrence is the earliest slot whose deadline has not passed. Missed slots are skipped, not replayed.
 - Each occurrence starts with a new retry budget.
 - Each occurrence has its own absolute UTC deadline.
-- By default, a recurring occurrence expires when the next occurrence becomes due.
+- By default, a recurring occurrence expires when the next occurrence is delivered or becomes due, whichever is first. There is at most one live occurrence per recurring reminder: when the next one is sent early (inside `MaxSlippage`) while the previous one is still unacked, the previous one is marked `Expired` in the same commit.
+- A first attempt writes its successor with the existing overwrite semantics. Explicit re-registration replaces active work and can reopen matching occurrence identities, including a cancelled successor left by the prior registration.
+- A retry inserts its successor only if absent inside the same atomic mutation commit. Existing Pending, AwaitingAck and terminal occurrences keep their state and retry budget; retries never reset a successor. No per-occurrence status lookup is required.
+- Superseding an older occurrence is an active-only completion in that commit: absent or terminal rows are unchanged.
 - If `MaxDeliveryWindow` is configured, the effective deadline is `min(due + window, next due)`.
 - A late ack for an old occurrence is a harmless `NotFound` because the ack is matched by `DueTimeUtc`.
 
@@ -83,11 +86,11 @@ Flush buffered ack writes (if any)
           - Deliverable -> create AwaitingAck state
       -> For recurring reminders: pre-create next occurrence
       -> Commit all mutations in a single CommitReminderMutationsAsync call:
-          - Pending upserts (retries + next recurring occurrences)
-          - Terminal completions
+          - Pending upserts and insert-only retry successors
+          - Terminal completions and active-only supersession
           - AwaitingAck transitions
       -> Deliver ReminderEnvelope<T> only after the commit succeeds
-  -> Update overview (incrementally from batch results; reload from storage only on failure)
+  -> Update overview (incrementally; bounded fetch reconciles conditional mutations, reload on failure)
   -> Schedule next fetch timer
 ```
 
@@ -312,7 +315,7 @@ Hot-path writes use batched statements in one atomic commit:
 - **Delivery path**: `CommitReminderMutationsAsync` handles pending upserts (retries + next recurring occurrences), terminal completions, and awaiting-ack transitions in a single call per chunk.
 - **Ack path**: `AcknowledgeRemindersAsync` flushes buffered acks in batches of `AckFlushBatchSize`.
 
-This avoids a separate storage operation per reminder in both the delivery and acknowledgement paths; one commit may execute multiple SQL statements.
+This avoids a separate storage operation per reminder in both the delivery and acknowledgement paths; one commit may execute multiple SQL statements. A fetch pass that prepares insert-only successors finishes with a bounded fetch to reconcile the actual pending overview; there are no per-reminder neighbour queries.
 
 ### 4. Pending overview excludes AwaitingAck
 
@@ -325,7 +328,7 @@ Pending-overview queries only count actionable `Pending` rows.
 
 ### 5. Incremental overview maintenance
 
-The scheduler maintains the `ReminderOverview` incrementally during batch processing by applying each upserted reminder to the in-memory overview. A full storage reload only happens when a fetch or write fails. This avoids an extra query per tick.
+The scheduler maintains the `ReminderOverview` incrementally during batch processing by applying each upserted reminder to the in-memory overview. A full overview aggregate reload happens when a fetch or write fails. Conditional successor inserts and active-only completions can differ from the proposed mutations, so a short batch containing insert-only successors uses one final bounded fetch to reconcile actual pending work. This avoids per-reminder queries while keeping the next timer authoritative.
 
 Only rows that stay `Pending` are applied. A row the same commit ends (`Failed` or `Expired`) is written with its final attempt count but is not pending work, so it is left out. An empty overview is `TimeUntilNext = TimeSpan.MaxValue`; zero means "due right now" and is never treated as empty.
 
@@ -347,7 +350,9 @@ The design goal is to keep those duplicates bounded and occurrence-specific.
 
 ### Recurring reminders are latest-only, not catch-up
 
-If an old recurring occurrence is still unacked when the next occurrence becomes due, the old one expires instead of building an unbounded replay backlog.
+If an old recurring occurrence is still unacked when the next occurrence is delivered or becomes due, the old one expires instead of building an unbounded replay backlog. A late ack or nack for it is a `NotFound`.
+
+Successor creation and supersession are batched conditional mutations, with no extra per-occurrence read.
 
 ### Deadline expiration is best-effort cleanup
 
@@ -372,3 +377,17 @@ Negative acknowledgement uses the existing durable mutation contract.
 
 `MaxDeliveryAttempts` applies to one occurrence. Each recurring occurrence starts with zero attempts.
 A terminal occurrence does not cancel or disable the recurring reminder definition.
+
+### Custom storage providers
+
+The unreleased 0.7 recurring scheduler requires `IConditionalReminderMutationStorage`. Implementations must apply
+`ReminderMutationBatch.PendingInserts` without updating existing rows and `ActiveCompletions` only to Pending or
+AwaitingAck rows, atomically with the original mutation lists. Inserts run before ordinary upserts, and active
+completions before AwaitingAck transitions. Ordinary `PendingUpserts` retain their existing overwrite behavior.
+Forwarding providers must preserve these lists and declare the marker only when their underlying provider supports
+the contract. One-off reminders continue to support plain `IReminderStorage`; unsupported recurring schedules
+return an error before persistence, and previously stored recurring rows are not delivered through unsupported providers.
+
+Upgrade a custom provider before starting the scheduler against a store containing recurring reminders. Existing
+recurring rows on an unsupported provider cannot be committed or delivered, and can block later one-off work in
+that store; accepting a new one-off schedule does not remove this compatibility requirement.
