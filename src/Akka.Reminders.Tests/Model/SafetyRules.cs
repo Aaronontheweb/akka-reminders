@@ -21,7 +21,7 @@ public static class SafetyRules
             "README: Acknowledgement Protocol", HonestEnvelopeDeadline),
         new("AttemptCap", "One occurrence is delivered at most MaxDeliveryAttempts times.",
             "docs: Delivery Semantics", AttemptCap),
-        new("AckedNeverRedelivered", "Once an ack is answered Success, that occurrence is never delivered again.",
+        new("AckedNeverRedelivered", "Once an ack succeeds or is known to persist before its reply is lost, that occurrence is never delivered again.",
             "ruling: an acknowledged occurrence is never delivered again", AckedNeverRedelivered),
         new("NothingAfterCancel", "After a cancel is answered, or a new schedule call for the same key succeeds, the old reminder delivers nothing.",
             "README: Cancel Reminder", NothingAfterCancel),
@@ -68,12 +68,15 @@ public static class SafetyRules
     private static IEnumerable<string> AckedNeverRedelivered(History h, ModelSettings s)
     {
         var byOccurrence = h.Deliveries.ToLookup(d => (d.Entity, d.Key, d.Due));
-        foreach (var ack in h.Acks.Where(a => a.Reply == ReminderAckResponseCode.Success))
+        foreach (var ack in h.Acks.Where(a => a.Reply == ReminderAckResponseCode.Success ||
+                     a.Reply == ReminderAckResponseCode.Error && h.Troubles.Any(t =>
+                         t.Seq > a.Asked && t.Seq < a.Seq &&
+                         t is { Call: StorageCall.Ack, Kind: FaultKind.AppliedThenFail })))
         {
             var deliveries = byOccurrence[(ack.Entity, ack.Key, ack.Due)].ToList();
             var acked = deliveries.Where(d => d.Seq <= ack.Asked).Select(d => d.Id).ToHashSet();
             foreach (var again in deliveries.Where(d => d.Seq > ack.Seq && acked.Contains(d.Id)))
-                yield return $"{Show(again)} came after its ack succeeded at {Journal.T(ack.At)}";
+                yield return $"{Show(again)} came after its ack persisted at {Journal.T(ack.At)}";
         }
     }
 

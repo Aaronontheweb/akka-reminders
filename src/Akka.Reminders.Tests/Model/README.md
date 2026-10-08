@@ -144,7 +144,9 @@ An occurrence is **awaiting an ack** when it was delivered, less than `AckTimeou
 
 An acknowledgement can also persist before its response is lost. For an injected `Ack` `AppliedThenFail`,
 the model retains the expected durable acknowledgement even though the caller receives `Error`; it does
-not demand another delivery of that terminal occurrence. An ack that failed before persistence still
+not demand another delivery of that terminal occurrence, and the independent safety rule rejects a
+later delivery from the same registration. Explicit re-registration can reopen the same due time.
+An ack that failed before persistence still
 requires timeout recovery. This distinction uses the injected fault, not storage rows or scheduler state.
 
 ### Liveness: what must have arrived
@@ -172,7 +174,7 @@ Checked after every operation, trouble or not (`SafetyRules.cs`). Each check is 
 | NotAfterDeadline | Nothing is committed for delivery at or after its deadline. | docs: Latest-only recurring reminders. Ruling: deadlines are judged at commit time. | `SafetyRules.NotAfterDeadline` |
 | HonestEnvelopeDeadline | The deadline on the envelope is never later than the occurrence's deadline. | README: Acknowledgement Protocol | `SafetyRules.HonestEnvelopeDeadline` |
 | AttemptCap | One occurrence is delivered at most `MaxDeliveryAttempts` times. | docs: Delivery Semantics | `SafetyRules.AttemptCap` |
-| AckedNeverRedelivered | Once an ack is answered `Success`, that occurrence is never delivered again. | Ruling | `SafetyRules.AckedNeverRedelivered` |
+| AckedNeverRedelivered | Once an ack succeeds or is known to persist before its reply is lost, that occurrence is never delivered again under the same registration. | Ruling | `SafetyRules.AckedNeverRedelivered` |
 | NothingAfterCancel | After a cancel is answered, or a new schedule call for the same key succeeds, the old reminder delivers nothing. | README: Cancel Reminder | `SafetyRules.NothingAfterCancel` |
 | LatestOnly | A recurring reminder never delivers an older occurrence after a newer one. | docs: Latest-only recurring reminders | `SafetyRules.LatestOnly` |
 | LateAckIsNotFound | Once a newer occurrence is delivered, an ack for an older one does not succeed. | docs: Late ack for superseded recurring occurrence | `SafetyRules.LateAckIsNotFound` |

@@ -186,6 +186,57 @@ public sealed class RuleSpecs
             oracle.Read();
     }
 
+    [Theory(DisplayName = "Should_RejectRedeliveryOnly_When_TheAcknowledgementPersistedBeforeItsReplyWasLost")]
+    [InlineData(FaultKind.AppliedThenFail, true)]
+    [InlineData(FaultKind.Fail, false)]
+    public void OracleChecksRedeliveryAfterAnAcknowledgementError(FaultKind kind, bool redeliveryForbidden)
+    {
+        var app = new ReminderApp(Settings);
+        app.Journal.Add(OneOff());
+        app.Journal.Add(Sent(0));
+        app.Journal.Add(new Trouble(T(30), null, StorageCall.Ack, kind));
+        app.Journal.Add(new AckAnswered(2, 1, 0, 0, T(0), ReminderAckResponseCode.Error));
+        app.Journal.Add(new Done());
+        var oracle = new Oracle(app);
+        oracle.Read();
+
+        app.Journal.Add(Sent(0)).At = T(31);
+        app.Journal.Add(new Done()).At = T(31);
+        if (redeliveryForbidden)
+            Assert.Contains("AckedNeverRedelivered", Assert.Throws<ModelViolation>(oracle.Read).Message);
+        else
+            oracle.Read();
+    }
+
+    [Fact(DisplayName = "Should_AllowAnExplicitNewRegistration_AfterAnAcknowledgementPersistsWithALostReply")]
+    public void LandedAcknowledgementDoesNotBlockAnExplicitNewRegistration()
+    {
+        var app = new ReminderApp(Settings);
+        app.Journal.Add(OneOff());
+        app.Journal.Add(Sent(0));
+        app.Journal.Add(new Trouble(T(30), null, StorageCall.Ack, FaultKind.AppliedThenFail));
+        app.Journal.Add(new AckAnswered(2, 1, 0, 0, T(0), ReminderAckResponseCode.Error));
+        app.Journal.Add(new Done());
+        var oracle = new Oracle(app);
+        oracle.Read();
+
+        app.Journal.Add(new Scheduled(2, 0, 0, T(0), null, null, ReminderScheduleResponseCode.Success)).At = T(31);
+        app.Journal.Add(Sent(0, id: 2)).At = T(31);
+        app.Journal.Add(new Done()).At = T(31);
+        oracle.Read();
+    }
+
+    [Fact(DisplayName = "Should_NotAttributeAnEarlierLandedAcknowledgement_ToALaterFailedOperation")]
+    public void AckSafetyMatchesTheFaultToItsOwnOperation()
+    {
+        var history = HistoryOf((0, OneOff()), (0, Sent(0)),
+            (1, new Trouble(T(30), null, StorageCall.Ack, FaultKind.AppliedThenFail)),
+            (2, new Done()),
+            (3, new AckAnswered(4, 1, 0, 0, T(0), ReminderAckResponseCode.Error)),
+            (31, Sent(0)));
+        Assert.Empty(SafetyRules.All.Single(r => r.Name == "AckedNeverRedelivered").Broken(history, Settings));
+    }
+
     [Theory(DisplayName = "Should_AccountForUnobservedAttempts_WithoutLooseningHealthyBackoff")]
     [InlineData(0, 102)]
     [InlineData(2, 108)]
