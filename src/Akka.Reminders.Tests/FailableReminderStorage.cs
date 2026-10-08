@@ -6,18 +6,21 @@ namespace Akka.Reminders.Tests;
 /// Wraps an <see cref="IReminderStorage"/> and allows selectively failing write operations
 /// to test circuit breaker and failure recovery behavior.
 /// </summary>
-internal sealed class FailableReminderStorage : IReminderStorage
+internal sealed class FailableReminderStorage : IConditionalReminderMutationStorage
 {
     private readonly IReminderStorage _inner;
     private readonly TaskCompletionSource _firstCommitMutationFailure = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _commitMutationAttempts;
     private int _fetches;
+    private int _occurrenceStatusReads;
 
     public int CommitMutationAttempts => Volatile.Read(ref _commitMutationAttempts);
 
     public Task FirstCommitMutationFailure => _firstCommitMutationFailure.Task;
 
     public int Fetches => Volatile.Read(ref _fetches);
+
+    public int OccurrenceStatusReads => Volatile.Read(ref _occurrenceStatusReads);
 
     /// <summary>
     /// Runs before each mutation commit is forwarded, e.g. to inspect it or to let time pass.
@@ -245,6 +248,7 @@ internal sealed class FailableReminderStorage : IReminderStorage
     {
         if (FailReads)
             throw new TimeoutException("Simulated database read timeout");
+        Interlocked.Increment(ref _occurrenceStatusReads);
         return _inner.GetReminderOccurrenceStatusAsync(entity, key, dueTimeUtc, ct);
     }
 
