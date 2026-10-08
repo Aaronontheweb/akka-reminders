@@ -58,7 +58,7 @@ This benchmark bypasses the scheduler and its conditional recurring mutations. I
 
 ## Revisions and reproduction
 
-Exact revisions, environment, harness hash, settings, and validation paths are recorded in benchmark-method.json and revisions.json. The fixed benchmark snapshot differs from the validated implementation only in model tests; runtime and benchmark source trees are identical.
+Exact revisions, environment, harness hash, settings, and validation paths are recorded in benchmark-method.json and revisions.json. Runtime and benchmark source trees are identical between the fixed benchmark snapshot and the post-review implementation; later changes affect model checks and documentation.
 
 Use the runner and instructions in src/Akka.Reminders.Benchmarks/README.md. Raw measured runs are in scheduler-results.jsonl; medians, ranges, and call counts are in scheduler-comparison.csv. Per-run console logs and original test TRX files remain in /tmp/akka-reminders-implementation-benchmarks and /tmp/akka-reminders-implementation-results.
 
