@@ -575,6 +575,10 @@ var status = await client.GetOccurrenceStatusAsync(
 The status query returns terminal rows until normal pruning removes them.
 Official storage providers support status queries without a schema migration.
 
+For 0.7 recurring reminders, custom storage providers must implement `IConditionalReminderMutationStorage` and
+honor the insert-only successors and active-only completions in `ReminderMutationBatch` atomically. Existing
+`IReminderStorage` providers continue to support one-off reminders. See [the storage contract](docs/design/failure-modes.md#custom-storage-providers).
+
 The new delivery-control messages use new serializer manifests. Upgrade the
 reminder scheduler before a consumer calls this API. A 0.6 scheduler cannot
 read the 0.7 negative acknowledgement or status messages.

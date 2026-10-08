@@ -614,6 +614,13 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 {
                     using var cts = new CancellationTokenSource(Settings.StorageTimeout);
                     var reminder = CreateScheduledReminder(scheduleSingle);
+                    if (reminder.RepeatInterval.HasValue && Storage is not IConditionalReminderMutationStorage)
+                    {
+                        replyTo.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle,
+                            ReminderScheduleResponseCode.Error,
+                            "Recurring reminders require storage implementing IConditionalReminderMutationStorage."), ActorRefs.NoSender);
+                        return;
+                    }
                     try
                     {
                         // validate that the ShardRegion exists
@@ -1122,13 +1129,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     }
 
     /// <summary>
-    /// Adds the next occurrence of a recurring reminder to the commit, unless the commit already
-    /// holds a row for that slot. The next occurrence is written the first time an occurrence is
-    /// processed (attempt 0). A retried occurrence already wrote it (always at due + interval), and
-    /// that row must never be reset, so a retry only writes it when storage has no row there at all
-    /// (a retry row stored by a version that wrote the next occurrence later).
+    /// The first attempt writes its successor normally, preserving explicit registration replacement.
+    /// A retry only inserts a missing successor, leaving existing occurrence state and retry budgets intact.
     /// </summary>
-    private async Task AddNextOccurrenceAsync(ScheduledReminder reminder, DateTimeOffset now, List<ScheduledReminder> occurrencesToUpsert)
+    private void AddNextOccurrence(ScheduledReminder reminder, DateTimeOffset now,
+        List<ScheduledReminder> occurrencesToUpsert, List<ScheduledReminder> pendingInserts)
     {
         var next = CreateNextRecurringOccurrence(reminder, now);
         if (next is null)
@@ -1137,50 +1142,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             return;
         }
 
-        if (reminder.AttemptCount > 0 && await NeighbourStatusAsync(reminder, reminder.RepeatInterval!.Value) is { } existing)
-        {
-            // A finished row on the next slot may be a leftover from an older registration or version
-            // rather than this series' own next occurrence; if so, the series ends here.
-            if (existing is not (ReminderCompletionStatus.Pending or ReminderCompletionStatus.AwaitingAck))
-                _log.Warning("Retried recurring reminder {0} did not write its next occurrence: the slot at [{1}] already holds a {2} row.",
-                    reminder, reminder.DueTimeUtc + reminder.RepeatInterval.Value, existing);
+        if (occurrencesToUpsert.Exists(r => r.Entity == next.Entity && r.Key == next.Key && r.DueTimeUtc == next.DueTimeUtc))
             return;
-        }
-
-        // A retry or terminal row for the same slot always beats a roll-forward, whatever the order.
-        if (!occurrencesToUpsert.Exists(r => r.Entity == next.Entity && r.Key == next.Key && r.DueTimeUtc == next.DueTimeUtc))
-            occurrencesToUpsert.Add(next);
-    }
-
-    /// <summary>
-    /// Set by the first failed neighbour lookup of a fetch pass. The rest of the pass does no more
-    /// lookups, so a storage outage costs one timeout, not one per reminder.
-    /// </summary>
-    private bool _neighbourLookupFailed;
-
-    /// <summary>
-    /// Status of the occurrence of the same reminder that is <paramref name="offset"/> away, or null
-    /// when there is no such row. A failed read also answers null, which errs towards a duplicate
-    /// rather than a lost or stuck series.
-    /// </summary>
-    private async Task<ReminderCompletionStatus?> NeighbourStatusAsync(ScheduledReminder reminder, TimeSpan offset)
-    {
-        if (_neighbourLookupFailed)
-            return null;
-
-        try
-        {
-            using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-            var status = await Storage.GetReminderOccurrenceStatusAsync(
-                reminder.Entity, reminder.Key, reminder.DueTimeUtc + offset, cts.Token);
-            return status?.CompletionStatus;
-        }
-        catch (Exception ex)
-        {
-            _neighbourLookupFailed = true;
-            _log.Warning(ex, "Failed to look up a neighbouring occurrence of {0}; no more lookups in this pass", reminder);
-            return null;
-        }
+        var successors = reminder.AttemptCount == 0 ? occurrencesToUpsert : pendingInserts;
+        if (!successors.Exists(r => r.Entity == next.Entity && r.Key == next.Key && r.DueTimeUtc == next.DueTimeUtc))
+            successors.Add(next);
     }
 
     /// <summary>
@@ -1393,7 +1359,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         var fetchedAt = _overviewAsOf;
         var needsOverviewReload = false;
         var fetchFailed = false;
-        _neighbourLookupFailed = false;
 
         // When the write circuit is open, probe with a single reminder to test
         // write availability before resuming full-batch processing. This limits
@@ -1436,6 +1401,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
             var stopProcessing = false;
             var recoveredFromProbe = false;
+            var hasConditionalInserts = false;
             var batchOverview = batch.NextOverview;
             var expiredAsPrevious = new HashSet<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc)>();
 
@@ -1455,6 +1421,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 var completedAt = TimeProvider.Now;
 
                 var occurrencesToUpsert = new List<ScheduledReminder>();
+                var pendingInserts = new List<ScheduledReminder>();
+                var activeCompletions = new List<CompletedReminder>();
                 // Rows upserted only to record their last attempt; this commit also ends them.
                 var finalAttempts = new HashSet<ScheduledReminder>(ReferenceEqualityComparer.Instance);
                 var terminalReminders = new List<CompletedReminder>();
@@ -1482,7 +1450,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                         // Never deliver a stale occurrence late, but keep a recurring series alive.
                         if (reminder.RepeatInterval.HasValue)
-                            await AddNextOccurrenceAsync(reminder, completedAt, occurrencesToUpsert);
+                            AddNextOccurrence(reminder, completedAt, occurrencesToUpsert, pendingInserts);
                         continue;
                     }
 
@@ -1507,7 +1475,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             // The next occurrence is written the first time this one is processed, whatever
                             // the outcome, so later retries never need to write (and possibly reset) it.
                             if (reminder.RepeatInterval.HasValue)
-                                await AddNextOccurrenceAsync(reminder, completedAt, occurrencesToUpsert);
+                                AddNextOccurrence(reminder, completedAt, occurrencesToUpsert, pendingInserts);
                         }
                         else
                         {
@@ -1522,7 +1490,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                                 terminalStatus));
 
                             if (reminder.RepeatInterval.HasValue)
-                                await AddNextOccurrenceAsync(reminder, completedAt, occurrencesToUpsert);
+                                AddNextOccurrence(reminder, completedAt, occurrencesToUpsert, pendingInserts);
 
                             if (terminalStatus == ReminderCompletionStatus.Expired)
                                 chunkExpired += 1;
@@ -1540,7 +1508,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         // scheduler crashes after delivery — no occurrences are lost.
                         if (reminder.RepeatInterval.HasValue)
                         {
-                            await AddNextOccurrenceAsync(reminder, completedAt, occurrencesToUpsert);
+                            AddNextOccurrence(reminder, completedAt, occurrencesToUpsert, pendingInserts);
 
                             // Latest-only: sending this occurrence ends the previous one if it is still
                             // unacked. Once this one is due the previous one is past its deadline and
@@ -1550,17 +1518,12 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             {
                                 var previous = ToOccurrenceKey(reminder.Entity, reminder.Key, reminder.DueTimeUtc - interval);
                                 bool IsPrevious(ReminderEntity e, ReminderKey k, DateTimeOffset due) => ToOccurrenceKey(e, k, due) == previous;
-                                if (!terminalReminders.Exists(t => IsPrevious(t.Entity, t.Key, t.DueTimeUtc)) &&
-                                    (deliveries.RemoveAll(d => IsPrevious(d.Reminder.Entity, d.Reminder.Key, d.Reminder.DueTimeUtc)) > 0 ||
-                                     await NeighbourStatusAsync(reminder, -interval) is ReminderCompletionStatus.Pending
-                                         or ReminderCompletionStatus.AwaitingAck))
-                                {
-                                    remindersToAwaitAck.RemoveAll(a => IsPrevious(a.Entity, a.Key, a.DueTimeUtc));
-                                    terminalReminders.Add(new CompletedReminder(reminder.Entity, reminder.Key, previous.DueTimeUtc,
+                                deliveries.RemoveAll(d => IsPrevious(d.Reminder.Entity, d.Reminder.Key, d.Reminder.DueTimeUtc));
+                                remindersToAwaitAck.RemoveAll(a => IsPrevious(a.Entity, a.Key, a.DueTimeUtc));
+                                if (!terminalReminders.Exists(t => IsPrevious(t.Entity, t.Key, t.DueTimeUtc)))
+                                    activeCompletions.Add(new CompletedReminder(reminder.Entity, reminder.Key, previous.DueTimeUtc,
                                         completedAt, ReminderCompletionStatus.Expired));
-                                    expiredAsPrevious.Add(previous);
-                                    chunkExpired += 1;
-                                }
+                                expiredAsPrevious.Add(previous);
                             }
                         }
 
@@ -1583,12 +1546,18 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 var mutationBatch = new ReminderMutationBatch(
                     occurrencesToUpsert,
                     terminalReminders,
-                    remindersToAwaitAck);
+                    remindersToAwaitAck)
+                {
+                    PendingInserts = pendingInserts,
+                    ActiveCompletions = activeCompletions
+                };
 
                 if (!mutationBatch.IsEmpty)
                 {
                     try
                     {
+                        if (Storage is not IConditionalReminderMutationStorage && chunk.Any(r => r.RepeatInterval.HasValue))
+                            throw new NotSupportedException("Recurring reminders require storage implementing IConditionalReminderMutationStorage.");
                         using var mutationCts = new CancellationTokenSource(Settings.StorageTimeout);
                         var mutationResult = await Storage.CommitReminderMutationsAsync(mutationBatch, mutationCts.Token);
                         if (!mutationResult)
@@ -1621,6 +1590,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     break;
                 }
 
+                hasConditionalInserts |= pendingInserts.Count > 0;
                 totalRetried += chunkRetried;
                 totalFailed += chunkFailed;
                 totalExpired += chunkExpired;
@@ -1631,7 +1601,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 if (occurrencesToUpsert.Count > 0)
                 {
                     // A row this commit also ends (Failed/Expired) is not pending work.
-                    foreach (var pendingReminder in occurrencesToUpsert.Where(u => !finalAttempts.Contains(u)))
+                    foreach (var pendingReminder in occurrencesToUpsert.Where(u => !finalAttempts.Contains(u) &&
+                                 !expiredAsPrevious.Contains(ToOccurrenceKey(u.Entity, u.Key, u.DueTimeUtc))))
                     {
                         batchOverview = batchOverview.Apply(pendingReminder, fetchedAt).newOverview;
                     }
@@ -1681,7 +1652,13 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
             // If we got fewer than the effective fetch batch size, there are no more due reminders
             if (batch.Reminders.Count < effectiveBatchSize)
-                break;
+            {
+                if (!hasConditionalInserts)
+                    break;
+                // Reconcile insert-only successors without refetching future retries inside MaxSlippage.
+                // A retry created in this batch is strictly after its fetch clock reading.
+                untilDeadline = fetchedAt;
+            }
         }
 
         if (needsOverviewReload)

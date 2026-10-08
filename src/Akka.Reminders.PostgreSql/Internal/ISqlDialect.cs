@@ -5,9 +5,9 @@ namespace Akka.Reminders.PostgreSql.Internal;
 internal interface ISqlDialect
 {
     string GetCreateTableSql(string schemaName, string tableName);
-    string GetBatchUpsertRemindersSql(string schemaName, string tableName, int count);
+    string GetBatchUpsertRemindersSql(string schemaName, string tableName, int count, bool insertIfAbsent = false);
     string GetSelectDueRemindersSql(string schemaName, string tableName, int maxCount);
-    string GetBatchMarkCompletedSql(string schemaName, string tableName, int count);
+    string GetBatchMarkCompletedSql(string schemaName, string tableName, int count, bool activeOnly = false);
     string GetExpireRemindersSql(string schemaName, string tableName);
     string GetCleanupSql(string schemaName, string tableName);
     string GetOverviewAggregateSql(string schemaName, string tableName);

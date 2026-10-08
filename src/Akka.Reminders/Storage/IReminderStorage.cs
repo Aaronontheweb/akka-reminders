@@ -130,7 +130,14 @@ public sealed record ReminderMutationBatch(
 {
     public static ReminderMutationBatch Empty { get; } = new([], [], []);
 
-    public bool IsEmpty => PendingUpserts.Count == 0 && CompletedReminders.Count == 0 && AwaitingAckReminders.Count == 0;
+    /// <summary>Insert missing occurrences without changing any existing occurrence, including terminal state.</summary>
+    public IReadOnlyList<ScheduledReminder> PendingInserts { get; init; } = [];
+
+    /// <summary>Complete occurrences only while Pending or AwaitingAck; absent and terminal rows are unchanged.</summary>
+    public IReadOnlyList<CompletedReminder> ActiveCompletions { get; init; } = [];
+
+    public bool IsEmpty => PendingUpserts.Count == 0 && CompletedReminders.Count == 0 && AwaitingAckReminders.Count == 0
+                           && PendingInserts.Count == 0 && ActiveCompletions.Count == 0;
 }
 
 /// <summary>
@@ -171,8 +178,12 @@ public sealed record AckResult(
 }
 
 /// <summary>
-/// Storage implementation for reminders.
+/// Declares support for atomic <see cref="ReminderMutationBatch.PendingInserts"/> and
+/// <see cref="ReminderMutationBatch.ActiveCompletions"/>. Required for recurring reminder processing.
 /// </summary>
+public interface IConditionalReminderMutationStorage : IReminderStorage;
+
+/// <summary>Storage implementation for reminders.</summary>
 public interface IReminderStorage
 {
     Task<ReminderProtocol.ReminderScheduled> ScheduleReminderAsync(ScheduledReminder reminder, CancellationToken ct = default);
