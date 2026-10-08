@@ -41,7 +41,7 @@ public enum FaultKind
 /// that fires is written to the <see cref="Journal"/> as <see cref="Trouble"/>. Slow calls move the
 /// virtual clock, so "slow storage" is deterministic.
 /// </summary>
-public sealed class FaultyRecordingStorage : IReminderStorage
+public sealed class FaultyRecordingStorage : IConditionalReminderMutationStorage
 {
     /// <summary>Entity used by the harness's own probe queries; never counted or faulted.</summary>
     public static readonly ReminderEntity ProbeEntity = new("__probe", "__probe");
@@ -55,7 +55,9 @@ public sealed class FaultyRecordingStorage : IReminderStorage
 
     public FaultyRecordingStorage(IReminderStorage inner, VirtualClock clock, Journal journal, HarnessSignals signals, TimeSpan recovery)
     {
-        _inner = inner;
+        // A wrapper must not advertise conditional mutations unless its provider actually supports them.
+        _inner = inner as IConditionalReminderMutationStorage ??
+                 throw new ArgumentException("The model requires conditional recurring mutations from its inner storage.", nameof(inner));
         _clock = clock;
         _journal = journal;
         _signals = signals;
