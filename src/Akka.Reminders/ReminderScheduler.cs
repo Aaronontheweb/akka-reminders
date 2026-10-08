@@ -128,6 +128,12 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     public ReminderOverview PendingReminders { get; set; } = ReminderOverview.Empty;
 
     /// <summary>
+    /// The clock reading <see cref="PendingReminders"/> was computed against. Its
+    /// <see cref="ReminderOverview.TimeUntilNext"/> counts from here, not from when a timer is armed.
+    /// </summary>
+    private DateTimeOffset _overviewAsOf;
+
+    /// <summary>
     /// Write circuit breaker. When database writes fail (mark-complete, schedule), this flag
     /// is set to prevent fetching and delivering full batches against a database that can't
     /// persist completions. While open, ProcessReminders probes with a single reminder to
@@ -148,6 +154,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// is found.
     /// </summary>
     private DateTimeOffset? _nextAckTimeoutAt;
+
+    // Storage uncertainty needs a fetch even when the cached overview is empty. Keep this
+    // separate from ack deadlines: acknowledging the last delivered row cannot cancel recovery.
+    private DateTimeOffset? _storageRecoveryAt;
+    private DateTimeOffset? _fetchRetryNotBefore;
 
     /// <summary>
     /// In-memory buffer for incoming acks. Acks are NOT written to storage immediately —
@@ -237,7 +248,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
     private void TryScheduleFetchReminders()
     {
-        if (PendingReminders?.TotalPendingReminders > 0)
+        var now = TimeProvider.Now;
+        var delay = TimeSpan.MaxValue;
+        if (PendingReminders.TotalPendingReminders > 0)
         {
             // Always use a timer — never Self.Tell(FetchReminders.Instance) directly.
             // Self.Tell creates a tight delivery loop when an actor reschedules the same
@@ -245,12 +258,31 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             // and the immediate fetch re-delivers it ~12 times/second).
             // StartSingleTimer with the same key cancels any prior pending timer,
             // naturally debouncing rapid TryScheduleFetchReminders calls.
-            var delay = PendingReminders.TimeUntilNext;
-            if (delay < TimeSpan.Zero)
-                delay = TimeSpan.Zero;
-            Timers.StartSingleTimer(FetchReminders.Instance, FetchReminders.Instance, delay);
+            // Storage calls since the overview was read took time; count the delay from now.
+            // MaxValue means "no deadline"; subtracting from it would overflow if the clock stepped back.
+            delay = PendingReminders.TimeUntilNext;
+            if (delay != TimeSpan.MaxValue)
+                delay -= now - _overviewAsOf;
         }
+
+        if (_storageRecoveryAt is { } recoveryAt && recoveryAt - now < delay)
+            delay = recoveryAt - now;
+        if (delay == TimeSpan.MaxValue)
+            return;
+        if (_fetchRetryNotBefore is { } retryAt && retryAt - now > delay)
+            delay = retryAt - now;
+        if (delay < TimeSpan.Zero)
+            delay = TimeSpan.Zero;
+        Timers.StartSingleTimer(FetchReminders.Instance, FetchReminders.Instance, delay);
     }
+
+    private void ScheduleStorageRecovery()
+    {
+        _storageRecoveryAt ??= TimeProvider.Now.Add(Settings.StorageTimeout * 2);
+        TryScheduleFetchReminders();
+    }
+
+    private void ClearStorageRecoveryOnRead() => _storageRecoveryAt = null;
 
     private static (ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc) ToOccurrenceKey(
         ReminderEntity entity,
@@ -402,7 +434,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         if (!committed)
         {
             // The commit may have landed even though it reported failure: pick up a retry left Pending.
-            await ReloadPendingOverviewAfterCommitErrorAsync();
+            await ReloadPendingOverviewAndScheduleFetchAsync();
             replyTo.Tell(new ReminderProtocol.ReminderNackResponse(
                 nack.Entity,
                 nack.Key,
@@ -413,8 +445,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             return;
         }
 
-        await ReloadPendingOverviewAsync();
-        TryScheduleFetchReminders();
+        await ReloadPendingOverviewAndScheduleFetchAsync();
         await RefreshAckTimeoutScheduleFromStorageAsync();
 
         replyTo.Tell(new ReminderProtocol.ReminderNackResponse(
@@ -519,6 +550,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             case InitResult init:
                 _log.Info("Loaded reminder overview from storage: {0}", init.Overview);
                 PendingReminders = init.Overview;
+                _overviewAsOf = init.AsOf;
 
                 // Schedule ack timeout check BEFORE unstashing so the mailbox is
                 // fully ready when client messages are replayed — no RunTask gap.
@@ -600,11 +632,25 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         // bail out early if we couldn't schedule or if it was a no-op
                         if (r.ResponseCode != ReminderScheduleResponseCode.Success)
                         {
+                            if (r.ResponseCode == ReminderScheduleResponseCode.Error)
+                                ScheduleStorageRecovery();
                             replyTo.Tell(r, ActorRefs.NoSender);
                             return;
                         }
 
-                        await ReloadPendingOverviewAsync();
+                        try
+                        {
+                            await ReloadPendingOverviewAsync();
+                        }
+                        catch (Exception ex)
+                        {
+                            // The reminder is stored. Its due time is known, so the fetch timer can be
+                            // armed from it alone; the next fetch brings a fresh overview.
+                            _log.Warning(ex, "Failed to reload the overview after storing {0}; arming the fetch timer from its due time", scheduleSingle);
+                            // TimeUntilNext counts from _overviewAsOf, not from now.
+                            PendingReminders = PendingReminders.Apply(reminder, _overviewAsOf).newOverview;
+                        }
+
                         TryScheduleFetchReminders();
 
                         // Reply AFTER the fetch timer is scheduled so the caller
@@ -614,6 +660,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     catch (Exception ex)
                     {
                         _log.Error(ex, "Failed to schedule reminder {0}", scheduleSingle);
+                        ScheduleStorageRecovery();
                         replyTo.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle,
                             ReminderScheduleResponseCode.Error, ex.Message), ActorRefs.NoSender);
                     }
@@ -863,15 +910,17 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     private async Task ReloadPendingOverviewAsync()
     {
         using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-        PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
+        var now = TimeProvider.Now;
+        PendingReminders = await Storage.GetRemindersOverviewAsync(now, cts.Token);
+        _overviewAsOf = now;
+        ClearStorageRecoveryOnRead();
     }
 
     /// <summary>
-    /// After a mutation commit that reported failure (returned false or threw): it may have landed, so
-    /// reload the overview and arm the fetch timer. A failed reload is logged and swallowed, and an
-    /// ack-timeout check is armed so the next one reloads again.
+    /// Reconcile Pending work after a mutation, including an indeterminate commit. A failed read
+    /// retains a fetch recovery deadline independently of the remaining AwaitingAck rows.
     /// </summary>
-    private async Task ReloadPendingOverviewAfterCommitErrorAsync()
+    private async Task ReloadPendingOverviewAndScheduleFetchAsync()
     {
         try
         {
@@ -880,8 +929,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
         catch (Exception ex)
         {
-            _log.Warning(ex, "Failed to reload reminder overview after a commit error; retrying at the next ack-timeout check");
-            ScheduleAckTimeoutCheck(TimeProvider.Now.Add(Settings.StorageTimeout * 2));
+            _log.Warning(ex, "Failed to reload reminder overview after a mutation; retrying at the next recovery fetch");
+            ScheduleStorageRecovery();
         }
     }
 
@@ -907,7 +956,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     /// initialization completes in a single PipeTo — no stashed RunTask to block
     /// the mailbox after UnstashAll.
     /// </summary>
-    private sealed record InitResult(ReminderOverview Overview, DateTimeOffset? NextAckDeadline) : Akka.Actor.INoSerializationVerificationNeeded;
+    private sealed record InitResult(ReminderOverview Overview, DateTimeOffset AsOf, DateTimeOffset? NextAckDeadline) : Akka.Actor.INoSerializationVerificationNeeded;
 
     private Task LoadReminderOverview()
     {
@@ -915,9 +964,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         {
             await ExpireRemindersAsync(TimeProvider.Now);
             using var cts = new CancellationTokenSource(Settings.StorageTimeout);
-            var overview = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
+            var now = TimeProvider.Now;
+            var overview = await Storage.GetRemindersOverviewAsync(now, cts.Token);
             var nextAckDeadline = await Storage.GetNextAwaitingAckDeadlineAsync(cts.Token);
-            return new InitResult(overview, nextAckDeadline);
+            return new InitResult(overview, now, nextAckDeadline);
         }
 
         var init = LoadAsync();
@@ -1274,9 +1324,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         else
             await RefreshAckTimeoutScheduleFromStorageAsync();
 
-        // Always reload: a commit that reported failure may have landed, leaving retries Pending in
-        // storage, and an earlier failed reload is retried here. One cheap read per check.
-        await ReloadPendingOverviewAfterCommitErrorAsync();
+        // Mutations may have created Pending retries even when the commit reported failure.
+        // An empty timeout pass needs no pending aggregate read.
+        if (processingFailed || totalRetried > 0 || totalFailed > 0 || totalExpired > 0)
+            await ReloadPendingOverviewAndScheduleFetchAsync();
 
         if (totalRetried > 0 || totalFailed > 0 || totalExpired > 0)
         {
@@ -1295,7 +1346,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         var totalFailed = 0;
         var totalExpired = 0;
         var latestOverview = PendingReminders;
+        var fetchedAt = _overviewAsOf;
         var needsOverviewReload = false;
+        var fetchFailed = false;
 
         // When the write circuit is open, probe with a single reminder to test
         // write availability before resuming full-batch processing. This limits
@@ -1315,8 +1368,11 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             try
             {
                 using var fetchCts = new CancellationTokenSource(Settings.StorageTimeout);
-                batch = await Storage.GetNextRemindersAsync(untilDeadline, TimeProvider.Now,
+                fetchedAt = TimeProvider.Now;
+                batch = await Storage.GetNextRemindersAsync(untilDeadline, fetchedAt,
                     new ReminderBatchSize(effectiveBatchSize), fetchCts.Token);
+                _fetchRetryNotBefore = null;
+                ClearStorageRecoveryOnRead();
                 _log.Info("Fetched {0} due reminders (batch)", batch.Reminders.Count);
                 latestOverview = batch.NextOverview;
             }
@@ -1326,6 +1382,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 // so the write circuit remains unchanged.
                 _log.Error(ex, "Failed to fetch due reminders from storage");
                 needsOverviewReload = true;
+                fetchFailed = true;
                 break;
             }
 
@@ -1498,7 +1555,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                     // A row this commit also ends (Failed/Expired) is not pending work.
                     foreach (var pendingReminder in occurrencesToUpsert.Where(u => !finalAttempts.Contains(u)))
                     {
-                        batchOverview = batchOverview.Apply(pendingReminder, completedAt).newOverview;
+                        batchOverview = batchOverview.Apply(pendingReminder, fetchedAt).newOverview;
                     }
                 }
 
@@ -1554,16 +1611,21 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             try
             {
                 using var overviewCts = new CancellationTokenSource(Settings.StorageTimeout);
-                PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, overviewCts.Token);
+                var now = TimeProvider.Now;
+                PendingReminders = await Storage.GetRemindersOverviewAsync(now, overviewCts.Token);
+                _overviewAsOf = now;
             }
             catch (Exception ex)
             {
                 _log.Error(ex, "Failed to reload reminder overview after processing");
+                fetchFailed = true;
+                ScheduleStorageRecovery();
             }
         }
         else
         {
             PendingReminders = latestOverview;
+            _overviewAsOf = fetchedAt;
         }
 
         _log.Info(
@@ -1574,6 +1636,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             totalExpired,
             PendingReminders.TimeUntilNext);
 
+        // An old, already-due overview must not turn a failed fetch into immediate polling.
+        // Count a recovery delay from the end of the failed pass, even when the overview read works.
+        if (fetchFailed)
+            _fetchRetryNotBefore = TimeProvider.Now.Add(Settings.StorageTimeout * 2);
         TryScheduleFetchReminders();
     }
 
