@@ -385,12 +385,24 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             attemptCount = terminalAttempt.AttemptCount;
         }
 
-        using var mutationCts = new CancellationTokenSource(Settings.StorageTimeout);
-        var committed = await Storage.CommitReminderMutationsAsync(
-            new ReminderMutationBatch(pendingUpserts, completions, []),
-            mutationCts.Token);
+        bool committed;
+        try
+        {
+            using var mutationCts = new CancellationTokenSource(Settings.StorageTimeout);
+            committed = await Storage.CommitReminderMutationsAsync(
+                new ReminderMutationBatch(pendingUpserts, completions, []),
+                mutationCts.Token);
+        }
+        catch (Exception ex)
+        {
+            _log.Error(ex, "Failed to commit negative acknowledgement for reminder occurrence [{0}] / [{1}]", nack.Entity, nack.Key);
+            committed = false;
+        }
+
         if (!committed)
         {
+            // The commit may have landed even though it reported failure: pick up a retry left Pending.
+            await ReloadPendingOverviewAfterCommitErrorAsync();
             replyTo.Tell(new ReminderProtocol.ReminderNackResponse(
                 nack.Entity,
                 nack.Key,
@@ -854,6 +866,25 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         PendingReminders = await Storage.GetRemindersOverviewAsync(TimeProvider.Now, cts.Token);
     }
 
+    /// <summary>
+    /// After a mutation commit that reported failure (returned false or threw): it may have landed, so
+    /// reload the overview and arm the fetch timer. A failed reload is logged and swallowed, and an
+    /// ack-timeout check is armed so the next one reloads again.
+    /// </summary>
+    private async Task ReloadPendingOverviewAfterCommitErrorAsync()
+    {
+        try
+        {
+            await ReloadPendingOverviewAsync();
+            TryScheduleFetchReminders();
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "Failed to reload reminder overview after a commit error; retrying at the next ack-timeout check");
+            ScheduleAckTimeoutCheck(TimeProvider.Now.Add(Settings.StorageTimeout * 2));
+        }
+    }
+
     private async Task ExpireRemindersAsync(DateTimeOffset now)
     {
         try
@@ -1238,16 +1269,14 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 break;
         }
 
-        if (totalRetried > 0 || totalFailed > 0 || totalExpired > 0)
-        {
-            await ReloadPendingOverviewAsync();
-            TryScheduleFetchReminders();
-        }
-
         if (processingFailed)
             ScheduleAckTimeoutCheck(TimeProvider.Now.Add(Settings.StorageTimeout * 2));
         else
             await RefreshAckTimeoutScheduleFromStorageAsync();
+
+        // Always reload: a commit that reported failure may have landed, leaving retries Pending in
+        // storage, and an earlier failed reload is retried here. One cheap read per check.
+        await ReloadPendingOverviewAfterCommitErrorAsync();
 
         if (totalRetried > 0 || totalFailed > 0 || totalExpired > 0)
         {
@@ -1443,6 +1472,10 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
                 if (writeFailed)
                 {
+                    // The commit may have landed even though it reported failure. Arm the ack-timeout
+                    // check so the normal timeout path finds and retries any rows left AwaitingAck.
+                    TrackAckDeadlines(remindersToAwaitAck);
+
                     _writeCircuitOpen = true;
                     _log.Warning("Write circuit OPEN — database writes are failing. " +
                                  "Pausing batch processing until writes recover. " +
