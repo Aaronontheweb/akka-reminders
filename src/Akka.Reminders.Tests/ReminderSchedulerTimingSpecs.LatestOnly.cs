@@ -138,7 +138,7 @@ public partial class ReminderSchedulerTimingSpecs
             OnCommit = batch =>
             {
                 lock (conflicting)
-                    conflicting.AddRange(batch.CompletedReminders
+                    conflicting.AddRange(batch.CompletedReminders.Concat(batch.ActiveCompletions)
                         .Where(c => batch.AwaitingAckReminders.Any(a => a.Entity == c.Entity && a.Key == c.Key && a.DueTimeUtc == c.DueTimeUtc))
                         .Select(c => c.DueTimeUtc.ToString("O")));
             }
