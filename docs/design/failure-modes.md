@@ -1,5 +1,9 @@
 # Reminder Processing: Failure Modes and Design Decisions
 
+This document is the behavioral specification for the reminder scheduler and its behavior model.
+Model assertions must follow the guarantees stated here; a regression test does not establish a new
+guarantee by itself.
+
 ## Delivery Semantics
 
 Akka.Reminders uses **at-least-once delivery with explicit acknowledgement**.
@@ -43,6 +47,22 @@ Schedule and cancel handlers reply to the caller **after** `ReloadPendingOvervie
 If the reminder was stored but the overview reload then fails, the schedule handler still replies `Success`: it arms the fetch timer from the due time of the reminder it just stored, and the next fetch reads a fresh overview. This covers schedule only.
 
 Known limit: a cancel or cancel-all whose overview reload fails still replies `Error`, although the cancel was stored.
+
+### Meaning of a scheduling error
+
+A scheduling `Error` or caller-side timeout means that acceptance is unknown.
+It does not prove that the write was rolled back or that storage was unchanged. A stored reminder may
+therefore be delivered even though the caller received `Error`.
+
+If the scheduling write persisted but reported failure, the scheduler must automatically rediscover
+the persisted work once storage is available again. Recovery must not require another client command
+or a manual restart. The scheduler processes eligible occurrences under the normal deadline,
+retry-budget, and latest-only rules; expired, exhausted, cancelled, or superseded work does not gain
+a new delivery guarantee. If the write did not persist, recovery must not create the reminder.
+
+Repeating a schedule call is a new scheduling operation, not an idempotent replay of acceptance. It can
+replace active work for the same entity and key and reset occurrence state. Consumers must remain
+idempotent if the caller schedules again after an uncertain result.
 
 ## Processing Pipeline
 
@@ -197,6 +217,28 @@ Delivery-state writes now happen **before** user messages are sent.
 - Awaiting-ack state is stored in the database, not only in memory.
 - On startup, the scheduler loads the next ack deadline from storage as part of `InitResult` and schedules the timeout check before processing any messages.
 - Late acks remain safe because they are matched by `DueTimeUtc`.
+
+### Storage read failure and automatic recovery
+
+The normal recovery path catches a storage failure and schedules another processing or recovery tick.
+Repeated failures must be paced with a finite, nonzero retry delay rather than causing a loop of immediate
+failed reads. If a failure instead causes a supervised actor restart, automatic reinitialization is
+also an acceptable recovery path.
+
+Neither path may strand durable work. Once storage is healthy and the scheduler can process messages,
+it must automatically resume eligible `Pending` occurrences and recover `AwaitingAck` occurrences
+through the normal timeout path. Recovery must not require a new client command or a manual restart.
+Completing unrelated work, such as acknowledging another occurrence, must not suppress recovery of
+work that still needs to be rediscovered after a failed read.
+
+Recovery preserves occurrence identity, attempt counts, retry backoff, and deadlines. It must not
+reset retry budgets, reopen terminal occurrences, or replay a backlog of expired recurring slots.
+The normal expiry and latest-only rules still apply when storage returns.
+
+Storage failures and restarts may delay processing. There is no fixed wall-clock delivery bound during
+these failures. The behavior model must check recovery after a sufficient healthy processing period,
+accounting for further failures or scheduler stalls during that period. Its recovery allowance is a
+test observation window, not a production delivery guarantee.
 
 ### Scheduler lag longer than the repeat interval
 
