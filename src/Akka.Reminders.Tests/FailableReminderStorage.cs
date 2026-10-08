@@ -32,6 +32,17 @@ internal sealed class FailableReminderStorage : IReminderStorage
     public bool FailWrites { get; set; }
 
     /// <summary>
+    /// When true, the next mutation commit is applied to the inner storage and then reports failure
+    /// (once), like a commit that reaches the server while the client sees a timeout or a dropped connection.
+    /// </summary>
+    public bool ApplyNextCommitThenReportFailure { get; set; }
+
+    /// <summary>
+    /// Like <see cref="ApplyNextCommitThenReportFailure"/>, but the failure is a thrown <see cref="TimeoutException"/>.
+    /// </summary>
+    public bool ApplyNextCommitThenThrow { get; set; }
+
+    /// <summary>
     /// When true, the next overview read throws (once).
     /// </summary>
     public bool FailNextOverviewRead { get; set; }
@@ -88,7 +99,21 @@ internal sealed class FailableReminderStorage : IReminderStorage
             _firstCommitMutationFailure.TrySetResult();
             throw new TimeoutException("Simulated database write timeout");
         }
+        if (ApplyNextCommitThenReportFailure || ApplyNextCommitThenThrow)
+        {
+            var throws = ApplyNextCommitThenThrow;
+            ApplyNextCommitThenReportFailure = ApplyNextCommitThenThrow = false;
+            return ApplyThenFailAsync(mutationBatch, throws, ct);
+        }
         return _inner.CommitReminderMutationsAsync(mutationBatch, ct);
+    }
+
+    private async Task<bool> ApplyThenFailAsync(ReminderMutationBatch mutationBatch, bool throws, CancellationToken ct)
+    {
+        await _inner.CommitReminderMutationsAsync(mutationBatch, ct);
+        if (throws)
+            throw new TimeoutException("Simulated database commit timeout after the commit landed");
+        return false;
     }
 
     public Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(ReminderEntity entity, ReminderKey key, CancellationToken ct = default)
