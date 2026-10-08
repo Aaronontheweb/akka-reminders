@@ -5,6 +5,42 @@ namespace Akka.Reminders.Tests;
 
 public partial class ReminderSchedulerTimingSpecs
 {
+    [Fact]
+    public async Task Should_RediscoverPending_When_RecoveryFetchSucceedsButCommitAndOverviewFail()
+    {
+        var storage = new FailableReminderStorage(new InMemoryReminderStorage());
+        var settings = DedicatedSettings(ackTimeout: TimeSpan.FromSeconds(10)) with
+        {
+            StorageTimeout = TimeSpan.FromSeconds(1)
+        };
+        var (scheduler, entity, region) = Setup("recovery-follow-up-fails", storage, settings);
+        var due = VirtualTime.Now.AddSeconds(1);
+        var key = new ReminderKey("persisted-but-unknown");
+        Assert.Null(await StatusAsync(scheduler, entity, key, due));
+        storage.ApplyNextScheduleThenReportFailure = true;
+        var response = await scheduler.Ask<ReminderProtocol.ReminderScheduled>(
+            new ReminderProtocol.ScheduleReminder(entity, key, due, "payload"), ReplyTimeout, Ct);
+        Assert.Equal(ReminderScheduleResponseCode.Error, response.ResponseCode);
+        await AwaitStatusAsync(scheduler, entity, key, due, ReminderCompletionStatus.Pending);
+
+        // The recovery fetch discovers the row, but cannot move it to AwaitingAck or refresh
+        // the cached overview. The pre-fetch overview is still empty.
+        storage.FailWrites = true;
+        storage.FailNextOverviewRead = true;
+        VirtualTime.Advance(settings.StorageTimeout * 2);
+        await AwaitStatusAsync(scheduler, entity, key, due, ReminderCompletionStatus.Pending);
+        Assert.Equal(1, storage.Fetches);
+        Assert.False(storage.FailNextOverviewRead);
+        Assert.False(region.HasMessages);
+
+        // Healthy storage must be revisited without a new command that reloads the overview.
+        // Even the phantom ack deadline cannot help: the failed commit created no AwaitingAck row.
+        storage.FailWrites = false;
+        VirtualTime.Advance(settings.AckTimeout + settings.StorageTimeout * 2);
+        await StatusAsync(scheduler, entity, key, due); // processing barrier, no overview refresh
+        Assert.Equal(due, await NextDeliveryAsync(region));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
