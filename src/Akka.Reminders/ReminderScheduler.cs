@@ -158,6 +158,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     // Storage uncertainty needs a fetch even when the cached overview is empty. Keep this
     // separate from ack deadlines: acknowledging the last delivered row cannot cancel recovery.
     private DateTimeOffset? _storageRecoveryAt;
+    private DateTimeOffset? _fetchRetryNotBefore;
 
     /// <summary>
     /// In-memory buffer for incoming acks. Acks are NOT written to storage immediately —
@@ -245,7 +246,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
         }
     }
 
-    private void TryScheduleFetchReminders(DateTimeOffset? notBefore = null)
+    private void TryScheduleFetchReminders()
     {
         var now = TimeProvider.Now;
         var delay = TimeSpan.MaxValue;
@@ -268,8 +269,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             delay = recoveryAt - now;
         if (delay == TimeSpan.MaxValue)
             return;
-        if (notBefore is { } earliest && earliest - now > delay)
-            delay = earliest - now;
+        if (_fetchRetryNotBefore is { } retryAt && retryAt - now > delay)
+            delay = retryAt - now;
         if (delay < TimeSpan.Zero)
             delay = TimeSpan.Zero;
         Timers.StartSingleTimer(FetchReminders.Instance, FetchReminders.Instance, delay);
@@ -1370,6 +1371,7 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                 fetchedAt = TimeProvider.Now;
                 batch = await Storage.GetNextRemindersAsync(untilDeadline, fetchedAt,
                     new ReminderBatchSize(effectiveBatchSize), fetchCts.Token);
+                _fetchRetryNotBefore = null;
                 ClearStorageRecoveryOnRead();
                 _log.Info("Fetched {0} due reminders (batch)", batch.Reminders.Count);
                 latestOverview = batch.NextOverview;
@@ -1616,6 +1618,8 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
             catch (Exception ex)
             {
                 _log.Error(ex, "Failed to reload reminder overview after processing");
+                fetchFailed = true;
+                ScheduleStorageRecovery();
             }
         }
         else
@@ -1634,7 +1638,9 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
         // An old, already-due overview must not turn a failed fetch into immediate polling.
         // Count a recovery delay from the end of the failed pass, even when the overview read works.
-        TryScheduleFetchReminders(fetchFailed ? TimeProvider.Now.Add(Settings.StorageTimeout * 2) : null);
+        if (fetchFailed)
+            _fetchRetryNotBefore = TimeProvider.Now.Add(Settings.StorageTimeout * 2);
+        TryScheduleFetchReminders();
     }
 
     public ITimerScheduler Timers { get; set; } = null!;

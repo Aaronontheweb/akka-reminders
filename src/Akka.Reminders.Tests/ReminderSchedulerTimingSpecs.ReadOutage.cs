@@ -1,3 +1,4 @@
+using Akka.Actor;
 using Akka.Reminders.Storage;
 
 namespace Akka.Reminders.Tests;
@@ -35,6 +36,18 @@ public partial class ReminderSchedulerTimingSpecs
         }
         Assert.Equal(1, storage.Fetches);
         Assert.False(region.HasMessages);
+
+        if (!overviewAlsoFails)
+        {
+            // A successful unrelated command refreshes the overdue overview and re-arms fetch.
+            // It must not erase the delay for the still-failing fetch operation.
+            var cancelled = await scheduler.Ask<ReminderProtocol.RemindersCancelled>(
+                new ReminderProtocol.CancelReminder(entity, new ReminderKey("unrelated")), ReplyTimeout, Ct);
+            Assert.Equal(ReminderCancelResponseCode.NotFound, cancelled.ResponseCode);
+            VirtualTime.Advance(TimeSpan.FromTicks(1));
+            await StatusAsync(scheduler, entity, key, due);
+            Assert.Equal(1, storage.Fetches);
+        }
 
         // Storage stays unavailable through another recovery tick; retry pacing must continue.
         VirtualTime.Advance(settings.StorageTimeout * 2 + TimeSpan.FromTicks(1));
