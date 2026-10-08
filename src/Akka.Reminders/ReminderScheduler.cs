@@ -603,7 +603,19 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             return;
                         }
 
-                        await ReloadPendingOverviewAsync();
+                        try
+                        {
+                            await ReloadPendingOverviewAsync();
+                        }
+                        catch (Exception ex)
+                        {
+                            // The reminder is stored. Its due time is known, so the fetch timer can be
+                            // armed from it alone; the next fetch brings a fresh overview.
+                            _log.Warning(ex, "Failed to reload the overview after storing {0}; arming the fetch timer from its due time", scheduleSingle);
+                            // TimeUntilNext counts from _overviewAsOf, not from now.
+                            PendingReminders = PendingReminders.Apply(reminder, _overviewAsOf).newOverview;
+                        }
+
                         TryScheduleFetchReminders();
 
                         // Reply AFTER the fetch timer is scheduled so the caller
