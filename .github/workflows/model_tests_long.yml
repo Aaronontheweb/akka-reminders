@@ -36,4 +36,4 @@ jobs:
         env:
           CsCheck_Iter: ${{ inputs.iterations }}
           REMINDERS_CSCHECK_SQL: ${{ inputs.sql && '1' || '0' }}
-        run: dotnet test src/Akka.Reminders.Tests -c Release --no-build --filter "FullyQualifiedName~Akka.Reminders.Tests.Model.Reminder"
+        run: dotnet test src/Akka.Reminders.Tests -c Release --no-build --filter "FullyQualifiedName~Akka.Reminders.Tests.Model"

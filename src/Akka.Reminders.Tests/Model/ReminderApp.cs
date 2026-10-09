@@ -61,7 +61,6 @@ public sealed class ReminderApp
 
     public ModelSettings Settings { get; }
     public Journal Journal { get; }
-    public string StorageName => _factory.Name;
     private VirtualClock Clock => _host!.Clock;
 
     public static ReminderEntity EntityOf(int index) => new(index == 2 ? "region-1" : "region-0", index == 1 ? "e1" : "e0");
@@ -114,6 +113,9 @@ public sealed class ReminderApp
         foreach (var batch in late.Chunk(200))
             await Task.WhenAll(batch.Select(AckAsync));
     });
+
+    /// <summary>Acks a particular observed delivery, including a late or duplicate acknowledgement.</summary>
+    public Task Acknowledge(Delivered delivery) => Do(() => AckAsync(delivery));
 
     /// <summary>From now on this entity acks at once, nacks at once, or stays silent.</summary>
     public Task SetRecipient(int entity, Recipient mode) => Do(() => _recipients[entity] = mode);
@@ -298,6 +300,11 @@ public sealed class ReminderApp
         }
         catch (TaskCanceledException)
         {
+            // Graceful shutdown timed out. Retire the whole host during cleanup so actors from
+            // this trace cannot survive into another sample; a restart cannot safely continue.
+            _signals.Stuck = true;
+            if (!_stopped)
+                throw new ModelViolation("SchedulerStops: the scheduler did not stop before restart");
         }
 
         _scheduler = ActorRefs.Nobody;

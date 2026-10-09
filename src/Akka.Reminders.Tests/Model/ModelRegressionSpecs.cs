@@ -49,6 +49,13 @@ public sealed class ModelRegressionSpecs
         new ScheduleRecurring(0, 0, 0, 1000, null),
         new Tick(3000));
 
+    // Captured from the previous generator before changing its composition. Keep the concrete input:
+    // seeds are tied to a generator's shape, but this superseded-ack counterexample must still be checked.
+    [Fact(DisplayName = "Should_RejectTheSupersededAck_When_APastAnchorAndItsEarlySuccessorAreDeliveredTogether")]
+    public Task PastAnchorDoesNotKeepItsSupersededAcknowledgementAlive() => RunStrictAsync(
+        new ModelSettings(1, 500, 60000, 60000, 3, 1, 1, 256),
+        new ScheduleRecurring(1, 0, -3599999, 3600000, null));
+
     // A re-registration leaves the old registration's rows behind. A retried occurrence of the new
     // series must not mistake one of them for its own next occurrence and stop writing one.
     [Fact(DisplayName = "Should_KeepSeriesAlive_When_AnOldRegistrationLeftARowOnTheNextSlot")]

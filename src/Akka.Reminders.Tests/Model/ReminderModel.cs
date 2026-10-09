@@ -10,14 +10,21 @@ public enum Phase
     Done,         // acked, expired, out of attempts, cancelled, or replaced by a newer occurrence
 }
 
+/// <summary>What the model knows about acknowledgement of this occurrence, not about its whole lifecycle.</summary>
+public enum AcknowledgementState
+{
+    NotAcknowledged,
+    Acknowledged,
+    AcceptanceUnknown,
+}
+
 /// <summary>One occurrence (one due time) of a reminder.</summary>
 public sealed class Slot
 {
     public List<DateTimeOffset> Deliveries { get; } = [];
     public DateTimeOffset? RequiredAt { get; set; } // the first delivery must arrive by then; null = not required
     public DateTimeOffset? RetryAt { get; set; }    // retry time promised by the reply to a nack
-    public bool Acked { get; set; }
-    public bool MaybeAcked { get; set; }           // a targeted landed ack call had uncertain eligibility
+    public AcknowledgementState Acknowledgement { get; set; }
     public bool NackEndedIt { get; set; }           // a nack answered Failed or Expired
 }
 
@@ -65,7 +72,7 @@ public sealed class Reminder(int id, int entity, int key, DateTimeOffset firstDu
 /// The scheduler is "awake" except during a Lag (a stall). An occurrence must be delivered at the first
 /// awake moment at or after its due time, unless its deadline has passed by then.
 /// </summary>
-public sealed class ReminderModel(ModelSettings settings)
+public sealed partial class ReminderModel(ModelSettings settings)
 {
     private readonly List<(DateTimeOffset From, DateTimeOffset To)> _awake = [(VirtualClock.Origin, VirtualClock.Origin)];
 
@@ -161,7 +168,7 @@ public sealed class ReminderModel(ModelSettings settings)
         if (r.Interval is not null)
             return true; // a recurring reminder always has a next occurrence
         var slot = r.Slot(r.FirstDue);
-        if (slot.Acked || slot.NackEndedIt)
+        if (slot.Acknowledgement == AcknowledgementState.Acknowledged || slot.NackEndedIt)
             return false;
         if (PhaseOf(r, r.FirstDue) != Phase.Done)
             return true;
@@ -175,7 +182,8 @@ public sealed class ReminderModel(ModelSettings settings)
         if (Reminders.FirstOrDefault(x => x.Id == id) is not { } r)
             return;
         r.Slot(due).Deliveries.Add(at);
-        r.Slot(due).MaybeAcked = false; // observing another delivery resolves acceptance uncertainty
+        if (r.Slot(due).Acknowledgement == AcknowledgementState.AcceptanceUnknown)
+            r.Slot(due).Acknowledgement = AcknowledgementState.NotAcknowledged;
         r.Slot(due).RetryAt = null;
         if (due > r.NewestDelivered)
             r.NewestDelivered = due;
@@ -186,7 +194,8 @@ public sealed class ReminderModel(ModelSettings settings)
     {
         if (Live(entity, key) is not { } r || PhaseOf(r, due) != Phase.AwaitingAck)
             return false;
-        return r.Slot(due).Acked = true;
+        r.Slot(due).Acknowledgement = AcknowledgementState.Acknowledged;
+        return true;
     }
 
     /// <summary>Returns the reply a nack must get, and the retry time when one is promised.</summary>
@@ -220,7 +229,7 @@ public sealed class ReminderModel(ModelSettings settings)
     {
         var slot = r.Slot(due);
         var deadline = r.Deadline(due);
-        if (!r.Live || slot.Acked || slot.NackEndedIt || r.NewestDelivered > due) // latest-only: a newer delivery ends it
+        if (!r.Live || slot.Acknowledgement == AcknowledgementState.Acknowledged || slot.NackEndedIt || r.NewestDelivered > due) // latest-only: a newer delivery ends it
             return Phase.Done;
         if (slot.Deliveries.Count == 0)
             return deadline > Now ? Phase.Waiting : Phase.Done;
