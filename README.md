@@ -758,9 +758,11 @@ public async Task Reminder_should_fire_at_scheduled_time()
 
 ## Native AOT
 
-Local mode (`WithLocalReminders`) works under .NET Native AOT. All five packages are marked `IsAotCompatible` and produce no trim or AOT warnings of their own. The repository's AOT canary ([src/aot/Akka.Reminders.AOT.App](src/aot/Akka.Reminders.AOT.App)) runs in CI on every pull request: it publishes with `PublishAot`, schedules, delivers and acks reminders with in-memory and SQLite storage, and restarts to deliver a reminder restored from the SQLite file.
+Local mode (`WithLocalReminders`) works under .NET Native AOT. All five packages are marked `IsAotCompatible` and produce no trim or AOT warnings of their own. The repository's AOT canary ([src/aot/Akka.Reminders.AOT.App](src/aot/Akka.Reminders.AOT.App)) has an independent `Native AOT canary (linux-x64)` CI job: it publishes with `PublishAot`, schedules, delivers and acks reminders with in-memory and SQLite storage, and restarts to deliver a reminder restored from the SQLite file.
 
 Clustered mode (`WithReminders`, which runs the scheduler as a cluster singleton and delivers through Cluster.Sharding) is **not supported** under Native AOT yet, because Akka.Cluster itself is not AOT-ready in Akka.NET 1.6.
+
+Start with the [Akka.NET v1.6 getting started guide](https://github.com/akkadotnet/akka.net/blob/1.6.0-beta3/GETTING_STARTED_V1.6.md), also linked from Akka.NET's 1.6 release notes. Its [Native AOT](https://github.com/akkadotnet/akka.net/blob/1.6.0-beta3/GETTING_STARTED_V1.6.md#native-aot-and-trimming) and [source-generated serializer](https://github.com/akkadotnet/akka.net/blob/1.6.0-beta3/GETTING_STARTED_V1.6.md#source-generated-serializer-akkaserializationv2) sections explain the runtime and serialization setup.
 
 ### Register your message types
 
@@ -782,9 +784,21 @@ builder
 - On the JIT, registration is optional and changes nothing: unregistered types still go through reflection.
 - Outside Akka.Hosting, call `ReminderMessageTypes.Register<PaymentRetry>()` at startup. Registration is process-wide and safe to repeat.
 
-### Register a serializer for your messages
+### Use an AOT-compatible payload serializer
 
-Akka.NET turns its `Akka.DynamicTypeLoading` feature switch off for AOT publishes. With the switch off there is no JSON fallback serializer, and SQL storage serializes each reminder's message through Akka.NET serialization. Register a serializer for your message types with `WithCustomSerializer`, as in the example above. In-memory storage does not serialize messages.
+Akka.NET turns its `Akka.DynamicTypeLoading` feature switch off for AOT publishes. **Reflection-based serializers do not work under Native AOT**, including Akka.NET's default Newtonsoft.Json fallback, which is unavailable with the switch off. SQL storage serializes each reminder's payload through Akka.NET serialization; in-memory storage does not serialize payloads.
+
+For durable storage, use one of these options:
+
+- Akka.NET 1.6's source-generated serializer in `Akka.Serialization.V2`, which generates MessagePack serialization code at compile time.
+- An AOT-compatible built-in Akka.NET serializer, where it supports your payload type.
+- An AOT-compatible custom serializer, registered with `WithCustomSerializer` as in the example above. For example, a `SerializerWithStringManifest` implementation can map stable manifest strings to generated Protobuf parsers explicitly.
+
+Using `SerializerWithStringManifest` or Protobuf alone is not sufficient: the implementation must avoid runtime type discovery and code generation. Resolve manifests explicitly instead of relying on `Type.GetType` to reconstruct a payload type.
+
+`WithReminderMessage<T>()` only registers the `ReminderEnvelope<T>` factory. It does not register a payload serializer or change the serializer ID, manifest, or bytes of existing stored reminders.
+
+**Check existing stored reminders before switching to Native AOT.** The 1.5-to-1.6 read compatibility applies to the ordinary JIT runtime with dynamic type loading enabled. Old rows written through the JSON fallback are not automatically readable under AOT. Provide an AOT-compatible reader for their existing serializer IDs, manifests, and payload format, or migrate them before switching the store to Native AOT. Registering a different serializer for future writes does not migrate old rows.
 
 To test this behavior on the JIT before you publish, turn the switch off in your project file:
 
@@ -797,7 +811,6 @@ To test this behavior on the JIT before you publish, turn the switch off in your
 ### Environment notes
 
 - **SQL Server**: `Microsoft.Data.SqlClient` needs `<InvariantGlobalization>false</InvariantGlobalization>` under Native AOT.
-- **Satellite assemblies**: with `<InvariantGlobalization>true</InvariantGlobalization>` and a package that ships satellite resource assemblies, Akka.Hosting 1.6.0-beta2 crashes at startup in its MAUI detection. Until the Akka.Hosting fix ships, add `<SatelliteResourceLanguages>en</SatelliteResourceLanguages>` to your project.
 - **Expected warnings**: an AOT publish reports about 70 trim/AOT warnings from Akka.Remote, Akka.Cluster, Akka.DistributedData and Akka.Persistence. They appear because this package references Akka.Cluster.Hosting; local mode does not reach that code. [src/aot/Akka.Reminders.AOT.App/aot-warnings.baseline.txt](src/aot/Akka.Reminders.AOT.App/aot-warnings.baseline.txt) lists them.
 
 ## Architecture
