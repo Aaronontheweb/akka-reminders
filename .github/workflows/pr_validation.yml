@@ -11,6 +11,7 @@ on:
       - master
       - dev
       - main
+      - feature/akka-1.6
 
 jobs:
   test:
@@ -50,9 +51,28 @@ jobs:
         shell: bash
         run: dotnet test -c Release 
 
-      # Native AOT canary: local reminders with Akka.DynamicTypeLoading off, in-memory and SQLite
-      # storage, including a restart that restores a reminder from SQLite. Fails on any trim/AOT
-      # warning from Akka.Reminders, or any warning missing from the baseline.
+      - name: "dotnet pack"
+        run: dotnet pack -c Release -o ./bin/nuget
+
+  aot-canary:
+    name: Native AOT canary (linux-x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Independent of the test job so Native AOT has its own status check and still runs
+    # when the regular build or tests fail. Covers local mode with in-memory and SQLite
+    # storage, including recovery in a fresh process.
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: "Install .NET SDK"
+        uses: actions/setup-dotnet@v6.0.0
+        with:
+          global-json-file: "./global.json"
+
       - name: "Native AOT canary: publish"
         shell: bash
         run: |
@@ -67,6 +87,3 @@ jobs:
       - name: "Native AOT canary: run"
         shell: bash
         run: ./aot/app/Akka.Reminders.AOT.App
-
-      - name: "dotnet pack"
-        run: dotnet pack -c Release -o ./bin/nuget
