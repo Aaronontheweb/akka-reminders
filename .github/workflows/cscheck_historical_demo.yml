@@ -1,0 +1,56 @@
+name: CsCheck historical failure demo
+
+on:
+  pull_request:
+    branches: [demo/cscheck-before-fixes-base]
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    name: Discover failure (${{ matrix.model }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model: native-spec
+            test: Akka.Reminders.Tests.Model.RecurringConformanceSpecs.Scheduler_conforms_to_recurring_specification
+          - model: full-async
+            test: Akka.Reminders.Tests.Model.ReminderFaultSpecs.InMemory
+    steps:
+      - uses: actions/checkout@v7.0.0
+        with:
+          # Run this historical head even if somebody changes the PR base.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6.0.0
+        with:
+          global-json-file: global.json
+      - name: Verify production code is the pre-fix revision
+        run: git diff --exit-code 27bbaf17768440afaff5b748b1ef94056ec1d101 -- src ':!src/Akka.Reminders.Tests'
+      - name: Check the specification itself
+        run: >-
+          dotnet test src/Akka.Reminders.Tests -c Release
+          --filter 'FullyQualifiedName=Akka.Reminders.Tests.Model.RecurringConformanceSpecs.Specification_has_no_violations_or_unreachable_requirements'
+          --logger 'console;verbosity=detailed'
+      - name: Discover a historical scheduler failure
+        env:
+          CsCheck_Time: '10'
+          CsCheck_Threads: '1'
+        run: >-
+          dotnet test src/Akka.Reminders.Tests -c Release --no-build --no-restore
+          --filter 'FullyQualifiedName=${{ matrix.test }}'
+          --logger 'console;verbosity=detailed'
+          --logger 'trx;LogFileName=${{ matrix.model }}.trx'
+          --results-directory artifacts/test-results
+      - name: Keep the failing test result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cscheck-${{ matrix.model }}
+          path: artifacts/test-results
+          if-no-files-found: warn
+          retention-days: 14
