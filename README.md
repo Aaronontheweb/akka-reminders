@@ -514,7 +514,7 @@ Task<ReminderScheduled> ScheduleRecurringReminderAsync(
 ```
 
 Schedules a recurring reminder that fires repeatedly at the specified interval. Recurring reminders are
-latest-only: each occurrence expires when the next occurrence becomes due, or sooner if `maxDeliveryWindow`
+latest-only: each occurrence expires when the next occurrence is delivered or becomes due, or sooner if `maxDeliveryWindow`
 produces an earlier deadline.
 
 #### Cancel Reminder
@@ -574,6 +574,10 @@ var status = await client.GetOccurrenceStatusAsync(
 
 The status query returns terminal rows until normal pruning removes them.
 Official storage providers support status queries without a schema migration.
+
+For 0.7 recurring reminders, custom storage providers must implement `IConditionalReminderMutationStorage` and
+honor the insert-only successors and active-only completions in `ReminderMutationBatch` atomically. Existing
+`IReminderStorage` providers continue to support one-off reminders. See [the storage contract](docs/design/failure-modes.md#custom-storage-providers).
 
 The new delivery-control messages use new serializer manifests. Upgrade the
 reminder scheduler before a consumer calls this API. A 0.6 scheduler cannot
@@ -771,7 +775,7 @@ public async Task Reminder_should_fire_at_scheduled_time()
 6. Message wrapped in `ReminderEnvelope<T>` and delivered to the target shard region via `Tell`
 7. Recipient calls `IReminderClient.AckAsync(envelope)` to confirm receipt for that specific `DueTimeUtc`
 8. If ack times out: delivery retried with exponential backoff while the occurrence remains before deadline
-9. Recurring reminders are latest-only; older occurrences expire when the next occurrence becomes due
+9. Recurring reminders are latest-only; older occurrences expire when the next occurrence is delivered or becomes due
 10. Completed/cancelled/expired reminders are pruned periodically based on PruneInterval setting
 
 ### Reliability Features

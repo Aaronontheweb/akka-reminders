@@ -19,7 +19,7 @@
 
 **Included**
 
-- Everything in 1.5.73.1, including the recurring reminder fixes ([#143](https://github.com/Aaronontheweb/akka-reminders/issues/143), [#146](https://github.com/Aaronontheweb/akka-reminders/pull/146), [#148](https://github.com/Aaronontheweb/akka-reminders/pull/148)).
+- Everything in 1.5.73.2, including the scheduler fixes from 1.5.73.1 and the recurring reminder fixes ([#143](https://github.com/Aaronontheweb/akka-reminders/issues/143), [#146](https://github.com/Aaronontheweb/akka-reminders/pull/146), [#148](https://github.com/Aaronontheweb/akka-reminders/pull/148), [#150](https://github.com/Aaronontheweb/akka-reminders/issues/150), [#151](https://github.com/Aaronontheweb/akka-reminders/issues/151), [#153](https://github.com/Aaronontheweb/akka-reminders/issues/153), [#154](https://github.com/Aaronontheweb/akka-reminders/issues/154)).
 
 **Dependency Updates**
 

@@ -62,24 +62,14 @@ internal sealed class SqlServerDialect : ISqlDialect
             """;
     }
 
-    public string GetBatchUpsertRemindersSql(string schemaName, string tableName, int count)
+    public string GetBatchUpsertRemindersSql(string schemaName, string tableName, int count, bool insertIfAbsent = false)
     {
         var fullTableName = $"[{schemaName}].[{tableName}]";
         var values = string.Join(",\n                ",
             Enumerable.Range(0, count).Select(i =>
                 $"(@ShardRegionName{i}, @EntityId{i}, @ReminderKey{i}, @WhenUtc{i}, @DueTimeUtc{i}, @RepeatIntervalTicks{i}, @SerializerId{i}, @Manifest{i}, @Payload{i}, @AttemptCount{i}, @LastFailureReason{i}, @MaxDeliveryWindowTicks{i}, @DeliveryDeadlineUtc{i})"));
 
-        return $"""
-            MERGE {fullTableName} AS target
-            USING (VALUES
-                {values}
-            ) AS source(ShardRegionName, EntityId, ReminderKey, WhenUtc, DueTimeUtc, RepeatIntervalTicks,
-                        SerializerId, Manifest, Payload, AttemptCount, LastFailureReason,
-                        MaxDeliveryWindowTicks, DeliveryDeadlineUtc)
-            ON target.ShardRegionName = source.ShardRegionName
-               AND target.EntityId = source.EntityId
-               AND target.ReminderKey = source.ReminderKey
-               AND target.DueTimeUtc = source.DueTimeUtc
+        var whenMatched = insertIfAbsent ? "" : """
             WHEN MATCHED THEN
                 UPDATE SET
                     WhenUtc = source.WhenUtc,
@@ -96,6 +86,20 @@ internal sealed class SqlServerDialect : ISqlDialect
                     CompletionStatus = 'Pending',
                     DeliveredAtUtc = NULL,
                     AckDeadlineUtc = NULL
+            """;
+
+        return $"""
+            MERGE {fullTableName}{(insertIfAbsent ? " WITH (HOLDLOCK)" : "")} AS target
+            USING (VALUES
+                {values}
+            ) AS source(ShardRegionName, EntityId, ReminderKey, WhenUtc, DueTimeUtc, RepeatIntervalTicks,
+                        SerializerId, Manifest, Payload, AttemptCount, LastFailureReason,
+                        MaxDeliveryWindowTicks, DeliveryDeadlineUtc)
+            ON target.ShardRegionName = source.ShardRegionName
+               AND target.EntityId = source.EntityId
+               AND target.ReminderKey = source.ReminderKey
+               AND target.DueTimeUtc = source.DueTimeUtc
+            {whenMatched}
             WHEN NOT MATCHED THEN
                 INSERT (ShardRegionName, EntityId, ReminderKey, WhenUtc, DueTimeUtc, RepeatIntervalTicks,
                         SerializerId, Manifest, Payload, AttemptCount, LastFailureReason,
@@ -128,7 +132,7 @@ internal sealed class SqlServerDialect : ISqlDialect
             """;
     }
 
-    public string GetBatchMarkCompletedSql(string schemaName, string tableName, int count)
+    public string GetBatchMarkCompletedSql(string schemaName, string tableName, int count, bool activeOnly = false)
     {
         var fullTableName = $"[{schemaName}].[{tableName}]";
         var values = string.Join(",\n                ",
@@ -148,7 +152,8 @@ internal sealed class SqlServerDialect : ISqlDialect
             ON t.ShardRegionName = v.ShardRegionName
                AND t.EntityId = v.EntityId
                AND t.ReminderKey = v.ReminderKey
-               AND t.DueTimeUtc = v.DueTimeUtc;
+               AND t.DueTimeUtc = v.DueTimeUtc
+            {(activeOnly ? "WHERE t.CompletionStatus IN ('Pending', 'AwaitingAck')" : "")};
             """;
     }
 

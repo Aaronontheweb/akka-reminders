@@ -20,8 +20,9 @@ public sealed record ReminderOverview
     public (ReminderOverview newOverview, bool hasNewerDate) Apply(ScheduledReminder newReminder, DateTimeOffset now)
     {
         var newTimespan = newReminder.When - now;
-        // If TimeUntilNext is Zero (no reminders), any new reminder is "newer"
-        var hasNewerDate = TimeUntilNext == TimeSpan.Zero || newTimespan <= TimeUntilNext;
+        // An empty overview has TimeUntilNext = MaxValue, so any reminder is sooner. Zero is a real
+        // value ("due right now") and must not be replaced by a later reminder.
+        var hasNewerDate = newTimespan <= TimeUntilNext;
 
         return (new ReminderOverview
         {
@@ -129,7 +130,14 @@ public sealed record ReminderMutationBatch(
 {
     public static ReminderMutationBatch Empty { get; } = new([], [], []);
 
-    public bool IsEmpty => PendingUpserts.Count == 0 && CompletedReminders.Count == 0 && AwaitingAckReminders.Count == 0;
+    /// <summary>Insert missing occurrences without changing any existing occurrence, including terminal state.</summary>
+    public IReadOnlyList<ScheduledReminder> PendingInserts { get; init; } = [];
+
+    /// <summary>Complete occurrences only while Pending or AwaitingAck; absent and terminal rows are unchanged.</summary>
+    public IReadOnlyList<CompletedReminder> ActiveCompletions { get; init; } = [];
+
+    public bool IsEmpty => PendingUpserts.Count == 0 && CompletedReminders.Count == 0 && AwaitingAckReminders.Count == 0
+                           && PendingInserts.Count == 0 && ActiveCompletions.Count == 0;
 }
 
 /// <summary>
@@ -170,8 +178,12 @@ public sealed record AckResult(
 }
 
 /// <summary>
-/// Storage implementation for reminders.
+/// Declares support for atomic <see cref="ReminderMutationBatch.PendingInserts"/> and
+/// <see cref="ReminderMutationBatch.ActiveCompletions"/>. Required for recurring reminder processing.
 /// </summary>
+public interface IConditionalReminderMutationStorage : IReminderStorage;
+
+/// <summary>Storage implementation for reminders.</summary>
 public interface IReminderStorage
 {
     Task<ReminderProtocol.ReminderScheduled> ScheduleReminderAsync(ScheduledReminder reminder, CancellationToken ct = default);
