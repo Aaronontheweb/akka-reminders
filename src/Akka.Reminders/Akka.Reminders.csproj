@@ -8,6 +8,7 @@
         <Description>Durable, re-entrant reminders system for Akka.Cluster.Sharding.</Description>
         <PackageTags>akka;akkadotnet;akka.cluster.sharding;akka.reminders;akka-reminders;</PackageTags>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <IsAotCompatible>true</IsAotCompatible>
     </PropertyGroup>
 
     <ItemGroup>

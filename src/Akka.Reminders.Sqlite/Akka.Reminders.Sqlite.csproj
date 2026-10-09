@@ -8,6 +8,7 @@
     <Description>SQLite storage implementation for Akka.Reminders.</Description>
     <PackageTags>akka;akkadotnet;akka.reminders;sql;sqlite;</PackageTags>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
   <ItemGroup>

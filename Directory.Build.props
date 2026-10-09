@@ -12,6 +12,13 @@
 
 **Upgrading to 1.6 is one-way for stored reminders.** Akka.NET 1.6 registers Akka.Remote's serializers on every actor system, including local ones. With `WithLocalReminders`, payloads of type `string`, `int` or `long`, Protobuf messages and Akka types such as `IActorRef` are now stored with their own serializers instead of the JSON fallback. 1.6 reads everything 1.5 wrote. 1.5 cannot read these new rows, so don't roll back to 1.5 after 1.6 has written reminders. Payload types bound to your own serializer, and clustered systems (`WithReminders`), are not affected.
 
+**New Features**
+
+- **Native AOT support for local reminders** - `WithLocalReminders` now works under .NET Native AOT. Register each message type you schedule with `.WithReminderMessage&lt;T&gt;()` on the reminders builder (or `ReminderMessageTypes.Register&lt;T&gt;()`), so the scheduler and the wire serializer build `ReminderEnvelope&lt;T&gt;` without reflection. See the "Native AOT" section of the README.
+- All five packages are marked `IsAotCompatible` and produce no trim or AOT warnings of their own.
+- With Native AOT, or with the `Akka.DynamicTypeLoading` switch off, scheduling an unregistered message type now fails at once with `ReminderScheduleResponseCode.Error` and a message naming the registration call, instead of failing at delivery time.
+- Added a Native AOT canary app and a CI step that publishes and runs it, and fails on new trim/AOT warnings.
+
 **Breaking Changes**
 
 - **net10.0 only** - All packages now target net10.0. Akka.NET 1.6 targets net10.0 only, so net9.0 is no longer supported.
@@ -20,6 +27,11 @@
 **Included**
 
 - Everything in 1.5.73.2, including the scheduler fixes from 1.5.73.1 and the recurring reminder fixes ([#143](https://github.com/Aaronontheweb/akka-reminders/issues/143), [#146](https://github.com/Aaronontheweb/akka-reminders/pull/146), [#148](https://github.com/Aaronontheweb/akka-reminders/pull/148), [#150](https://github.com/Aaronontheweb/akka-reminders/issues/150), [#151](https://github.com/Aaronontheweb/akka-reminders/issues/151), [#153](https://github.com/Aaronontheweb/akka-reminders/issues/153), [#154](https://github.com/Aaronontheweb/akka-reminders/issues/154)).
+
+**Compatibility**
+
+- No breaking changes from the Native AOT work. On the JIT, unregistered message types still work through reflection, so existing applications need no changes.
+- Clustered mode (`WithReminders`) is not supported under Native AOT yet.
 
 **Dependency Updates**
 

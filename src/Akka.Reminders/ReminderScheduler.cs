@@ -633,6 +633,18 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                             return;
                         }
 
+                        // fail now, not at delivery time (possibly after a restart), when the
+                        // envelope for this message type cannot be built (Native AOT, unregistered type)
+                        var messageType = reminder.Message.GetType();
+                        if (!ReminderEnvelopeFactory.CanCreate(messageType))
+                        {
+                            var error = ReminderEnvelopeFactory.NotRegisteredMessage(messageType);
+                            _log.Error("Rejected reminder {0}: {1}", scheduleSingle, error);
+                            replyTo.Tell(new ReminderProtocol.ReminderScheduled(scheduleSingle,
+                                ReminderScheduleResponseCode.Error, error), ActorRefs.NoSender);
+                            return;
+                        }
+
                         // persist the reminder
                         var r = await Storage.ScheduleReminderAsync(reminder, cts.Token);
 
@@ -979,27 +991,6 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
 
         var init = LoadAsync();
         return init.PipeTo(Self, success: r => r, failure: ex => new Status.Failure(ex));
-    }
-
-    private static readonly Type OpenGenericEnvelopeType = typeof(ReminderEnvelope<>);
-
-    /// <summary>
-    /// Constructs a <see cref="ReminderEnvelope{T}"/> using the runtime type of the message.
-    /// Ensures both local and remote delivery produce the strongly-typed generic envelope
-    /// so that <c>Receive&lt;ReminderEnvelope&lt;T&gt;&gt;</c> handlers match correctly.
-    /// </summary>
-    private static ReminderEnvelope CreateTypedEnvelope(
-        ReminderEntity entity,
-        ReminderKey key,
-        DateTimeOffset dueTimeUtc,
-        ReminderDeadline deadline,
-        object message)
-    {
-        var messageType = message.GetType();
-        var closedType = OpenGenericEnvelopeType.MakeGenericType(messageType);
-        return (ReminderEnvelope)(Activator.CreateInstance(closedType, entity, key, dueTimeUtc, deadline, message)
-            ?? throw new InvalidOperationException(
-                $"Failed to create {closedType.FullName} for message type {messageType.FullName}"));
     }
 
     /// <summary>
@@ -1629,12 +1620,28 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
                         delivery.Reminder.Key,
                         delivery.Reminder.DueTimeUtc,
                         delivery.ShardRegion);
-                    var envelope = CreateTypedEnvelope(
-                        delivery.Reminder.Entity,
-                        delivery.Reminder.Key,
-                        delivery.Reminder.DueTimeUtc,
-                        ComputeEnvelopeDeadline(delivery.Reminder, delivery.AckDeadline),
-                        delivery.Reminder.Message);
+                    ReminderEnvelope envelope;
+                    try
+                    {
+                        envelope = ReminderEnvelopeFactory.Create(
+                            delivery.Reminder.Entity,
+                            delivery.Reminder.Key,
+                            delivery.Reminder.DueTimeUtc,
+                            ComputeEnvelopeDeadline(delivery.Reminder, delivery.AckDeadline),
+                            delivery.Reminder.Message);
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        // Unregistered message type under Native AOT. The occurrence is already
+                        // AwaitingAck in storage, so the ack-timeout path retries it and, after
+                        // MaxDeliveryAttempts, marks it failed. Keep delivering the rest of the batch.
+                        _log.Error(ex, "Cannot deliver reminder occurrence [{0}] / [{1}] due at [{2}]",
+                            delivery.Reminder.Entity,
+                            delivery.Reminder.Key,
+                            delivery.Reminder.DueTimeUtc);
+                        continue;
+                    }
+
                     ShardRegionResolver.DeliverReminder(delivery.Reminder.Entity, envelope);
                     totalDelivered += 1;
                 }

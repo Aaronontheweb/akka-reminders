@@ -36,6 +36,7 @@ Akka.Reminders provides a reliable way to schedule reminders (time-delayed messa
 - [Usage Examples](#usage-examples)
 - [API Reference](#api-reference)
 - [Testing](#testing)
+- [Native AOT](#native-aot)
 - [Architecture](#architecture)
 - [Design Documents](#design-documents)
 
@@ -754,6 +755,50 @@ public async Task Reminder_should_fire_at_scheduled_time()
     testProbe.ExpectMsg<ReminderEnvelope<TestMessage>>();
 }
 ```
+
+## Native AOT
+
+Local mode (`WithLocalReminders`) works under .NET Native AOT. All five packages are marked `IsAotCompatible` and produce no trim or AOT warnings of their own. The repository's AOT canary ([src/aot/Akka.Reminders.AOT.App](src/aot/Akka.Reminders.AOT.App)) runs in CI on every pull request: it publishes with `PublishAot`, schedules, delivers and acks reminders with in-memory and SQLite storage, and restarts to deliver a reminder restored from the SQLite file.
+
+Clustered mode (`WithReminders`, which runs the scheduler as a cluster singleton and delivers through Cluster.Sharding) is **not supported** under Native AOT yet, because Akka.Cluster itself is not AOT-ready in Akka.NET 1.6.
+
+### Register your message types
+
+The scheduler delivers each reminder as a `ReminderEnvelope<T>`, where `T` is the runtime type of the message. On the JIT it builds that type by reflection. Native AOT cannot, so register every message type you schedule:
+
+```csharp
+builder
+    .WithCustomSerializer("billing", [typeof(PaymentRetry)], system => new BillingSerializer(system))
+    .WithLocalReminders(reminders => reminders
+        .WithReminderMessage<PaymentRetry>()
+        .WithStorage(system => new SqliteReminderStorage(
+            SqliteReminderStorageSettings.Create("Data Source=reminders.db"), system))
+        .WithResolver(_ => resolver));
+```
+
+- Register the exact runtime type. A registration for a base type does not cover subclasses.
+- This also covers reminders restored from storage after a restart, which no code in the new process ever scheduled.
+- If a type is not registered, `ScheduleSingleReminderAsync` and `ScheduleRecurringReminderAsync` return `ReminderScheduleResponseCode.Error` with a message that names the type and the `WithReminderMessage<T>()` call, and nothing is stored. A stored reminder whose type is not registered logs an error at delivery and follows the normal ack-timeout retry path.
+- On the JIT, registration is optional and changes nothing: unregistered types still go through reflection.
+- Outside Akka.Hosting, call `ReminderMessageTypes.Register<PaymentRetry>()` at startup. Registration is process-wide and safe to repeat.
+
+### Register a serializer for your messages
+
+Akka.NET turns its `Akka.DynamicTypeLoading` feature switch off for AOT publishes. With the switch off there is no JSON fallback serializer, and SQL storage serializes each reminder's message through Akka.NET serialization. Register a serializer for your message types with `WithCustomSerializer`, as in the example above. In-memory storage does not serialize messages.
+
+To test this behavior on the JIT before you publish, turn the switch off in your project file:
+
+```xml
+<ItemGroup>
+  <RuntimeHostConfigurationOption Include="Akka.DynamicTypeLoading" Value="false" Trim="true" />
+</ItemGroup>
+```
+
+### Environment notes
+
+- **SQL Server**: `Microsoft.Data.SqlClient` needs `<InvariantGlobalization>false</InvariantGlobalization>` under Native AOT.
+- **Satellite assemblies**: with `<InvariantGlobalization>true</InvariantGlobalization>` and a package that ships satellite resource assemblies, Akka.Hosting 1.6.0-beta2 crashes at startup in its MAUI detection. Until the Akka.Hosting fix ships, add `<SatelliteResourceLanguages>en</SatelliteResourceLanguages>` to your project.
+- **Expected warnings**: an AOT publish reports about 70 trim/AOT warnings from Akka.Remote, Akka.Cluster, Akka.DistributedData and Akka.Persistence. They appear because this package references Akka.Cluster.Hosting; local mode does not reach that code. [src/aot/Akka.Reminders.AOT.App/aot-warnings.baseline.txt](src/aot/Akka.Reminders.AOT.App/aot-warnings.baseline.txt) lists them.
 
 ## Architecture
 
