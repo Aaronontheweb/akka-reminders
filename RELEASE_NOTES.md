@@ -2,14 +2,18 @@
 
 Built against Akka.NET 1.6.0-beta3.
 
-**Upgrading to 1.6 is one-way for stored reminders.** Akka.NET 1.6 registers Akka.Remote's serializers on every actor system, including local ones. With `WithLocalReminders`, payloads of type `string`, `int` or `long`, Protobuf messages and Akka types such as `IActorRef` are now stored with their own serializers instead of the JSON fallback. 1.6 reads everything 1.5 wrote. 1.5 cannot read these new rows, so don't roll back to 1.5 after 1.6 has written reminders. Payload types bound to your own serializer, and clustered systems (`WithReminders`), are not affected.
+Start with the [Akka.NET v1.6 getting started guide](https://github.com/akkadotnet/akka.net/blob/1.6.0-beta3/GETTING_STARTED_V1.6.md), including its Native AOT and source-generated serialization sections.
+
+**Upgrading to 1.6 is one-way for stored reminders.** Akka.NET 1.6 registers Akka.Remote's serializers on every actor system, including local ones. With `WithLocalReminders`, payloads of type `string`, `int` or `long`, Protobuf messages and Akka types such as `IActorRef` are now stored with their own serializers instead of the JSON fallback. On the ordinary JIT runtime with `Akka.DynamicTypeLoading` enabled, 1.6 retains support for reading 1.5 payloads, including JSON. This does not guarantee that those payloads can be read under Native AOT. 1.5 cannot read these new rows, so don't roll back to 1.5 after 1.6 has written reminders. Payload types bound to your own serializer, and clustered systems (`WithReminders`), are not affected by this change in default serializers.
+
+**Native AOT requires AOT-compatible payload serializers.** Reflection-based serializers, including Akka.NET's default Newtonsoft.Json fallback, are not supported. Use Akka.NET 1.6's source-generated serializer (`Akka.Serialization.V2`), an AOT-compatible built-in serializer for a supported payload type, or an AOT-compatible custom serializer, such as a `SerializerWithStringManifest` implementation using generated Protobuf parsers and explicit manifest dispatch. A string manifest alone does not make a serializer AOT-compatible: its implementation must avoid runtime type discovery and code generation. `WithReminderMessage<T>()` registers the envelope factory, not the payload serializer, and does not convert stored data. Existing reminders stored through the JSON fallback need a compatible AOT reader or migration before switching their store to Native AOT.
 
 **New Features**
 
 - **Native AOT support for local reminders** - `WithLocalReminders` now works under .NET Native AOT. Register each message type you schedule with `.WithReminderMessage<T>()` on the reminders builder (or `ReminderMessageTypes.Register<T>()`), so the scheduler and the wire serializer build `ReminderEnvelope<T>` without reflection. See the "Native AOT" section of the README.
 - All five packages are marked `IsAotCompatible` and produce no trim or AOT warnings of their own.
 - With Native AOT, or with the `Akka.DynamicTypeLoading` switch off, scheduling an unregistered message type now fails at once with `ReminderScheduleResponseCode.Error` and a message naming the registration call, instead of failing at delivery time.
-- Added a Native AOT canary app and a CI step that publishes and runs it, and fails on new trim/AOT warnings.
+- Added a Native AOT canary app and an independent CI job that publishes and runs it, and fails on new trim/AOT warnings.
 
 **Breaking Changes**
 
