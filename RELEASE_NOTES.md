@@ -1,3 +1,12 @@
+#### 1.5.73.2 October 9th 2026 ####
+
+**Bug Fixes**
+
+- A recurring reminder could reach its recipient twice for the same slot even after the recipient acknowledged the first delivery. The scheduler now preserves the recurring successor when it writes the retry or roll-forward, so an acknowledged slot is never sent again ([#150](https://github.com/Aaronontheweb/akka-reminders/issues/150), [#159](https://github.com/Aaronontheweb/akka-reminders/pull/159)).
+- A one-time reminder could go unsent when the database saved the "sent, waiting for ack" change but reported an error. The scheduler now arms acknowledgement recovery for uncertain delivery writes and reloads pending work after uncertain retry writes ([#151](https://github.com/Aaronontheweb/akka-reminders/issues/151), [#155](https://github.com/Aaronontheweb/akka-reminders/pull/155)).
+- The next send ran late by about as long as storage was slow during the last pass. The scheduler now schedules the next timer relative to when storage finished, not when the pass started, and paces recovery reads so a slow database no longer pushes the next delivery off schedule ([#153](https://github.com/Aaronontheweb/akka-reminders/issues/153), [#157](https://github.com/Aaronontheweb/akka-reminders/pull/157)).
+- A reminder could be sent late when another reminder was due at the exact same instant. The scheduler no longer treats "due in exactly zero seconds" as "nothing is waiting"; it wakes for the soonest reminder ([#154](https://github.com/Aaronontheweb/akka-reminders/issues/154), [#158](https://github.com/Aaronontheweb/akka-reminders/pull/158)).
+
 #### 1.5.73.1 October 7th 2026 ####
 
 **Bug Fixes**
