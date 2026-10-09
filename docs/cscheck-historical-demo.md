@@ -2,7 +2,7 @@
 
 This branch is for recording a video. **Do not merge it into `dev`.** It combines
 the rewritten tests from [PR #162](https://github.com/Aaronontheweb/akka-reminders/pull/162)
-(`f420858638725c0815a44a9ae771db6ba2ae3752`) with production code at
+(`45184e1bad9ff701a2d912eb7fce7ac493660070`) with production code at
 `27bbaf17768440afaff5b748b1ef94056ec1d101`, before the scheduler fixes.
 
 The PR targets `demo/cscheck-before-fixes-base`, which is pinned to that historical
@@ -46,13 +46,20 @@ properties without a seed and leaves failures red. Discovery is random, so a sho
 run is not guaranteed to find a defect and can produce different traces. CsCheck
 prints the seed and shrunk counterexample when it finds one.
 
+The native trace uses `DueNow` / `Overdue` for the first due time, occurrence numbers
+for acknowledgements, and occurrence counts for waits. For example, `WaitFor(2 occurrences)`
+moves the virtual clock to the second additional occurrence. `Overdue` starts three
+seconds in the past; the four-second interval puts the next occurrence one second
+ahead, within the early-delivery allowance. Both have arrived when scheduling settles.
+Acknowledging occurrence #1 after occurrence #2 has arrived must return `NotFound`.
+
 ## Replay a known failure for recording
 
 Use the emitted seed for a repeatable take. Previously discovered examples are:
 
 | Property | Seed | Counterexample |
 | --- | --- | --- |
-| Native Spec | `03kfOenzfHS1` | `Schedule(-3)` then `Acknowledge(0)` |
+| Native Spec | `03kfOenzfHS1` | `Schedule(Overdue)` then `Acknowledge(Occurrence #1)` |
 | Full async model | `9DYaD_gangSc` | One `ScheduleRecurring` command with a past anchor |
 
 ```bash

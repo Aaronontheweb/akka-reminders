@@ -5,47 +5,84 @@ namespace Akka.Reminders.Tests.Model;
 /// <summary>One recurring reminder under the conformance test's eager-fetch settings; at most four occurrences.</summary>
 public static class RecurringSpec
 {
-    public const int Period = 4;
-    public const int Slippage = 1;
-    // First due time, in seconds relative to the starting clock: -3 gives slots -3, 1, 5, 9;
-    // 0 gives slots 0, 4, 8, 12. The past anchor exercises an early successor within slippage.
-    public static readonly int[] Anchors = [-3, 0];
-    // Count of additional occurrences to advance through, not seconds. For the anchor at 0,
-    // advancing by 1 reaches time 4; advancing by 2 reaches time 8.
-    public static readonly int[] Advances = [1, 2];
-    public static readonly int[] Occurrences = [0, 1, 2, 3];
+    public static readonly TimeSpan RepeatInterval = TimeSpan.FromSeconds(4);
+    public static readonly TimeSpan EarlyDeliveryAllowance = TimeSpan.FromSeconds(1);
 
-    public sealed record State(int? FirstDue = null, int Now = 0, int Delivered = 0,
-        int? Acknowledged = null, int? Asked = null, ReminderAckResponseCode? Reply = null)
+    public readonly record struct FirstDueTime(TimeSpan Offset)
     {
-        public int Due(int occurrence) => FirstDue!.Value + occurrence * Period;
+        public static readonly FirstDueTime DueNow = new(TimeSpan.Zero);
+        // Three seconds overdue: with a four-second interval the next occurrence is due in one second.
+        public static readonly FirstDueTime Overdue = new(TimeSpan.FromSeconds(-3));
+        public TimeSpan DueAt(Occurrence occurrence) => Offset + RepeatInterval * occurrence.Index;
+        public override string ToString() => this == DueNow ? "DueNow" : this == Overdue ? "Overdue" : $"Due at {Offset}";
+    }
 
-        public State Ack(int occurrence) => occurrence == Delivered - 1 && occurrence != Acknowledged
-            ? this with { Asked = occurrence, Reply = ReminderAckResponseCode.Success, Acknowledged = occurrence }
-            : this with { Asked = occurrence, Reply = ReminderAckResponseCode.NotFound };
+    /// <summary>Identifies one occurrence in this reminder's sequence; the first has index zero.</summary>
+    public readonly record struct Occurrence(int Index)
+    {
+        public override string ToString() => $"Occurrence #{Index + 1}";
+    }
+
+    /// <summary>A number of occurrences, never a duration or an occurrence's index.</summary>
+    public readonly record struct OccurrenceCount(int Value)
+    {
+        public Occurrence? Latest => Value == 0 ? null : new Occurrence(Value - 1);
+        public bool Includes(Occurrence occurrence) => occurrence.Index >= 0 && occurrence.Index < Value;
+        public OccurrenceCount Add(OccurrenceCount additional) => new(Value + additional.Value);
+        public override string ToString() => Value == 1 ? "1 occurrence" : $"{Value} occurrences";
+    }
+
+    public static readonly FirstDueTime[] FirstDueTimes = [FirstDueTime.Overdue, FirstDueTime.DueNow];
+    // Wait for one or two more occurrences, not one or two seconds.
+    public static readonly OccurrenceCount[] WaitCounts = [new(1), new(2)];
+    public static readonly Occurrence[] Occurrences = [new(0), new(1), new(2), new(3)];
+
+    // Null means not scheduled, not acknowledged, or no acknowledgement requested yet, respectively.
+    // ExpectedDeliveries predicts distinct occurrences delivered, not delivery attempts or observations.
+    public sealed record State(FirstDueTime? FirstDue = null, TimeSpan CurrentTime = default,
+        OccurrenceCount ExpectedDeliveries = default, Occurrence? LastAcknowledgedOccurrence = null,
+        Occurrence? RequestedAcknowledgement = null, ReminderAckResponseCode? ExpectedAcknowledgementReply = null)
+    {
+        public TimeSpan DueAt(Occurrence occurrence) => FirstDue!.Value.DueAt(occurrence);
+
+        public State Schedule(FirstDueTime firstDue) => this with
+        {
+            FirstDue = firstDue,
+            ExpectedDeliveries = new(Occurrences.Count(occurrence => firstDue.DueAt(occurrence) <= EarlyDeliveryAllowance))
+        };
+
+        public State WaitFor(OccurrenceCount additional)
+        {
+            var delivered = ExpectedDeliveries.Add(additional);
+            return this with { CurrentTime = DueAt(delivered.Latest!.Value), ExpectedDeliveries = delivered };
+        }
+
+        public State Acknowledge(Occurrence occurrence) => occurrence == ExpectedDeliveries.Latest && occurrence != LastAcknowledgedOccurrence
+            ? this with { RequestedAcknowledgement = occurrence, ExpectedAcknowledgementReply = ReminderAckResponseCode.Success, LastAcknowledgedOccurrence = occurrence }
+            : this with { RequestedAcknowledgement = occurrence, ExpectedAcknowledgementReply = ReminderAckResponseCode.NotFound };
     }
 
     public static Spec<State> Create() => Spec.From(new State())
-        // A past anchor leaves its successor within slippage: both are delivered when scheduling settles.
-        .Action("Schedule", Anchors, (s, anchor) => s.FirstDue is null,
-            (s, anchor) => s with { FirstDue = anchor, Delivered = anchor < 0 ? 2 : 1 })
-        .Action("Advance", Advances, (s, count) => s.FirstDue is not null && s.Delivered + count <= 4,
-            (s, count) => s with { Now = s.Due(s.Delivered + count - 1), Delivered = s.Delivered + count })
+        // With eager fetching, Overdue delivers both the overdue occurrence and the next one within the early allowance.
+        .Action("Schedule", FirstDueTimes, (s, firstDue) => s.FirstDue is null,
+            (s, firstDue) => s.Schedule(firstDue))
+        .Action("WaitFor", WaitCounts, (s, count) => s.FirstDue is not null && s.ExpectedDeliveries.Add(count).Value <= Occurrences.Length,
+            (s, count) => s.WaitFor(count))
         // Keep old and duplicate acknowledgements enabled; only unseen occurrences are excluded.
-        .Action("Acknowledge", Occurrences, (s, occurrence) => occurrence < s.Delivered,
-            (s, occurrence) => s.Ack(occurrence))
-        .Invariant("OnlyObservedAck", "Only an observed occurrence can have been acknowledged.",
-            s => s.Acknowledged is null || s.Acknowledged < s.Delivered)
-        .Rule("CurrentAck", "An unacknowledged current occurrence accepts its acknowledgement.",
+        .Action("Acknowledge", Occurrences, (s, occurrence) => s.ExpectedDeliveries.Includes(occurrence),
+            (s, occurrence) => s.Acknowledge(occurrence))
+        .Invariant("OnlyDeliveredOccurrencesAcknowledged", "Only a delivered occurrence can have been acknowledged.",
+            s => s.LastAcknowledgedOccurrence is not { } acknowledged || s.ExpectedDeliveries.Includes(acknowledged))
+        .Rule("AcknowledgeCurrentOccurrence", "An unacknowledged current occurrence accepts its acknowledgement.",
             on: "Acknowledge",
-            (before, after) => after.Asked == before.Delivered - 1 && before.Acknowledged != after.Asked,
-            (before, after) => after.Reply == ReminderAckResponseCode.Success && after.Acknowledged == after.Asked)
-        .Rule("LateAck", "A superseded occurrence answers NotFound and leaves acknowledgement state alone.",
+            (before, after) => after.RequestedAcknowledgement == before.ExpectedDeliveries.Latest && before.LastAcknowledgedOccurrence != after.RequestedAcknowledgement,
+            (before, after) => after.ExpectedAcknowledgementReply == ReminderAckResponseCode.Success && after.LastAcknowledgedOccurrence == after.RequestedAcknowledgement)
+        .Rule("AcknowledgeOlderOccurrence", "A superseded occurrence answers NotFound and leaves acknowledgement state alone.",
             on: "Acknowledge",
-            (before, after) => after.Asked < before.Delivered - 1,
-            (before, after) => after.Reply == ReminderAckResponseCode.NotFound && after.Acknowledged == before.Acknowledged)
-        .Rule("DuplicateAck", "An already acknowledged occurrence answers NotFound.",
+            (before, after) => after.RequestedAcknowledgement!.Value.Index < before.ExpectedDeliveries.Latest!.Value.Index,
+            (before, after) => after.ExpectedAcknowledgementReply == ReminderAckResponseCode.NotFound && after.LastAcknowledgedOccurrence == before.LastAcknowledgedOccurrence)
+        .Rule("AcknowledgeSameOccurrenceAgain", "An already acknowledged occurrence answers NotFound.",
             on: "Acknowledge",
-            (before, after) => after.Asked == before.Acknowledged,
-            (before, after) => after.Reply == ReminderAckResponseCode.NotFound && after.Acknowledged == before.Acknowledged);
+            (before, after) => after.RequestedAcknowledgement == before.LastAcknowledgedOccurrence,
+            (before, after) => after.ExpectedAcknowledgementReply == ReminderAckResponseCode.NotFound && after.LastAcknowledgedOccurrence == before.LastAcknowledgedOccurrence);
 }
