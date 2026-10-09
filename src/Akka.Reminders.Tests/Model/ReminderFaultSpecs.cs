@@ -1,4 +1,3 @@
-using System.Globalization;
 using CsCheck;
 using Testcontainers.MsSql;
 using Testcontainers.PostgreSql;
@@ -6,153 +5,70 @@ using Testcontainers.PostgreSql;
 namespace Akka.Reminders.Tests.Model;
 
 /// <summary>
-/// One step of a sequence. It prints as C#, so a failing sequence that CsCheck reports can be pasted
-/// into <see cref="ModelRegressionSpecs"/> as it is. Times are milliseconds.
-/// </summary>
-public abstract record Op
-{
-    public sealed override string ToString() => $"new {GetType().Name}({string.Join(", ",
-        GetType().GetConstructors()[0].GetParameters().Select(p => Code(GetType().GetProperty(p.Name!)!.GetValue(this))))})";
-
-    private static string Code(object? value) => value switch
-    {
-        null => "null",
-        bool b => b ? "true" : "false",
-        Enum e => $"{e.GetType().Name}.{e}",
-        _ => Convert.ToString(value, CultureInfo.InvariantCulture)!,
-    };
-}
-
-public sealed record ScheduleOnce(int Entity, int Key, int DueOffsetMs, int? WindowMs) : Op;
-public sealed record ScheduleRecurring(int Entity, int Key, int AnchorOffsetMs, int IntervalMs, int? WindowMs) : Op;
-public sealed record Cancel(int Entity, int Key) : Op;
-public sealed record CancelAll(int Entity) : Op;
-public sealed record ListReminders(int Entity) : Op;
-public sealed record Tick(int Ms) : Op;
-public sealed record Lag(int Ms) : Op;
-public sealed record Restart : Op;
-public sealed record SetRegion(int Region, bool Present) : Op;
-public sealed record SetRecipient(int Entity, Recipient Mode) : Op;
-public sealed record AckOutstanding : Op;
-public sealed record InjectFault(StorageCall Call, FaultKind Kind, int Count, int DelayMs, bool FireTimersWhileSlow) : Op;
-public sealed record HealAndWait : Op;
-
-/// <summary>
-/// The full model-based test: the operations of ReminderSpecs.cs plus stalls, restarts, recipients that
-/// nack or stay silent, missing shard regions and storage faults. CsCheck generates and shrinks the
-/// sequences; <see cref="ReminderApp"/> does each operation to a real scheduler; <see cref="Oracle"/>
-/// judges it against <see cref="ReminderModel"/>, <see cref="Liveness"/> and <see cref="SafetyRules"/>.
-///
-/// CsCheck's own switches apply: CsCheck_Iter, CsCheck_Time, CsCheck_Seed, CsCheck_Threads.
-/// REMINDERS_CSCHECK_SQL=1 also runs PostgreSQL and SQL Server (Testcontainers).
+/// CsCheck generates and shrinks command lists. The application runs each command; the model checks
+/// its observations and outstanding obligations. Fault outcomes are observed, not guessed in advance.
+/// CsCheck_Iter, CsCheck_Time, CsCheck_Seed and CsCheck_Threads are the library's own controls.
 /// </summary>
 public sealed class ReminderFaultSpecs(ITestOutputHelper output)
 {
-    // ------------------------------------------------------------------ the operation table
-    //
-    // operation          | precondition          | effect on the model                  | postcondition (Oracle.cs)
-    // -------------------|-----------------------|--------------------------------------|--------------------------------------------
-    // ScheduleOnce,      | none                  | replaces the reminder under that key;| reply Success, or ShardRegionNotFound if the
-    //  ScheduleRecurring |                       | nothing if the region is down        | region is down; Error only if the save failed;
-    //                    |                       | persisted work survives AppliedThenFail | known persisted work recovers automatically
-    // Cancel, CancelAll  | none                  | the reminder(s) end                  | Success if work was left, NotFound if not;
-    //                    |                       |                                      | Error only if a storage call failed
-    // ListReminders      | none                  | none                                 | exactly the keys with work left
-    // Tick               | none                  | time passes, scheduler awake         | Liveness
-    // Lag                | none                  | time jumps, awake only at the end    | Liveness
-    // Restart            | none                  | none                                 | Liveness: the application sees no change
-    // SetRecipient       | none                  | none: the entity now acks, nacks or  | each ack: Success if the occurrence awaited
-    //                    |                       | stays silent on each delivery        | an ack, else NotFound; each nack: RetryScheduled
-    //                    |                       |                                      | with the retry time, Failed, Expired or NotFound
-    // AckOutstanding     | deliveries are        | as each ack                          | as each ack
-    //                    | unanswered (else no-op)|                                     |
-    // SetRegion          | none                  | the region is up or down             | starts or ends trouble for its entities
-    // InjectFault        | none                  | none                                 | starts trouble when the fault fires
-    // HealAndWait        | none                  | all regions up                       | Liveness, once RecoveryTime has passed
-    //
-    // After every operation: Liveness and SafetyRules. A precondition cannot stop CsCheck from
-    // generating an operation (its generators do not see the state), so an operation whose
-    // precondition is false does nothing. The first number in each row is its weight: how often
-    // CsCheck picks it.
+    /// <summary>Fixed regressions also wait for recovery, as they did before the generated runner changed.</summary>
+    public static Task<History> ReplayAsync(ModelSettings settings, params Op[] commands) =>
+        RunAsync(settings, InMemoryModelStorageFactory.Instance, commands.Append(new HealAndWait()));
 
-    private sealed record Row(Type Op, int Weight, bool Trouble, Gen<Op> Args, Func<ReminderApp, Op, Task> Act);
-
-    private static Row For<T>(int weight, Gen<T> args, Func<ReminderApp, T, Task> act, bool trouble = false) where T : Op =>
-        new(typeof(T), weight, trouble, args.Select(x => (Op)x), (app, op) => act(app, (T)op));
-
-    private static readonly Row[] Table =
-    [
-        For(10, ScheduleOnceGen, (app, op) => app.ScheduleOnce(op.Entity, op.Key, Ms(op.DueOffsetMs), Ms(op.WindowMs))),
-        For(12, ScheduleRecurringGen, (app, op) => app.ScheduleRecurring(op.Entity, op.Key, Ms(op.AnchorOffsetMs), Ms(op.IntervalMs), Ms(op.WindowMs))),
-        For(5, Gen.Select(Entity, Key, (e, k) => new Cancel(e, k)), (app, op) => app.Cancel(op.Entity, op.Key)),
-        For(2, Entity.Select(e => new CancelAll(e)), (app, op) => app.Cancel(op.Entity, null)),
-        For(4, Entity.Select(e => new ListReminders(e)), (app, op) => app.List(op.Entity)),
-        For(30, TickGen, (app, op) => app.Tick(Ms(op.Ms))),
-        For(6, LagGen, (app, op) => app.Lag(Ms(op.Ms))),
-        For(3, Gen.Const(new Restart()), (app, _) => app.Restart()),
-        For(6, Gen.Select(Entity, Gen.Enum<Recipient>(), (e, mode) => new SetRecipient(e, mode)), (app, op) => app.SetRecipient(op.Entity, op.Mode)),
-        For(3, Gen.Const(new AckOutstanding()), (app, _) => app.AckUnanswered()),
-        For(4, Gen.Select(Gen.Int[0, ReminderApp.Regions - 1], Gen.Bool, (r, up) => new SetRegion(r, up)), (app, op) => app.SetRegion(op.Region, op.Present), trouble: true),
-        For(8, FaultGen, (app, op) => app.InjectFault(op.Call, op.Kind, op.Count, Ms(op.DelayMs), op.FireTimersWhileSlow), trouble: true),
-        For(1, Gen.Const(new HealAndWait()), (app, _) => app.HealAndWait()),
-    ];
-
-    private static Task Act(ReminderApp app, Op op) => Table.Single(row => row.Op == op.GetType()).Act(app, op);
-
-    private static TimeSpan Ms(int ms) => TimeSpan.FromMilliseconds(ms);
-
-    private static TimeSpan? Ms(int? ms) => ms is { } v ? TimeSpan.FromMilliseconds(v) : null;
-
-    // ------------------------------------------------------------------ running sequences
-
-    /// <summary>Runs a fixed sequence (a pinned regression test), then heals and waits. Returns what the application saw.</summary>
-    public static async Task<History> ReplayAsync(ModelSettings settings, params Op[] ops)
+    private static async Task<History> RunAsync(ModelSettings settings, IModelStorageFactory storage, IEnumerable<Op> commands, Recipient recipient = Recipient.Ack)
     {
-        var app = new ReminderApp(settings);
-        var oracle = new Oracle(app);
-        foreach (var op in ops.Append(new HealAndWait()))
-        {
-            await Act(app, op);
-            oracle.Read();
-        }
-
-        var history = app.Stop();
-        await ReminderApp.DisposeStoppedAsync();
-        return history;
-    }
-
-    /// <summary>CsCheck generates sequences, runs them, and shrinks the first one that breaks a rule.</summary>
-    private async Task SampleAsync(IModelStorageFactory storage, long iterations, bool trouble = true)
-    {
-        // One CsCheck operation: pick a row of the table by its weight, generate its arguments, do it to
-        // the application, then let the oracle judge what happened.
-        var rows = Table.Where(row => trouble || !row.Trouble).ToArray();
-        var operation = GenOperationAsync.Create<ReminderApp, Oracle, Op>(
-            Gen.Frequency(rows.Select(row => (row.Weight, (IGen<Op>)row.Args)).ToArray()),
-            op => op.ToString(),
-            (app, op) => Act(app, op),
-            (oracle, _) =>
-            {
-                oracle.Read();
-                return Task.CompletedTask;
-            });
-        var start = SettingsGen.Select(settings =>
-        {
-            var app = new ReminderApp(settings, Recipient.Ack, storage);
-            return Task.FromResult((app, new Oracle(app)));
-        });
-
-        // An iteration count from CsCheck_Iter or CsCheck_Time wins over the default.
-        var iter = Environment.GetEnvironmentVariable("CsCheck_Iter") is null && Environment.GetEnvironmentVariable("CsCheck_Time") is null ? iterations : -1;
+        var app = new ReminderApp(settings, recipient, storage);
+        var model = new ReminderModel(settings);
         try
         {
-            await start.SampleModelBasedAsync(operation, equal: (app, _) => app.Stop() is not null, iter: iter,
-                printActual: app => $"{app.Settings} on {app.StorageName}", printModel: _ => "(empty)", writeLine: output.WriteLine);
+            foreach (var command in commands)
+            {
+                await command.Run(app);
+                model.Observe(app.Journal.Read());
+            }
+
+            return app.Journal.Read();
         }
         finally
         {
+            app.Stop();
             await ReminderApp.DisposeStoppedAsync();
         }
+    }
+
+    private Task SampleAsync(IModelStorageFactory storage, long iterations, bool trouble = true)
+    {
+        // CsCheck owns argument/sequence shrinking and seed replay; the callback runs the input.
+        var cases = SettingsGen.Select(Commands(trouble).Array);
+        var iter = Environment.GetEnvironmentVariable("CsCheck_Iter") is null &&
+                   Environment.GetEnvironmentVariable("CsCheck_Time") is null ? iterations : -1;
+        return cases.SampleAsync((settings, commands) => RunAsync(settings, storage, commands),
+            iter: iter, writeLine: output.WriteLine,
+            print: sample => $"{sample.Item1} on {storage.Name}\nCommands: {Check.Print(sample.Item2)}");
+    }
+
+    // These are individual commands, not scenarios. The weights and argument generators retain the
+    // existing exploration: arbitrary ordering, replacement/cancellation of absent keys, late acks,
+    // and combinations of faults. Even a no-op command can expose an incorrect reply.
+    private static Gen<Op> Commands(bool trouble)
+    {
+        (int Weight, IGen<Op> Generator)[] healthy =
+        [
+            (10, ScheduleOnceGen),
+            (12, ScheduleRecurringGen),
+            (5, Gen.Select(Entity, Key, (e, k) => new Cancel(e, k))),
+            (2, Entity.Select(e => new CancelAll(e))),
+            (4, Entity.Select(e => new ListReminders(e))),
+            (30, TickGen),
+            (6, LagGen),
+            (3, Gen.Const(new Restart())),
+            (6, Gen.Select(Entity, Gen.Enum<Recipient>(), (e, mode) => new SetRecipient(e, mode))),
+            (3, Gen.Const(new AckOutstanding())),
+            (1, Gen.Const(new HealAndWait())),
+        ];
+        return Gen.Frequency(trouble ? [.. healthy,
+            (4, Gen.Select(Gen.Int[0, ReminderApp.Regions - 1], Gen.Bool, (r, up) => new SetRegion(r, up))),
+            (8, FaultGen)] : healthy);
     }
 
     [Fact(DisplayName = "Should_MatchTheModelAndKeepEveryRule_When_RunningGeneratedSequences_InMemory")]
@@ -162,6 +78,46 @@ public sealed class ReminderFaultSpecs(ITestOutputHelper output)
     // every reply must match it exactly.
     [Fact(DisplayName = "Should_MatchTheModelExactly_When_StorageIsHealthy_InMemory")]
     public Task InMemoryHealthy() => SampleAsync(InMemoryModelStorageFactory.Instance, 60, trouble: false);
+
+    [Fact(DisplayName = "Should_MatchTheModel_When_HealthyRecipientsAcknowledgeManually")]
+    public Task InMemoryManualAcknowledgements()
+    {
+        // The old healthy model's five commands and timing ranges, checked by the shared model.
+        // Recipients stay silent until an explicit per-entity acknowledgement command is generated.
+        var settings = new ModelSettings(1000, 3000, 100, 100, 10);
+        var delay = Gen.Int[1, 10].Select(seconds => seconds * 1000);
+        var interval = Gen.OneOfConst(5000, 10_000, 20_000);
+        var commands = Gen.Frequency<Op>(
+            (1, Gen.Select(Entity, Key, delay, (e, k, due) => new ScheduleOnce(e, k, due, null))),
+            (1, Gen.Select(Entity, Key, delay, interval, (e, k, due, every) => new ScheduleRecurring(e, k, due, every, null))),
+            (1, Gen.Select(Entity, Key, (e, k) => new Cancel(e, k))),
+            (1, delay.Select(ms => new Tick(ms))),
+            (1, Entity.Select(e => new AckOutstanding(e))));
+        return commands.Array.SampleAsync(async trace =>
+        {
+            var history = await RunAsync(settings, InMemoryModelStorageFactory.Instance, trace, Recipient.Ignore);
+            RequireHealthyDeliveries(history);
+        }, writeLine: output.WriteLine);
+    }
+
+    // This profile has no faults, stalls, past anchors or automatic acknowledgements. Keep its
+    // independent per-registration check: a same-due replacement cannot borrow the old payload's delivery.
+    internal static void RequireHealthyDeliveries(History history)
+    {
+        var now = history.All.LastOrDefault()?.At ?? VirtualClock.Origin;
+        var onTime = history.Deliveries.Where(d => d.At <= d.Due).Select(d => (d.Id, d.Due)).ToHashSet();
+        foreach (var call in history.Calls)
+        {
+            var until = history.EndOf(call)?.At ?? now;
+            for (var due = call.FirstDue; due <= until; due += call.Interval.GetValueOrDefault())
+            {
+                if (!onTime.Contains((call.Id, due)))
+                    throw new ModelViolation($"HealthyDelivery: reminder {call.Id} due {Journal.T(due)} did not arrive on time\n{history.Timeline()}");
+                if (call.Interval is null)
+                    break;
+            }
+        }
+    }
 
     [Fact(DisplayName = "Should_MatchTheModelAndKeepEveryRule_When_RunningGeneratedSequences_Sqlite")]
     public async Task Sqlite()
@@ -197,7 +153,7 @@ public sealed class ReminderFaultSpecs(ITestOutputHelper output)
         await SampleAsync(new SqlServerModelStorageFactory(container.GetConnectionString()), 10);
     }
 
-    // ------------------------------------------------------------------ generators (properties: the table above is built first)
+    // Argument domains are unchanged: near-boundary values plus broad times, settings and faults.
 
     private static Gen<int> Entity => Gen.Int[0, ReminderApp.Entities - 1];
     private static Gen<int> Key => Gen.Int[0, ReminderApp.Keys - 1];
