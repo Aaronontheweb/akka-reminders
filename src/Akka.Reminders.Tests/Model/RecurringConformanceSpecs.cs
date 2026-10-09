@@ -30,7 +30,7 @@ public sealed class RecurringConformanceSpecs(ITestOutputHelper output)
                     current?.Stop();
                     // Ack timeout exceeds this spec's 12-second horizon: retries are out of scope.
                     // Batch size one keeps fetching after the first occurrence, exposing an early successor.
-                    return current = new ReminderApp(new ModelSettings(RecurringSpec.Slippage * 1000, 60_000, 60_000, 60_000, 3, MaxBatch: 1), Recipient.Ignore);
+                    return current = new ReminderApp(new ModelSettings((int)RecurringSpec.EarlyDeliveryAllowance.TotalMilliseconds, 60_000, 60_000, 60_000, 3, MaxBatch: 1), Recipient.Ignore);
                 },
                 apply: (app, step) => ApplyAsync(app, step).GetAwaiter().GetResult(),
                 writeLine: output.WriteLine, minSteps: 1, maxSteps: 24, threads: 1));
@@ -48,20 +48,20 @@ public sealed class RecurringConformanceSpecs(ITestOutputHelper output)
         switch (step.Action)
         {
             case "Schedule":
-                var scheduled = await app.ScheduleRecurring(0, 0, TimeSpan.FromSeconds(step.After.FirstDue!.Value), TimeSpan.FromSeconds(RecurringSpec.Period));
+                var scheduled = await app.ScheduleRecurring(0, 0, step.After.FirstDue!.Value.Offset, RecurringSpec.RepeatInterval);
                 if (scheduled != ReminderScheduleResponseCode.Success)
                     return $"Schedule: expected Success, got {scheduled}";
                 break;
-            case "Advance":
-                await app.Tick(TimeSpan.FromSeconds(step.After.Now - step.Before.Now));
+            case "WaitFor":
+                await app.Tick(step.After.CurrentTime - step.Before.CurrentTime);
                 break;
             case "Acknowledge":
-                var due = VirtualClock.Origin.AddSeconds(step.Before.Due(RecurringSpec.Occurrences[step.ArgIndex]));
+                var due = VirtualClock.Origin + step.Before.DueAt(RecurringSpec.Occurrences[step.ArgIndex]);
                 var delivery = app.Journal.Read().Deliveries.First(d => d.Due == due);
                 await app.Acknowledge(delivery);
                 var reply = app.Journal.Read().Acks.Last().Reply;
-                if (reply != step.After.Reply)
-                    return $"Acknowledge(occurrence {step.After.Asked}): expected {step.After.Reply}, got {reply} at {step.After.Now}s";
+                if (reply != step.After.ExpectedAcknowledgementReply)
+                    return $"Acknowledge({step.After.RequestedAcknowledgement}): expected {step.After.ExpectedAcknowledgementReply}, got {reply} at {step.After.CurrentTime}";
                 break;
             default:
                 throw new InvalidOperationException($"No scheduler adapter for {step.Action}");
@@ -70,8 +70,8 @@ public sealed class RecurringConformanceSpecs(ITestOutputHelper output)
         var history = app.Journal.Read();
         foreach (var delivery in history.Deliveries.Where(d => d.Seq > position))
         {
-            if (delivery.Due > delivery.At.AddSeconds(RecurringSpec.Slippage) ||
-                delivery.At >= delivery.Due.AddSeconds(RecurringSpec.Period))
+            if (delivery.Due > delivery.At + RecurringSpec.EarlyDeliveryAllowance ||
+                delivery.At >= delivery.Due + RecurringSpec.RepeatInterval)
                 return $"DeliveryWindow: {delivery} at {Journal.T(delivery.At)}";
             if (history.Acks.Any(a => a.Seq < delivery.Seq && a.Due == delivery.Due &&
                                       a.Reply == ReminderAckResponseCode.Success))
@@ -81,8 +81,8 @@ public sealed class RecurringConformanceSpecs(ITestOutputHelper output)
         // With no faults and no ack timeout within this horizon, each occurrence arrives exactly once,
         // in order. This also checks that advancing time actually delivers the next occurrence(s).
         var observed = history.Deliveries.Select(d => d.Due).ToArray();
-        var expected = Enumerable.Range(0, step.After.Delivered)
-            .Select(i => VirtualClock.Origin.AddSeconds(step.After.Due(i))).ToArray();
+        var expected = RecurringSpec.Occurrences.Where(step.After.ExpectedDeliveries.Includes)
+            .Select(occurrence => VirtualClock.Origin + step.After.DueAt(occurrence)).ToArray();
         return observed.SequenceEqual(expected) ? null :
             $"Delivery: expected [{string.Join(", ", expected.Select(Journal.T))}], got [{string.Join(", ", observed.Select(Journal.T))}]";
     }

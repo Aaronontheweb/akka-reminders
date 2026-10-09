@@ -30,8 +30,10 @@ payload delivered at the same due time cannot satisfy a replacement registration
 The full model also checks schedule replies and retry obligations after each command.
 
 `RecurringSpec.cs` and `RecurringConformanceSpecs.cs` provide a bounded native `Spec`:
-explicit guards and rules, exhaustive model exploration, and sampled scheduler conformance. Its comments
-explain the anchor offsets and occurrence-count advances. Its batch-one eager-fetch setup is specific
+explicit guards and rules, exhaustive model exploration, and sampled scheduler conformance. Its inputs have semantic types: `FirstDueTime` (`DueNow` or `Overdue`), `Occurrence`, and
+`OccurrenceCount`. `WaitFor(1 occurrence)` advances to the next occurrence, not by one second.
+`ExpectedDeliveries` predicts how many distinct occurrences have arrived; acknowledgement state
+identifies an occurrence, not a count. Nullable values mean no schedule or acknowledgement yet. Its batch-one eager-fetch setup is specific
 to that example; early delivery is permitted by slippage, not universally required.
 
 ## What CsCheck owns
