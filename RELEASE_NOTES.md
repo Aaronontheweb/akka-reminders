@@ -7,10 +7,6 @@
 - The next send ran late by about as long as storage was slow during the last pass. The scheduler now schedules the next timer relative to when storage finished, not when the pass started, and paces recovery reads so a slow database no longer pushes the next delivery off schedule ([#153](https://github.com/Aaronontheweb/akka-reminders/issues/153), [#157](https://github.com/Aaronontheweb/akka-reminders/pull/157)).
 - A reminder could be sent late when another reminder was due at the exact same instant. The scheduler no longer treats "due in exactly zero seconds" as "nothing is waiting"; it wakes for the soonest reminder ([#154](https://github.com/Aaronontheweb/akka-reminders/issues/154), [#158](https://github.com/Aaronontheweb/akka-reminders/pull/158)).
 
-**Testing**
-
-- Added a model-based CsCheck test suite for the reminder scheduler, with `docs/design/failure-modes.md` as the behavior specification and reproducible scheduler-recovery benchmark evidence under `docs/benchmarks/scheduler-recovery-2026-10-08/` ([#149](https://github.com/Aaronontheweb/akka-reminders/pull/149)).
-
 #### 1.5.73.1 October 7th 2026 ####
 
 **Bug Fixes**
