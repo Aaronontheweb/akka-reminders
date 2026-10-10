@@ -53,7 +53,7 @@ public readonly record struct ReminderDeadline
 
 /// <summary>
 /// Marker interface for all reminder messages that need to cross node boundaries
-/// via Akka.Remote / Akka.Cluster. Used to bind the <see cref="Serialization.ReminderSerializer"/>
+/// via Akka.Remote / Akka.Cluster. Used to bind the <see cref="Serialization.RemindersV2Serializer"/>
 /// to all wire-visible types in a single registration.
 /// </summary>
 public interface IReminderWireMessage;
