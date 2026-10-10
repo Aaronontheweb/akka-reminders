@@ -756,9 +756,27 @@ public async Task Reminder_should_fire_at_scheduled_time()
 }
 ```
 
+## Wire serialization
+
+`WithReminders` and `WithLocalReminders` use the source-generated MessagePack serializer
+(`RemindersV2Serializer`, id **22552**) for new reminder wire messages. The legacy binary
+serializer (id **22550**) stays registered for reading existing payloads. The generated codec
+uses the non-generic envelope schema; its reader adapter reconstructs `ReminderEnvelope<T>`
+so typed actor handlers continue to receive the same delivery wrapper.
+
+The envelope delegates its `Message` payload to the application's configured Akka.NET
+serializer. Existing custom payload serializers continue to work, and applications can use
+their own source-generated serializer for payloads. This change does not rewrite stored
+reminders or change the serializer selected for an application's payload type.
+
+Older nodes cannot read serializer id 22552. Stop reminder traffic while upgrading every
+participating node before resuming it; mixed deployments with versions that only understand
+22550 cannot exchange the new wire messages. Read compatibility with 22550 does not make
+new 22552 payloads readable by an older version.
+
 ## Native AOT
 
-Local mode (`WithLocalReminders`) works under .NET Native AOT. All five packages are marked `IsAotCompatible` and produce no trim or AOT warnings of their own. The repository's AOT canary ([src/aot/Akka.Reminders.AOT.App](src/aot/Akka.Reminders.AOT.App)) has an independent `Native AOT canary (linux-x64)` CI job: it publishes with `PublishAot`, schedules, delivers and acks reminders with in-memory and SQLite storage, and restarts to deliver a reminder restored from the SQLite file.
+Local mode (`WithLocalReminders`) works under .NET Native AOT. All five packages are marked `IsAotCompatible` and produce no trim or AOT warnings of their own. The repository's AOT canary ([src/aot/Akka.Reminders.AOT.App](src/aot/Akka.Reminders.AOT.App)) has an independent `Native AOT canary (linux-x64)` CI job: it publishes with `PublishAot`, checks V2 typed-envelope round trips and legacy reads using a custom payload serializer, schedules, delivers and acks reminders with in-memory and SQLite storage, and restarts to deliver a reminder restored from the SQLite file.
 
 Clustered mode (`WithReminders`, which runs the scheduler as a cluster singleton and delivers through Cluster.Sharding) is **not supported** under Native AOT yet, because Akka.Cluster itself is not AOT-ready in Akka.NET 1.6.
 

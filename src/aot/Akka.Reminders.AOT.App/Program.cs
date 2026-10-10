@@ -19,6 +19,7 @@ using System.Text;
 using Akka.Actor;
 using Akka.Hosting;
 using Akka.Reminders;
+using Akka.Reminders.Serialization;
 using Akka.Reminders.Sharding;
 using Akka.Reminders.Sqlite;
 using Akka.Reminders.Sqlite.Configuration;
@@ -264,7 +265,51 @@ public sealed class CanaryApp : IAsyncDisposable
         var host = builder.Build();
         await host.StartAsync();
 
-        return new CanaryApp(host, received);
+        var app = new CanaryApp(host, received);
+        try
+        {
+            app.CheckWireSerialization();
+            return app;
+        }
+        catch
+        {
+            await app.DisposeAsync();
+            throw;
+        }
+    }
+
+    private void CheckWireSerialization()
+    {
+        // Local actor delivery does not serialize its IWrappedMessage envelope. Exercise the
+        // actual wire codec explicitly, including the application's existing payload serializer.
+        var envelope = new ReminderEnvelope<PaymentRetry>(
+            new ReminderEntity(Region, "wire-check"),
+            new ReminderKey("retry"),
+            new DateTimeOffset(2026, 10, 9, 12, 0, 0, TimeSpan.Zero),
+            ReminderDeadline.Infinite,
+            new PaymentRetry("wire"));
+        var serializer = _system.Serialization.FindSerializerFor(envelope);
+        if (serializer is not RemindersV2Serializer writer || writer.Identifier != 22552)
+            throw new InvalidOperationException("Reminder envelope did not select the V2 writer");
+
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+        var written = writer.Serialize(envelope, buffer);
+        if (written != buffer.WrittenCount)
+            throw new InvalidOperationException("V2 writer reported an incorrect byte count");
+
+        var restored = _system.Serialization.Deserialize(buffer.WrittenMemory.ToArray(), 22552, writer.Manifest(envelope));
+        if (restored is not ReminderEnvelope<PaymentRetry> typed
+            || typed.Entity != envelope.Entity || typed.Key != envelope.Key
+            || typed.DueTimeUtc != envelope.DueTimeUtc || typed.Deadline != envelope.Deadline
+            || typed.Message != envelope.Message)
+            throw new InvalidOperationException("V2 wire round trip did not preserve the typed reminder envelope");
+
+        var legacy = new Akka.Reminders.Serialization.ReminderSerializer((ExtendedActorSystem)_system);
+        var oldRead = _system.Serialization.Deserialize(legacy.ToBinary(envelope), 22550, legacy.Manifest(envelope));
+        if (oldRead is not ReminderEnvelope<PaymentRetry> oldTyped || oldTyped.Message != envelope.Message)
+            throw new InvalidOperationException("Legacy reminder payload is no longer readable");
+
+        Console.WriteLine("[wire] V2 typed envelope and legacy reader round trips OK");
     }
 
     public IReminderClient Client(string entityId) => _system.ReminderClient().CreateClient(Region, entityId);

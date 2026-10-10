@@ -2,12 +2,14 @@ using System;
 using System.Collections.Generic;
 using Akka.Actor;
 using Akka.Reminders.Storage;
+using Akka.Serialization.V2;
 
 namespace Akka.Reminders;
 
 /// <summary>
 /// Absolute UTC deadline metadata attached to a delivered reminder occurrence.
 /// </summary>
+[AkkaSerializable]
 public readonly record struct ReminderDeadline
 {
     public static ReminderDeadline Infinite => new(DateTimeOffset.MaxValue);
@@ -20,6 +22,7 @@ public readonly record struct ReminderDeadline
     /// <summary>
     /// Absolute UTC timestamp after which the reminder occurrence is stale.
     /// </summary>
+    [AkkaField(1)]
     public DateTimeOffset UtcDateTime { get; }
 
     /// <summary>
@@ -50,30 +53,45 @@ public readonly record struct ReminderDeadline
 
 /// <summary>
 /// Marker interface for all reminder messages that need to cross node boundaries
-/// via Akka.Remote / Akka.Cluster. Used to bind the <see cref="Serialization.ReminderSerializer"/>
+/// via Akka.Remote / Akka.Cluster. Used to bind the <see cref="Serialization.RemindersV2Serializer"/>
 /// to all wire-visible types in a single registration.
 /// </summary>
 public interface IReminderWireMessage;
 
 /// <summary>
+/// Marker interface for the reminder wire messages the source-generated
+/// <see cref="Serialization.RemindersV2Serializer"/> dispatches as top-level messages.
+/// </summary>
+/// <remarks>
+/// This is deliberately separate from <see cref="IReminderWireMessage"/> so the generic
+/// <see cref="ReminderEnvelope{T}"/>, which inherits <see cref="IReminderWireMessage"/> through the
+/// base envelope, is never walked by the source generator as an open-generic implementor.
+/// </remarks>
+public interface IReminderWireProtocol;
+
+/// <summary>
 /// Wraps a reminder message with its originating entity, key, and occurrence metadata,
 /// allowing recipients to acknowledge delivery via <see cref="IReminderClient.AckAsync"/>.
 /// </summary>
+[AkkaSerializable(Manifest = "re")]
 public class ReminderEnvelope : IWrappedMessage, IReminderWireMessage
 {
     /// <summary>
     /// The entity that scheduled this reminder.
     /// </summary>
+    [AkkaField(1)]
     public ReminderEntity Entity { get; }
 
     /// <summary>
     /// The unique key identifying this reminder for the entity.
     /// </summary>
+    [AkkaField(2)]
     public ReminderKey Key { get; }
 
     /// <summary>
     /// The original due time for this reminder occurrence in UTC.
     /// </summary>
+    [AkkaField(3)]
     public DateTimeOffset DueTimeUtc { get; }
 
     /// <summary>
@@ -82,11 +100,13 @@ public class ReminderEnvelope : IWrappedMessage, IReminderWireMessage
     /// When this is the final attempt, this equals the occurrence-level delivery deadline.
     /// Unbounded final attempts use <see cref="ReminderDeadline.Infinite"/>.
     /// </summary>
+    [AkkaField(4)]
     public ReminderDeadline Deadline { get; }
 
     /// <summary>
     /// The payload that was originally scheduled.
     /// </summary>
+    [AkkaField(5)]
     public object Message { get; }
 
     /// <summary>
@@ -249,13 +269,14 @@ public enum ReminderOccurrenceStatusResponseCode
 
 public static class ReminderProtocol
 {
+    [AkkaSerializable(Manifest = "sr")]
     public sealed record ScheduleReminder(
-        ReminderEntity Entity,
-        ReminderKey Key,
-        DateTimeOffset When,
-        object Message,
-        TimeSpan? RepeatInterval = null,
-        TimeSpan? MaxDeliveryWindow = null) : IReminderCommand, IReminderWireMessage
+        [property: AkkaField(1)] ReminderEntity Entity,
+        [property: AkkaField(2)] ReminderKey Key,
+        [property: AkkaField(3)] DateTimeOffset When,
+        [property: AkkaField(4)] object Message,
+        [property: AkkaField(5)] TimeSpan? RepeatInterval = null,
+        [property: AkkaField(6)] TimeSpan? MaxDeliveryWindow = null) : IReminderCommand, IReminderWireMessage, IReminderWireProtocol
     {
         public ScheduledReminder ToScheduledReminder() => new(
             Entity,
@@ -266,20 +287,27 @@ public static class ReminderProtocol
             MaxDeliveryWindow: MaxDeliveryWindow);
     }
 
-    public sealed record CancelReminder(ReminderEntity Entity, ReminderKey Key) : IReminderCommand, IReminderWireMessage;
+    [AkkaSerializable(Manifest = "cr")]
+    public sealed record CancelReminder(
+        [property: AkkaField(1)] ReminderEntity Entity,
+        [property: AkkaField(2)] ReminderKey Key) : IReminderCommand, IReminderWireMessage, IReminderWireProtocol;
 
-    public sealed record CancelAllReminders(ReminderEntity Entity) : IReminderCommand, IReminderWireMessage;
+    [AkkaSerializable(Manifest = "car")]
+    public sealed record CancelAllReminders(
+        [property: AkkaField(1)] ReminderEntity Entity) : IReminderCommand, IReminderWireMessage, IReminderWireProtocol;
 
+    [AkkaSerializable(Manifest = "rc")]
     public sealed record RemindersCancelled(
-        ReminderEntity Entity,
-        ReminderCancelResponseCode ResponseCode,
-        IReadOnlyList<ReminderKey> Keys,
-        string? Message = null) : IReminderResponse, IReminderWireMessage;
+        [property: AkkaField(1)] ReminderEntity Entity,
+        [property: AkkaField(2)] ReminderCancelResponseCode ResponseCode,
+        [property: AkkaField(3)] IReadOnlyList<ReminderKey> Keys,
+        [property: AkkaField(4)] string? Message = null) : IReminderResponse, IReminderWireMessage, IReminderWireProtocol;
 
+    [AkkaSerializable(Manifest = "rsd")]
     public sealed record ReminderScheduled(
-        ScheduleReminder OriginalCommand,
-        ReminderScheduleResponseCode ResponseCode,
-        string? Message = null) : IReminderResponse, IReminderWireMessage
+        [property: AkkaField(1)] ScheduleReminder OriginalCommand,
+        [property: AkkaField(2)] ReminderScheduleResponseCode ResponseCode,
+        [property: AkkaField(3)] string? Message = null) : IReminderResponse, IReminderWireMessage, IReminderWireProtocol
     {
         /// <inheritdoc />
         public ReminderEntity Entity => OriginalCommand.Entity;
@@ -295,102 +323,114 @@ public static class ReminderProtocol
         public DateTimeOffset When => OriginalCommand.When;
     }
 
-    public sealed record GetReminders(ReminderEntity Entity) : IReminderQuery, IReminderWireMessage;
+    [AkkaSerializable(Manifest = "gr")]
+    public sealed record GetReminders(
+        [property: AkkaField(1)] ReminderEntity Entity) : IReminderQuery, IReminderWireMessage, IReminderWireProtocol;
 
+    [AkkaSerializable(Manifest = "rfe")]
     public sealed record RemindersForEntity(
-        ReminderEntity Entity,
-        FetchRemindersResponseCode ResponseCode,
-        IReadOnlyList<ScheduledReminder> Reminders,
-        string? Message = null) : IReminderResponse, IReminderWireMessage;
+        [property: AkkaField(1)] ReminderEntity Entity,
+        [property: AkkaField(2)] FetchRemindersResponseCode ResponseCode,
+        [property: AkkaField(3)] IReadOnlyList<ScheduledReminder> Reminders,
+        [property: AkkaField(4)] string? Message = null) : IReminderResponse, IReminderWireMessage, IReminderWireProtocol;
 
     /// <summary>
     /// Sent by a recipient to confirm that a reminder has been successfully processed.
     /// Prevents duplicate delivery for at-least-once reminders.
     /// </summary>
+    [AkkaSerializable(Manifest = "ra")]
     public sealed record ReminderAck(
-        ReminderEntity Entity,
-        ReminderKey Key,
-        DateTimeOffset DueTimeUtc) : IReminderCommand, IReminderWireMessage;
+        [property: AkkaField(1)] ReminderEntity Entity,
+        [property: AkkaField(2)] ReminderKey Key,
+        [property: AkkaField(3)] DateTimeOffset DueTimeUtc) : IReminderCommand, IReminderWireMessage, IReminderWireProtocol;
 
     /// <summary>
     /// Returned by the scheduler after processing a <see cref="ReminderAck"/>.
     /// </summary>
+    [AkkaSerializable(Manifest = "rar")]
     public sealed record ReminderAckResponse(
-        ReminderEntity Entity,
-        ReminderKey Key,
-        DateTimeOffset DueTimeUtc,
-        ReminderAckResponseCode ResponseCode,
-        string? Message = null) : IReminderResponse, IReminderWireMessage;
+        [property: AkkaField(1)] ReminderEntity Entity,
+        [property: AkkaField(2)] ReminderKey Key,
+        [property: AkkaField(3)] DateTimeOffset DueTimeUtc,
+        [property: AkkaField(4)] ReminderAckResponseCode ResponseCode,
+        [property: AkkaField(5)] string? Message = null) : IReminderResponse, IReminderWireMessage, IReminderWireProtocol;
 
     /// <summary>
     /// Reports a failed reminder delivery attempt.
     /// </summary>
+    [AkkaSerializable(Manifest = "rn")]
     public sealed record ReminderNack(
-        ReminderEntity Entity,
-        ReminderKey Key,
-        DateTimeOffset DueTimeUtc,
-        string Reason) : IReminderCommand, IReminderWireMessage;
+        [property: AkkaField(1)] ReminderEntity Entity,
+        [property: AkkaField(2)] ReminderKey Key,
+        [property: AkkaField(3)] DateTimeOffset DueTimeUtc,
+        [property: AkkaField(4)] string Reason) : IReminderCommand, IReminderWireMessage, IReminderWireProtocol;
 
     /// <summary>
     /// Returns the retry or terminal result for a negative acknowledgement.
     /// </summary>
+    [AkkaSerializable(Manifest = "rnr")]
     public sealed record ReminderNackResponse(
-        ReminderEntity Entity,
-        ReminderKey Key,
-        DateTimeOffset DueTimeUtc,
-        ReminderNackResponseCode ResponseCode,
-        int AttemptCount,
-        DateTimeOffset? NextAttemptAtUtc = null,
-        string? Message = null) : IReminderResponse, IReminderWireMessage;
+        [property: AkkaField(1)] ReminderEntity Entity,
+        [property: AkkaField(2)] ReminderKey Key,
+        [property: AkkaField(3)] DateTimeOffset DueTimeUtc,
+        [property: AkkaField(4)] ReminderNackResponseCode ResponseCode,
+        [property: AkkaField(5)] int AttemptCount,
+        [property: AkkaField(6)] DateTimeOffset? NextAttemptAtUtc = null,
+        [property: AkkaField(7)] string? Message = null) : IReminderResponse, IReminderWireMessage, IReminderWireProtocol;
 
     /// <summary>
     /// Queries one reminder occurrence by its durable identity.
     /// </summary>
+    [AkkaSerializable(Manifest = "rosq")]
     public sealed record GetReminderOccurrenceStatus(
-        ReminderEntity Entity,
-        ReminderKey Key,
-        DateTimeOffset DueTimeUtc) : IReminderQuery, IReminderWireMessage;
+        [property: AkkaField(1)] ReminderEntity Entity,
+        [property: AkkaField(2)] ReminderKey Key,
+        [property: AkkaField(3)] DateTimeOffset DueTimeUtc) : IReminderQuery, IReminderWireMessage, IReminderWireProtocol;
 
     /// <summary>
     /// Returns the durable state for one reminder occurrence.
     /// </summary>
+    [AkkaSerializable(Manifest = "rosr")]
     public sealed record ReminderOccurrenceStatusResponse(
-        ReminderEntity Entity,
-        ReminderKey Key,
-        DateTimeOffset DueTimeUtc,
-        ReminderOccurrenceStatusResponseCode ResponseCode,
-        ReminderOccurrenceStatus? Status = null,
-        string? Message = null) : IReminderResponse, IReminderWireMessage;
+        [property: AkkaField(1)] ReminderEntity Entity,
+        [property: AkkaField(2)] ReminderKey Key,
+        [property: AkkaField(3)] DateTimeOffset DueTimeUtc,
+        [property: AkkaField(4)] ReminderOccurrenceStatusResponseCode ResponseCode,
+        [property: AkkaField(5)] ReminderOccurrenceStatus? Status = null,
+        [property: AkkaField(6)] string? Message = null) : IReminderResponse, IReminderWireMessage, IReminderWireProtocol;
 }
 
 /// <summary>
 /// A unique identifier for a reminder, scoped to a <see cref="ReminderEntity"/>
 /// </summary>
 /// <param name="Name">An arbitrary name for this reminder.</param>
-public readonly record struct ReminderKey(string Name);
+[AkkaSerializable]
+public readonly record struct ReminderKey([property: AkkaField(1)] string Name);
 
 /// <summary>
 /// Tells the reminder system which ShardRegion to use for the reminder.
 /// </summary>
 /// <param name="ShardRegionName">The name of the entity type - this is part of the ShardRegion's configuration.</param>
 /// <param name="EntityId">The id of the entity performing the scheduling.</param>
-public readonly record struct ReminderEntity(string ShardRegionName, string EntityId);
+[AkkaSerializable]
+public readonly record struct ReminderEntity([property: AkkaField(1)] string ShardRegionName, [property: AkkaField(2)] string EntityId);
 
 /// <summary>
 /// Durable status for one reminder occurrence.
 /// </summary>
+[AkkaSerializable]
 public sealed record ReminderOccurrenceStatus(
-    ReminderEntity Entity,
-    ReminderKey Key,
-    DateTimeOffset DueTimeUtc,
-    DateTimeOffset? NextAttemptAtUtc,
-    int AttemptCount,
-    string? LastFailureReason,
-    ReminderCompletionStatus CompletionStatus,
-    DateTimeOffset? DeliveryDeadlineUtc = null,
-    DateTimeOffset? DeliveredAtUtc = null,
-    DateTimeOffset? AckDeadlineUtc = null,
-    DateTimeOffset? CompletedAtUtc = null);
+    [property: AkkaField(1)] ReminderEntity Entity,
+    [property: AkkaField(2)] ReminderKey Key,
+    [property: AkkaField(3)] DateTimeOffset DueTimeUtc,
+    [property: AkkaField(4)] DateTimeOffset? NextAttemptAtUtc,
+    [property: AkkaField(5)] int AttemptCount,
+    [property: AkkaField(6)] string? LastFailureReason,
+    [property: AkkaField(7)] ReminderCompletionStatus CompletionStatus,
+    [property: AkkaField(8)] DateTimeOffset? DeliveryDeadlineUtc = null,
+    [property: AkkaField(9)] DateTimeOffset? DeliveredAtUtc = null,
+    [property: AkkaField(10)] DateTimeOffset? AckDeadlineUtc = null,
+    [property: AkkaField(11)] DateTimeOffset? CompletedAtUtc = null);
 
 /// <summary>
 /// Represents a scheduled reminder to be executed in the future.
@@ -412,17 +452,18 @@ public sealed record ReminderOccurrenceStatus(
 /// <param name="MaxDeliveryWindow">Optional maximum amount of time this occurrence remains actionable after its due time.</param>
 /// <param name="DeliveryDeadlineUtc">Absolute UTC deadline after which this occurrence is stale.</param>
 /// <param name="OccurrenceDueTimeUtc">Original due time for this occurrence. Null means <paramref name="When"/> is the due time.</param>
+[AkkaSerializable]
 public sealed record ScheduledReminder(
-    ReminderEntity Entity,
-    ReminderKey Key,
-    DateTimeOffset When,
-    object Message,
-    TimeSpan? RepeatInterval = null,
-    int AttemptCount = 0,
-    string? LastFailureReason = null,
-    TimeSpan? MaxDeliveryWindow = null,
-    DateTimeOffset? DeliveryDeadlineUtc = null,
-    DateTimeOffset? OccurrenceDueTimeUtc = null)
+    [property: AkkaField(1)] ReminderEntity Entity,
+    [property: AkkaField(2)] ReminderKey Key,
+    [property: AkkaField(3)] DateTimeOffset When,
+    [property: AkkaField(4)] object Message,
+    [property: AkkaField(5)] TimeSpan? RepeatInterval = null,
+    [property: AkkaField(6)] int AttemptCount = 0,
+    [property: AkkaField(7)] string? LastFailureReason = null,
+    [property: AkkaField(8)] TimeSpan? MaxDeliveryWindow = null,
+    [property: AkkaField(9)] DateTimeOffset? DeliveryDeadlineUtc = null,
+    [property: AkkaField(10)] DateTimeOffset? OccurrenceDueTimeUtc = null)
 {
     /// <summary>
     /// The original due time for this occurrence in UTC.
