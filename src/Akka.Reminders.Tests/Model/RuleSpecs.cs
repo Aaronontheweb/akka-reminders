@@ -63,6 +63,29 @@ public sealed class RuleSpecs
         Assert.All(SafetyRules.All, rule => Assert.Empty(rule.Broken(history, Settings)));
     }
 
+    [Fact]
+    public void HealthyDeliveryCheckRejectsMissingReplacementPayload()
+    {
+        var history = HistoryOf(
+            (0, new Scheduled(1, 0, 0, T(1), null, null, ReminderScheduleResponseCode.Success)),
+            (0, Sent(1, id: 1)),
+            (0, new Scheduled(2, 0, 0, T(1), null, null, ReminderScheduleResponseCode.Success)),
+            (1, new Done()));
+        var failure = Assert.Throws<ModelViolation>(() => ReminderFaultSpecs.RequireHealthyDeliveries(history));
+        Assert.Contains("reminder 2", failure.Message);
+    }
+
+    [Fact]
+    public void HealthyDeliveryCheckAcceptsDeliveredAndCancelledOccurrences()
+    {
+        var history = HistoryOf(
+            (0, new Scheduled(1, 0, 0, T(1), TimeSpan.FromSeconds(5), null, ReminderScheduleResponseCode.Success)),
+            (1, Sent(1)),
+            (2, new CancelAnswered(0, 0, ReminderCancelResponseCode.Success)),
+            (10, new Done()));
+        ReminderFaultSpecs.RequireHealthyDeliveries(history);
+    }
+
     [Fact(DisplayName = "Should_SkipMissedSlots_When_TheSchedulerWakesAfterALag")]
     public void ModelSkipsMissedSlots()
     {
@@ -179,7 +202,7 @@ public sealed class RuleSpecs
     [Theory(DisplayName = "Should_RespectTheDurableAckOutcome_When_ItsResponseWasLost")]
     [InlineData(FaultKind.AppliedThenFail, false)]
     [InlineData(FaultKind.Fail, true)]
-    public void OracleDistinguishesLandedAndFailedAcknowledgements(FaultKind kind, bool retryOwed)
+    public void ModelDistinguishesLandedAndFailedAcknowledgements(FaultKind kind, bool retryOwed)
     {
         var app = new ReminderApp(Settings);
         app.Journal.Add(OneOff());
@@ -187,17 +210,17 @@ public sealed class RuleSpecs
         app.Journal.Add(AckFault(30, kind));
         app.Journal.Add(new AckAnswered(2, 1, 0, 0, T(0), ReminderAckResponseCode.Error));
         app.Journal.Add(new Done()).At = T(31);
-        var oracle = new Oracle(app);
+        var model = new ReminderModel(app.Settings);
         if (retryOwed)
-            Assert.Contains("RetriedOnTime", Assert.Throws<ModelViolation>(oracle.Read).Message);
+            Assert.Contains("RetriedOnTime", Assert.Throws<ModelViolation>(() => model.Observe(app.Journal.Read())).Message);
         else
-            oracle.Read();
+            model.Observe(app.Journal.Read());
     }
 
     [Theory(DisplayName = "Should_RejectRedeliveryOnly_When_TheAcknowledgementPersistedBeforeItsReplyWasLost")]
     [InlineData(FaultKind.AppliedThenFail, true)]
     [InlineData(FaultKind.Fail, false)]
-    public void OracleChecksRedeliveryAfterAnAcknowledgementError(FaultKind kind, bool redeliveryForbidden)
+    public void ModelChecksRedeliveryAfterAnAcknowledgementError(FaultKind kind, bool redeliveryForbidden)
     {
         var app = new ReminderApp(Settings);
         app.Journal.Add(OneOff());
@@ -205,15 +228,15 @@ public sealed class RuleSpecs
         app.Journal.Add(AckFault(30, kind));
         app.Journal.Add(new AckAnswered(2, 1, 0, 0, T(0), ReminderAckResponseCode.Error));
         app.Journal.Add(new Done());
-        var oracle = new Oracle(app);
-        oracle.Read();
+        var model = new ReminderModel(app.Settings);
+        model.Observe(app.Journal.Read());
 
         app.Journal.Add(Sent(0)).At = T(31);
         app.Journal.Add(new Done()).At = T(31);
         if (redeliveryForbidden)
-            Assert.Contains("AckedNeverRedelivered", Assert.Throws<ModelViolation>(oracle.Read).Message);
+            Assert.Contains("AckedNeverRedelivered", Assert.Throws<ModelViolation>(() => model.Observe(app.Journal.Read())).Message);
         else
-            oracle.Read();
+            model.Observe(app.Journal.Read());
     }
 
     [Fact(DisplayName = "Should_AllowAnExplicitNewRegistration_AfterAnAcknowledgementPersistsWithALostReply")]
@@ -225,13 +248,13 @@ public sealed class RuleSpecs
         app.Journal.Add(AckFault(30, FaultKind.AppliedThenFail));
         app.Journal.Add(new AckAnswered(2, 1, 0, 0, T(0), ReminderAckResponseCode.Error));
         app.Journal.Add(new Done());
-        var oracle = new Oracle(app);
-        oracle.Read();
+        var model = new ReminderModel(app.Settings);
+        model.Observe(app.Journal.Read());
 
         app.Journal.Add(new Scheduled(2, 0, 0, T(0), null, null, ReminderScheduleResponseCode.Success)).At = T(31);
         app.Journal.Add(Sent(0, id: 2)).At = T(31);
         app.Journal.Add(new Done()).At = T(31);
-        oracle.Read();
+        model.Observe(app.Journal.Read());
     }
 
     [Fact(DisplayName = "Should_NotAttributeAnEarlierLandedAcknowledgement_ToALaterFailedOperation")]
@@ -252,8 +275,8 @@ public sealed class RuleSpecs
         app.Journal.Add(OneOff());
         app.Journal.Add(Sent(0));
         app.Journal.Add(new Done());
-        var oracle = new Oracle(app);
-        oracle.Read();
+        var model = new ReminderModel(app.Settings);
+        model.Observe(app.Journal.Read());
 
         // Timeout at 10 s made the row Pending until 11 s. Applying this ack call returns
         // NotFound; its lost response is not evidence of a durable acknowledgement.
@@ -261,7 +284,7 @@ public sealed class RuleSpecs
         app.Journal.Add(new AckAnswered(3, 1, 0, 0, T(0), ReminderAckResponseCode.Error)).At = T(10.5);
         app.Journal.Add(Sent(0)).At = T(11);
         app.Journal.Add(new Done()).At = T(11);
-        oracle.Read();
+        model.Observe(app.Journal.Read());
     }
 
     public static TheoryData<History> UncertainAckHistories() => new()
@@ -309,8 +332,8 @@ public sealed class RuleSpecs
         app.Journal.Add(new Scheduled(2, 0, 1, T(0), null, null, ReminderScheduleResponseCode.Success));
         app.Journal.Add(new Delivered(2, 0, 1, T(0), DateTimeOffset.MaxValue));
         app.Journal.Add(new Done());
-        var oracle = new Oracle(app);
-        oracle.Read();
+        var model = new ReminderModel(app.Settings);
+        model.Observe(app.Journal.Read());
 
         // Both asks begin at the same position, then flush in separate batches. Only key 0 lands.
         app.Journal.Add(AckFault(31, FaultKind.AppliedThenFail, key: 0)).At = T(1);
@@ -319,12 +342,12 @@ public sealed class RuleSpecs
         app.Journal.Add(new AckAnswered(5, 2, 0, 1, T(0), ReminderAckResponseCode.Error)).At = T(1);
         app.Journal.Add(new Delivered(2, 0, 1, T(0), DateTimeOffset.MaxValue)).At = T(31);
         app.Journal.Add(new Done()).At = T(31);
-        oracle.Read();
+        model.Observe(app.Journal.Read());
 
         // Exact attribution retains the safety obligation for the batch that did land.
         app.Journal.Add(Sent(0)).At = T(32);
         app.Journal.Add(new Done()).At = T(32);
-        Assert.Contains("AckedNeverRedelivered", Assert.Throws<ModelViolation>(oracle.Read).Message);
+        Assert.Contains("AckedNeverRedelivered", Assert.Throws<ModelViolation>(() => model.Observe(app.Journal.Read())).Message);
     }
 
     [Fact(DisplayName = "Should_ResolveOccurrenceAckAmbiguity_When_AnotherDeliveryIsObserved")]
@@ -340,16 +363,16 @@ public sealed class RuleSpecs
         app.Journal.Add(AckFault(32, FaultKind.AppliedThenFail)).At = T(2);
         app.Journal.Add(new AckAnswered(6, 1, 0, 0, T(0), ReminderAckResponseCode.Error)).At = T(2);
         app.Journal.Add(new Done()).At = T(2);
-        var oracle = new Oracle(app);
-        oracle.Read();
+        var model = new ReminderModel(app.Settings);
+        model.Observe(app.Journal.Read());
 
         app.Journal.Add(new Done()).At = T(33);
-        oracle.Read(); // prior trouble prevents claiming whether the targeted ack was accepted
+        model.Observe(app.Journal.Read()); // prior trouble prevents claiming whether the targeted ack was accepted
         app.Journal.Add(Sent(0)).At = T(33);
         app.Journal.Add(new Done()).At = T(33);
-        oracle.Read(); // the observed delivery resolves that occurrence's acceptance ambiguity
+        model.Observe(app.Journal.Read()); // the observed delivery resolves that occurrence's acceptance ambiguity
         app.Journal.Add(new Done()).At = T(48); // two observed + one possible unsent attempt: backoff is 4 s
-        Assert.Contains("RetriedOnTime", Assert.Throws<ModelViolation>(oracle.Read).Message);
+        Assert.Contains("RetriedOnTime", Assert.Throws<ModelViolation>(() => model.Observe(app.Journal.Read())).Message);
     }
 
     [Fact(DisplayName = "Should_AllowSilence_When_AcknowledgementAcceptanceIsAmbiguousAfterUnrelatedTrouble")]
@@ -363,7 +386,7 @@ public sealed class RuleSpecs
         app.Journal.Add(AckFault(32, FaultKind.AppliedThenFail)).At = T(2);
         app.Journal.Add(new AckAnswered(4, 1, 0, 0, T(0), ReminderAckResponseCode.Error)).At = T(2);
         app.Journal.Add(new Done()).At = T(40);
-        new Oracle(app).Read();
+        new ReminderModel(app.Settings).Observe(app.Journal.Read());
     }
 
     [Theory(DisplayName = "Should_KeepLateAckAcceptanceAmbiguousOnly_When_TheInputWasBufferedBeforeTheFlush")]
@@ -378,11 +401,11 @@ public sealed class RuleSpecs
         app.Journal.Add(AckFault(41, FaultKind.AppliedThenFail, ackedAt: buffered ? 2 : 11)).At = T(11);
         app.Journal.Add(new AckAnswered(3, 1, 0, 0, T(0), ReminderAckResponseCode.Error)).At = T(11);
         app.Journal.Add(new Done()).At = T(42);
-        var oracle = new Oracle(app);
+        var model = new ReminderModel(app.Settings);
         if (buffered)
-            oracle.Read(); // the pre-timeout buffered ack may have landed when the timeout pass flushed it
+            model.Observe(app.Journal.Read()); // the pre-timeout buffered ack may have landed when the timeout pass flushed it
         else
-            Assert.Contains("RetriedOnTime", Assert.Throws<ModelViolation>(oracle.Read).Message);
+            Assert.Contains("RetriedOnTime", Assert.Throws<ModelViolation>(() => model.Observe(app.Journal.Read())).Message);
     }
 
     [Theory(DisplayName = "Should_AccountForUnobservedAttempts_WithoutLooseningHealthyBackoff")]

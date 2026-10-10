@@ -2,107 +2,94 @@
 
 These tests use [CsCheck](https://github.com/AnthonyLloyd/CsCheck). CsCheck makes up random lists of operations, runs each list against a real `ReminderScheduler` on a virtual clock, and compares what the application saw with a model. When a list fails, CsCheck looks for a shorter one that still fails and prints it with a seed.
 
-There are two layers.
+Read the full async test in this order:
 
-| File | What it is |
-|---|---|
-| `ReminderSpecs.cs` | **Start here.** One file: a small model, five operations, one `SampleModelBasedAsync` call. Healthy storage. |
-| `ReminderFaultSpecs.cs` | The full test: the same idea plus stalls, restarts, nacks, missing shard regions and storage faults. |
+1. `ReminderFaultSpecs.RunAsync`: execute a command, pass the recorded observations to the model.
+2. `ReminderCommands.cs`: the 13 application commands and their direct calls to `ReminderApp`.
+3. `ReminderModel.Observations.cs`: check replies and apply observations to the model.
+4. `ReminderModel.cs`, `Liveness.cs`, and `SafetyRules.cs`: occurrence state and the guarantees below.
+
+```csharp
+foreach (var command in commands)
+{
+    await command.Run(app);
+    model.Observe(app.Journal.Read());
+}
+```
+
+The model has no live application reference. `Observe` takes the cumulative journal history, not just
+the newest events; it tracks how much it has already checked. Each run has its own model and application. A `finally`
+block stops the application and awaits cleanup on success, on failure, and while CsCheck shrinks.
+
+`InMemoryManualAcknowledgements` retains the former healthy model's five-command profile, timing
+ranges, and silent recipients with per-entity acknowledgements. It uses the same async runner and model
+as the fault tests; the separate `ReminderSpecs` model and runner have been removed. Its guarantees
+are checked by `DeliveredOnTime`, `AckedNeverRedelivered`, `NothingAfterCancel`, and `LatestOnly`.
+`RequireHealthyDeliveries` also retains the independent per-registration delivery check: an earlier
+payload delivered at the same due time cannot satisfy a replacement registration.
+The full model also checks schedule replies and retry obligations after each command.
+
+`RecurringSpec.cs` and `RecurringConformanceSpecs.cs` provide a bounded native `Spec`:
+explicit guards and rules, exhaustive model exploration, and sampled scheduler conformance. Its inputs have semantic types: `FirstDueTime` (`DueNow` or `Overdue`), `Occurrence`, and
+`OccurrenceCount`. `WaitFor(1 occurrence)` advances to the next occurrence, not by one second.
+`ExpectedDeliveries` predicts how many distinct occurrences have arrived; acknowledgement state
+identifies an occurrence, not a count. Nullable values mean no schedule or acknowledgement yet. Its batch-one eager-fetch setup is specific
+to that example; early delivery is permitted by slippage, not universally required.
+
+## What CsCheck owns
+
+- The full suite uses `Gen.Frequency`, the existing argument generators, and native `.Array` to generate
+  arbitrary command lists. The array length domain is the same 0..127 as `SampleModelBasedAsync` used.
+- `SampleAsync` executes those lists, shrinks failures, prints the generated inputs, and owns seed replay
+  and sampling controls. No custom seed or shrinking machinery is used.
+- All 13 command kinds, weights, settings, broad timing ranges, and fault combinations remain available.
+  The generated fault-free variant excludes only `SetRegion` and `InjectFault`, as before.
+- Fixed regressions append `HealAndWait` to check recovery. Generated lists have no mandatory scenario
+  prefix or recovery suffix; `HealAndWait` is one of their freely chosen commands, as before.
+
+The full suite does **not** use native `Spec.Conform`: that runner generates the whole pure model trace
+before executing the scheduler. Our expectations depend on observed early deliveries, fault activation,
+lost responses, and elapsed recovery time. A fixed prediction would reject valid outcomes. Capturing a
+mutable application in a Spec transition would undermine the model. `ReminderModel.Observe` instead
+checks each observation against prior model state and retains the existing uncertainty rules.
+
+The command-list property has no generation-time precondition API. This is intentional: cancellation of
+absent keys and late acknowledgements must remain testable. `AckOutstanding` with nothing to acknowledge
+is a harmless no-op. The application-specific model supplies the behavioral guarantees; CsCheck supplies
+generation and shrinking.
+
+## Replay across generator changes
+
+A seed identifies a case only for the exact generator composition that produced it. Switching from
+`SampleModelBasedAsync` to the direct `SampleAsync` property changes that composition, even though the
+argument domains and weights are preserved. Old full-model seeds are not interchangeable with new ones.
+Use the emitted seed with `CsCheck_Iter=1` on the same generator, or retain concrete commands in
+`ModelRegressionSpecs.cs` when changing generators. The past-anchor regression pins the earlier
+one-command superseded-ack failure for this reason.
+
+Commands now print using their record's normal representation, for example `Tick { Ms = 9000 }`.
+That is readable diagnostic output, not a promise of a pasteable C# constructor. A fixed regression uses
+`new Tick(9000)`. Run negative controls in an isolated checkout of the historical scheduler, with the
+matching test-harness storage interface; do not overwrite a working checkout's runtime to run a demo.
 
 "docs" below is `docs/design/failure-modes.md`. "Ruling" is a maintainer decision recorded in PR #149.
-
-## Who does what
-
-CsCheck does:
-
-- generating the operations and their arguments (`Gen`, `GenOperationAsync`);
-- running each list on several threads (`SampleModelBasedAsync`; each list gets its own scheduler and clock);
-- shrinking a failing list, and printing it with the operation names we give it;
-- seeds and replay (`CsCheck_Seed`), run length (`CsCheck_Iter`, `CsCheck_Time`), threads (`CsCheck_Threads`).
-
-Ours, because it is about reminders:
-
-- `ReminderApp.cs`: starts the scheduler on `VirtualClock.cs`, makes the calls, writes down what happened (`Journal.cs`);
-- the models: the small one inside `ReminderSpecs.cs`, and `ReminderModel.cs`;
-- the rules: `SafetyRules.cs`, `Liveness.cs`, and `Oracle.cs`, which reads the journal and applies them;
-- fault injection: `FaultyRecordingStorage.cs`;
-- `ModelRegressionSpecs.cs`: sequences that once found a bug, pinned. `ReplayAsync` (12 lines) runs a fixed list of operations. CsCheck has no call for that: a seed replays a list only while the generators stay the same.
-
-Three things CsCheck's model-based API does not do, and what we do instead:
-
-- **Preconditions.** Operation generators cannot see the state, so an operation cannot be held back. One whose precondition is false does nothing (`AckOutstanding` with nothing to ack).
-- **A check after every operation.** `equal` runs once, at the end of a list. The first layer checks there. The fault layer checks inside each operation's model step (`Oracle.Read`).
-- **Async clean-up.** `equal` is not async and there is no tear-down hook. `ReminderApp.Stop()` marks a run as over; the next run to start, or `DisposeStoppedAsync`, stops its actor.
-
-## The demo: CsCheck finds a real bug
-
-Bug #150 on the scheduler as of commit `27bbaf1`: a recurring reminder that is not acked gets its old occurrence delivered again after the next one went out.
-
-1. Put the old scheduler code in place:
-
-   ```bash
-   git checkout 27bbaf1 -- src/Akka.Reminders
-   dotnet build src/Akka.Reminders.Tests -c Release
-   ```
-
-2. Run the first layer with a large iteration count. CsCheck finds a failure in the first hundred lists; the rest of the count is its shrinking. 10 to 20 s on an 8-core machine.
-
-   ```bash
-   CsCheck_Iter=1000000 dotnet test src/Akka.Reminders.Tests -c Release --no-build --filter "FullyQualifiedName~Model.ReminderSpecs"
-   ```
-
-   ```text
-   CsCheck.CsCheckException : Set seed: "6MQpkiKgWp5g" or -e CsCheck_Seed=6MQpkiKgWp5g to reproduce (15 shrinks, 953,518 skipped, 1,000,000 total).
-
-       Operations: [ScheduleRecurring(entity 0, key 0, first due in 1s, every 10s), ScheduleOnce(entity 1, key 1, due in 10s), Tick 9s, Tick 2s, Cancel(entity 2, key 1)]
-   Initial Actual: a reminder scheduler on a virtual clock
-   Initial  Model: no reminders
-        Exception: reminder 1: the occurrence due at 1s was delivered at 10.3s, after the newer one due at 11s
-   What the application saw:
-          0s  schedule reminder 1: entity 0, key 0, first due 1s, every 10s -> Success
-          0s  schedule reminder 2: entity 1, key 1, first due 10s -> Success
-          1s  reminder 1 delivered: entity 0, key 0, due 1s
-        4.1s  reminder 1 delivered: entity 0, key 0, due 1s
-        7.2s  reminder 1 delivered: entity 0, key 0, due 1s
-         10s  reminder 2 delivered: entity 1, key 1, due 10s
-         10s  reminder 1 delivered: entity 0, key 0, due 11s
-       10.3s  reminder 1 delivered: entity 0, key 0, due 1s
-         11s  reminder 1 delivered: entity 0, key 0, due 11s
-         11s  cancel entity 2, key 1 -> NotFound
-   ```
-
-   Your seed and list will differ; the shape is the same. The list is short, not always the shortest: CsCheck shrinks by trying smaller random lists, so a longer run shrinks further.
-
-3. Replay that one list from its seed (under a second of test time):
-
-   ```bash
-   CsCheck_Seed=6MQpkiKgWp5g CsCheck_Iter=1 dotnet test src/Akka.Reminders.Tests -c Release --no-build --filter "FullyQualifiedName~Model.ReminderSpecs"
-   ```
-
-4. Put the fixed scheduler back and see it pass:
-
-   ```bash
-   git checkout HEAD -- src/Akka.Reminders
-   dotnet build src/Akka.Reminders.Tests -c Release
-   dotnet test src/Akka.Reminders.Tests -c Release --no-build --filter "FullyQualifiedName~Model.ReminderSpecs"
-   ```
 
 ## Run it
 
 ```bash
-# everything, default size (about 30 s)
-dotnet test src/Akka.Reminders.Tests -c Release --filter "FullyQualifiedName~Akka.Reminders.Tests.Model"
+# local model tests (SQL providers run separately)
+dotnet test src/Akka.Reminders.Tests -c Release --filter "FullyQualifiedName~Akka.Reminders.Tests.Model&Category!=ModelSql"
 
 # more lists per test
 CsCheck_Iter=5000 dotnet test src/Akka.Reminders.Tests -c Release --filter "FullyQualifiedName~ReminderFaultSpecs.InMemory"
 
 # PostgreSQL and SQL Server too (needs Docker)
-REMINDERS_CSCHECK_SQL=1 dotnet test src/Akka.Reminders.Tests -c Release --filter "FullyQualifiedName~ReminderFaultSpecs"
+REMINDERS_CSCHECK_SQL=1 dotnet test src/Akka.Reminders.Tests -c Release --filter "Category=ModelSql"
 ```
 
-Defaults: 100 lists for the first layer (CsCheck's own default), 120 in-memory with faults, 60 in-memory with healthy storage, 30 SQLite. A list has up to 127 operations.
+Defaults: 100 lists for manual acknowledgements (CsCheck's own default), 120 in-memory with faults, 60 in-memory with healthy storage, 30 SQLite. A list has up to 127 operations.
 
-When the fault layer fails, it prints the operations as C# (`new Tick(9000)`). To keep the case, paste them into a new test in `ModelRegressionSpecs.cs`. To shrink it further, run again with the printed seed and a large `CsCheck_Iter`.
+When the fault layer fails, it prints settings and commands. To keep the case across generator changes, add the concrete inputs to `ModelRegressionSpecs.cs`. To shrink further on the same generator, run again with the printed seed and a larger `CsCheck_Iter` or `CsCheck_Time` budget.
 
 ## Words
 
@@ -111,20 +98,9 @@ When the fault layer fails, it prints the operations as C# (`new Tick(9000)`). T
 - **Trouble**: a storage call the test made fail or run slow, or a shard region the test took down. A slow call is over when it returns. A failed call or a missing region is over `RecoveryTime` later. A stall or a slow call during that wait starts the wait again when it ends.
 - **RecoveryTime** = `AckTimeout + MaxRetryBackoff + 2 × StorageTimeout`. This is the test's observation allowance for an ack timeout, retry backoff, and a recovery tick. Later faults or stalls extend it. It is not a production wall-clock delivery guarantee (docs: Storage read failure and automatic recovery).
 
-## First layer: `ReminderSpecs.cs`
+## Commands and checks
 
-| Operation | Precondition | Effect on the model | Postcondition |
-|---|---|---|---|
-| `ScheduleOnce`, `ScheduleRecurring` | none | Remember the reminder; it replaces any reminder under the same key. | The reply is `Success`. |
-| `Cancel` | none | Forget the reminder. | Nothing of it arrives afterwards. |
-| `Tick` | none | Every occurrence that comes due must arrive. | It did, on time. |
-| `Ack(entity)` | the entity has unanswered deliveries | none | An acked occurrence never arrives again. |
-
-Checked at the end of each list: everything due arrived on time; nothing arrived again after its ack; nothing arrived after a cancel or a replacement; a recurring reminder never delivered an older occurrence after a newer one.
-
-## Fault layer: `ReminderFaultSpecs.cs`
-
-The table lives at the top of `ReminderFaultSpecs.cs`; the postconditions are in `Oracle.cs`. Trouble never changes the model; it only loosens a postcondition, as the last column says.
+Command generation is in `ReminderFaultSpecs.cs`, execution is in `ReminderCommands.cs`, and postconditions are in `ReminderModel.Observations.cs`. Trouble changes what the model can know about a result and when recovery is owed; the established allowances below remain unchanged.
 
 | Operation | Precondition | Effect on the model | Postcondition |
 |---|---|---|---|
@@ -148,7 +124,7 @@ exactly targeted `Ack` `AppliedThenFail`, the model retains a durable acknowledg
 safety rule rejects a later delivery from the same registration when observations establish eligibility:
 before its timeout and occurrence deadline, without intervening trouble, nack, replacement or supersession.
 Reaching storage alone is insufficient: a late ack can return `NotFound` and leave a pending retry unchanged.
-If earlier trouble makes acceptance unknowable, only that occurrence is marked `MaybeAcked`. Either another
+If earlier trouble makes acceptance unknowable, only that occurrence is marked `AcceptanceUnknown`. Either another
 delivery or silence is permitted; an observed delivery clears the ambiguity and restores its normal retry
 obligation. A successful nack also resolves the uncertainty. This does not put the key or future recurring
 occurrences in doubt. Independently ineligible acks after healthy timeout processing retain the retry obligation;
