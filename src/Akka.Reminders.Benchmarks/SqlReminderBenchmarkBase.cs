@@ -14,7 +14,8 @@ namespace Akka.Reminders.Benchmarks;
 /// </summary>
 public abstract class SqlReminderBenchmarkBase
 {
-    public const string ConnectionString =
+    public static string ConnectionString =>
+        Environment.GetEnvironmentVariable("REMINDERS_BENCHMARK_CONNECTION_STRING") ??
         "Host=localhost;Port=5432;Database=reminders_bench;Username=postgres;Password=postgres";
 
     protected const string BenchmarkRegionName = "bench-region";

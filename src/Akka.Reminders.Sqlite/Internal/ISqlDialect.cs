@@ -5,9 +5,9 @@ namespace Akka.Reminders.Sqlite.Internal;
 internal interface ISqlDialect
 {
     string GetCreateTableSql(string tableName);
-    string GetBatchUpsertRemindersSql(string tableName, int count);
+    string GetBatchUpsertRemindersSql(string tableName, int count, bool insertIfAbsent = false);
     string GetSelectDueRemindersSql(string tableName, int maxCount);
-    string GetBatchMarkCompletedSql(string tableName, int count);
+    string GetBatchMarkCompletedSql(string tableName, int count, bool activeOnly = false);
     string GetExpireRemindersSql(string tableName);
     string GetCleanupSql(string tableName);
     string GetOverviewAggregateSql(string tableName);

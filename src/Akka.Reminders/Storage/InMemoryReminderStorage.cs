@@ -9,7 +9,7 @@ namespace Akka.Reminders.Storage;
 /// Thread-safe implementation using concurrent collections. Suitable for testing and single-node scenarios.
 /// Not suitable for distributed scenarios as state is not shared across nodes.
 /// </remarks>
-public sealed class InMemoryReminderStorage : IReminderStorage
+public sealed class InMemoryReminderStorage : IConditionalReminderMutationStorage
 {
     private readonly object _sync = new();
     private readonly ConcurrentDictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder> _pendingReminders = new();
@@ -112,6 +112,13 @@ public sealed class InMemoryReminderStorage : IReminderStorage
             var completed = new Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), CompletedReminder>(_completedReminders);
             var completedDetails = new Dictionary<(ReminderEntity Entity, ReminderKey Key, DateTimeOffset DueTimeUtc), ScheduledReminder>(_completedReminderDetails);
 
+            foreach (var reminder in mutationBatch.PendingInserts)
+            {
+                var key = ToKey(reminder);
+                if (!pending.ContainsKey(key) && !awaiting.ContainsKey(key) && !completed.ContainsKey(key))
+                    pending[key] = reminder;
+            }
+
             foreach (var reminder in mutationBatch.PendingUpserts)
             {
                 var key = ToKey(reminder);
@@ -130,6 +137,18 @@ public sealed class InMemoryReminderStorage : IReminderStorage
                     completedDetails[key] = awaitingReminder.Reminder;
                 pending.Remove(key);
                 awaiting.Remove(key);
+                completed[key] = reminder;
+            }
+
+            foreach (var reminder in mutationBatch.ActiveCompletions)
+            {
+                var key = ToKey(reminder);
+                if (pending.Remove(key, out var pendingReminder))
+                    completedDetails[key] = pendingReminder;
+                else if (awaiting.Remove(key, out var awaitingReminder))
+                    completedDetails[key] = awaitingReminder.Reminder;
+                else
+                    continue;
                 completed[key] = reminder;
             }
 

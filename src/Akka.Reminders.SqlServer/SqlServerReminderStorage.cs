@@ -9,7 +9,7 @@ namespace Akka.Reminders.SqlServer;
 /// <summary>
 /// SQL Server implementation of <see cref="IReminderStorage"/>.
 /// </summary>
-public sealed class SqlServerReminderStorage : IReminderStorage
+public sealed class SqlServerReminderStorage : IConditionalReminderMutationStorage
 {
     private readonly SqlServerReminderStorageSettings _settings;
     private readonly ISqlDialect _dialect;
@@ -96,6 +96,12 @@ public sealed class SqlServerReminderStorage : IReminderStorage
 
         try
         {
+            if (!await UpsertReminderOccurrencesAsync(connection, transaction, mutationBatch.PendingInserts, cancellationToken, insertIfAbsent: true))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+
             if (!await UpsertReminderOccurrencesAsync(connection, transaction, mutationBatch.PendingUpserts, cancellationToken))
             {
                 await transaction.RollbackAsync(cancellationToken);
@@ -103,6 +109,12 @@ public sealed class SqlServerReminderStorage : IReminderStorage
             }
 
             if (!await MarkRemindersAsCompletedAsync(connection, transaction, mutationBatch.CompletedReminders, cancellationToken))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+
+            if (!await MarkRemindersAsCompletedAsync(connection, transaction, mutationBatch.ActiveCompletions, cancellationToken, activeOnly: true))
             {
                 await transaction.RollbackAsync(cancellationToken);
                 return false;
@@ -128,7 +140,8 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         System.Data.Common.DbConnection connection,
         System.Data.Common.DbTransaction? transaction,
         IEnumerable<ScheduledReminder> reminders,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool insertIfAbsent = false)
     {
         var remindersList = reminders.ToList();
         if (remindersList.Count == 0)
@@ -140,7 +153,7 @@ public sealed class SqlServerReminderStorage : IReminderStorage
             {
                 var chunk = remindersList.Skip(offset).Take(MaxUpsertedRemindersPerStatement).ToList();
                 await using var command = CreateCommand(connection, transaction);
-                command.CommandText = _dialect.GetBatchUpsertRemindersSql(_settings.SchemaName, _settings.TableName, chunk.Count);
+                command.CommandText = _dialect.GetBatchUpsertRemindersSql(_settings.SchemaName, _settings.TableName, chunk.Count, insertIfAbsent);
                 command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
 
                 for (var i = 0; i < chunk.Count; i++)
@@ -777,7 +790,8 @@ public sealed class SqlServerReminderStorage : IReminderStorage
         System.Data.Common.DbConnection connection,
         System.Data.Common.DbTransaction? transaction,
         IEnumerable<CompletedReminder> completedReminders,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool activeOnly = false)
     {
         var remindersList = completedReminders.ToList();
         if (remindersList.Count == 0)
@@ -791,7 +805,7 @@ public sealed class SqlServerReminderStorage : IReminderStorage
             {
                 var chunk = items.Skip(offset).Take(MaxRemindersPerStatusUpdate).ToList();
                 await using var command = CreateCommand(connection, transaction);
-                command.CommandText = _dialect.GetBatchMarkCompletedSql(_settings.SchemaName, _settings.TableName, chunk.Count);
+                command.CommandText = _dialect.GetBatchMarkCompletedSql(_settings.SchemaName, _settings.TableName, chunk.Count, activeOnly);
                 command.CommandTimeout = (int)_settings.CommandTimeout.TotalSeconds;
                 _dialect.AddParameter(command, "@CompletedAtUtc", group.Key.CompletedAt.UtcDateTime);
                 _dialect.AddParameter(command, "@CompletionStatus", group.Key.Status.ToString());
@@ -805,7 +819,7 @@ public sealed class SqlServerReminderStorage : IReminderStorage
                 }
 
                 var updated = await command.ExecuteNonQueryAsync(cancellationToken);
-                if (updated != chunk.Count)
+                if (!activeOnly && updated != chunk.Count)
                     return false;
             }
         }

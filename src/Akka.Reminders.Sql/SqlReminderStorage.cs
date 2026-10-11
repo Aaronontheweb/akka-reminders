@@ -10,7 +10,7 @@ namespace Akka.Reminders.Sql;
 /// <summary>
 /// Compatibility wrapper for SQL storage providers.
 /// </summary>
-public sealed class SqlReminderStorage : IReminderStorage
+public sealed class SqlReminderStorage : IConditionalReminderMutationStorage
 {
     private readonly IReminderStorage _storage;
 
