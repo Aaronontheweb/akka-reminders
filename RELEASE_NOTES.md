@@ -10,6 +10,7 @@ Start with the [Akka.NET v1.6 getting started guide](https://github.com/akkadotn
 
 **New Features**
 
+- Reminder wire messages now use a source-generated MessagePack serializer (id 22552). The legacy binary serializer (id 22550) remains registered for reads, typed `ReminderEnvelope<T>` delivery is preserved, and application payload serializers continue to work. Upgrade every participating node before resuming reminder traffic: older nodes cannot read the new wire format.
 - **Native AOT support for local reminders** - `WithLocalReminders` now works under .NET Native AOT. Register each message type you schedule with `.WithReminderMessage<T>()` on the reminders builder (or `ReminderMessageTypes.Register<T>()`), so the scheduler and the wire serializer build `ReminderEnvelope<T>` without reflection. See the "Native AOT" section of the README.
 - All five packages are marked `IsAotCompatible` and produce no trim or AOT warnings of their own.
 - With Native AOT, or with the `Akka.DynamicTypeLoading` switch off, scheduling an unregistered message type now fails at once with `ReminderScheduleResponseCode.Error` and a message naming the registration call, instead of failing at delivery time.

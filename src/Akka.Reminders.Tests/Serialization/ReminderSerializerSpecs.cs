@@ -1,3 +1,4 @@
+using Akka.Actor;
 using Akka.Hosting;
 using Akka.Hosting.TestKit;
 using Akka.Reminders.Serialization;
@@ -7,40 +8,43 @@ using Akka.Serialization;
 namespace Akka.Reminders.Tests.Serialization;
 
 /// <summary>
-/// Round-trip serialization tests for <see cref="ReminderSerializer"/>.
+/// Shared round-trip contract for the legacy and source-generated reminder serializers.
 ///
 /// Follows the core Akka.NET pattern (see ClusterMessageSerializerSpec):
 /// register the serializer via <see cref="AkkaConfigurationBuilder.WithCustomSerializer"/>,
 /// use a small <see cref="AssertAndReturn{T}"/> helper that verifies the correct serializer
 /// is resolved and the message survives a ToBinary → FromBinary cycle.
 /// </summary>
-public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
+public abstract class ReminderSerializerSpecs<TSerializer> : Akka.Hosting.TestKit.TestKit
+    where TSerializer : SerializerWithStringManifest
 {
-    public ReminderSerializerSpecs(ITestOutputHelper output)
+    protected ReminderSerializerSpecs(ITestOutputHelper output)
         : base(output: output)
     {
     }
+
+    protected abstract TSerializer CreateSerializer(ExtendedActorSystem system);
 
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
         builder.WithCustomSerializer(
             "reminder-serializer",
             [typeof(IReminderWireMessage)],
-            system => new ReminderSerializer(system));
+            system => CreateSerializer(system));
     }
 
     /// <summary>
-    /// Serializes and deserializes a message, asserting that <see cref="ReminderSerializer"/>
+    /// Serializes and deserializes a message, asserting that <typeparamref name="TSerializer"/>
     /// is the resolved serializer. Returns the deserialized instance for further assertions.
     /// </summary>
     private T AssertAndReturn<T>(T message) where T : notnull
     {
         var serializer = (SerializerWithStringManifest)Sys.Serialization.FindSerializerFor(message);
-        Assert.IsType<ReminderSerializer>(serializer);
+        Assert.IsType<TSerializer>(serializer);
 
         var bytes = serializer.ToBinary(message);
         var manifest = serializer.Manifest(message);
-        return (T)serializer.FromBinary(bytes, manifest);
+        return (T)Sys.Serialization.Deserialize(bytes, serializer.Identifier, manifest);
     }
 
     /// <summary>
@@ -638,6 +642,18 @@ public class ReminderSerializerSpecs : Akka.Hosting.TestKit.TestKit
     }
 
     #endregion
+}
+
+public sealed class ReminderSerializerSpecs(ITestOutputHelper output)
+    : ReminderSerializerSpecs<ReminderSerializer>(output)
+{
+    protected override ReminderSerializer CreateSerializer(ExtendedActorSystem system) => new(system);
+}
+
+public sealed class RemindersV2SerializerSpecs(ITestOutputHelper output)
+    : ReminderSerializerSpecs<RemindersV2Serializer>(output)
+{
+    protected override RemindersV2Serializer CreateSerializer(ExtendedActorSystem system) => new(system);
 }
 
 /// <summary>
