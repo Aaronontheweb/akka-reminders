@@ -370,6 +370,11 @@ Configure reminder behavior and performance characteristics:
         // Applies to both infrastructure failures and ack timeouts
         MaxDeliveryAttempts = 10,
 
+        // Default window an occurrence stays actionable after its due time.
+        // null (default) = no deadline: retries continue until MaxDeliveryAttempts.
+        // Strongly recommended to set this so stale reminders expire instead of replaying.
+        DefaultMaxDeliveryWindow = TimeSpan.FromHours(24),
+
         // Maximum reminders fetched per batch (limits query size under load)
         MaxBatchSize = 1000,
 
@@ -391,6 +396,8 @@ Configure reminder behavior and performance characteristics:
         AckTimeout = TimeSpan.FromSeconds(10)
     }))
 ```
+
+> ⚠️ **Warning:** By default a reminder has **no delivery deadline** — it is retried until `MaxDeliveryAttempts` is exhausted, no matter how far past its due time it drifts. After a restart, upgrade, or prolonged outage this can cause a large backlog of stale reminders to fire at once. Set `DefaultMaxDeliveryWindow` (or pass `maxDeliveryWindow` per call) to how long a reminder stays actionable after its due time — for example 24 hours — so overdue occurrences expire instead of replaying.
 
 ## Usage Examples
 
