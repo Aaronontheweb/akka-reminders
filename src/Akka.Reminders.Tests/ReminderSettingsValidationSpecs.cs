@@ -33,6 +33,20 @@ public class ReminderSettingsValidationSpecs
     }
 
     [Fact]
+    public void Validate_ShouldThrow_WhenDefaultMaxDeliveryWindowIsZero()
+    {
+        var settings = new ReminderSettings { DefaultMaxDeliveryWindow = TimeSpan.Zero };
+        Assert.Throws<ArgumentOutOfRangeException>(() => settings.Validate());
+    }
+
+    [Fact]
+    public void Validate_ShouldThrow_WhenDefaultMaxDeliveryWindowIsNegative()
+    {
+        var settings = new ReminderSettings { DefaultMaxDeliveryWindow = TimeSpan.FromMinutes(-1) };
+        Assert.Throws<ArgumentOutOfRangeException>(() => settings.Validate());
+    }
+
+    [Fact]
     public void ReminderBatchSize_ShouldThrow_WhenZero()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => new ReminderBatchSize(0));
@@ -57,5 +71,6 @@ public class ReminderSettingsValidationSpecs
         Assert.Equal(100, settings.DeliveryCommitChunkSize);
         Assert.Equal(TimeSpan.FromSeconds(5), settings.MaxSlippage);
         Assert.Equal(TimeSpan.FromSeconds(5), settings.StorageTimeout);
+        Assert.Null(settings.DefaultMaxDeliveryWindow);
     }
 }
