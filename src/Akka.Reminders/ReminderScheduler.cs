@@ -52,6 +52,14 @@ public sealed record ReminderSettings
     public int MaxDeliveryAttempts { get; init; } = 10;
 
     /// <summary>
+    /// Default delivery window applied to every scheduled occurrence when a schedule call does
+    /// not pass its own <c>maxDeliveryWindow</c>. An occurrence whose due time plus this window
+    /// has passed is expired rather than delivered. When null (the default), occurrences carry no
+    /// deadline and are retried until <see cref="MaxDeliveryAttempts"/> is exhausted.
+    /// </summary>
+    public TimeSpan? DefaultMaxDeliveryWindow { get; init; }
+
+    /// <summary>
     /// Base delay for exponential backoff when retrying failed reminders.
     /// Actual delay = min(RetryBackoffBase * (2 ^ attemptCount), MaxRetryBackoff)
     /// Applies to both infrastructure failures (shard region not found) and ack timeouts.
@@ -94,6 +102,9 @@ public sealed record ReminderSettings
         if (AckFlushBatchSize < 1)
             throw new ArgumentOutOfRangeException(nameof(AckFlushBatchSize),
                 "AckFlushBatchSize must be greater than or equal to 1.");
+        if (DefaultMaxDeliveryWindow is { } defaultWindow && defaultWindow <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(DefaultMaxDeliveryWindow),
+                "DefaultMaxDeliveryWindow must be greater than zero, or null to leave reminders without a delivery deadline.");
     }
 }
 
@@ -1080,17 +1091,18 @@ internal sealed class ReminderScheduler : UntypedActor, IWithTimers, IWithStash
     private ScheduledReminder CreateScheduledReminder(ReminderProtocol.ScheduleReminder scheduleReminder)
     {
         var dueTimeUtc = scheduleReminder.When.ToUniversalTime();
+        var maxDeliveryWindow = scheduleReminder.MaxDeliveryWindow ?? Settings.DefaultMaxDeliveryWindow;
         return new ScheduledReminder(
             scheduleReminder.Entity,
             scheduleReminder.Key,
             dueTimeUtc,
             scheduleReminder.Message,
             scheduleReminder.RepeatInterval,
-            MaxDeliveryWindow: scheduleReminder.MaxDeliveryWindow,
+            MaxDeliveryWindow: maxDeliveryWindow,
             DeliveryDeadlineUtc: ComputeDeliveryDeadlineUtc(
                 dueTimeUtc,
                 scheduleReminder.RepeatInterval,
-                scheduleReminder.MaxDeliveryWindow),
+                maxDeliveryWindow),
             OccurrenceDueTimeUtc: dueTimeUtc);
     }
 
