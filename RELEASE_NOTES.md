@@ -1,3 +1,9 @@
+#### 1.5.73.3 October 11th 2026 ####
+
+**New Features**
+
+- Added `ReminderSettings.DefaultMaxDeliveryWindow`. Reminders scheduled without their own `maxDeliveryWindow` previously had no delivery deadline and retried until `MaxDeliveryAttempts` ran out, however far past their due time they drifted — after a restart, upgrade, or prolonged outage this could replay a large backlog of stale reminders at once. The new setting gives every such occurrence a deadline of `due + DefaultMaxDeliveryWindow`, so overdue reminders expire instead of replaying. The default remains null (no deadline, previous behavior), and a per-call `maxDeliveryWindow` still wins ([#165](https://github.com/Aaronontheweb/akka-reminders/pull/165), [#166](https://github.com/Aaronontheweb/akka-reminders/pull/166)).
+
 #### 1.5.73.2 October 9th 2026 ####
 
 **Bug Fixes**
