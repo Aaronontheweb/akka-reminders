@@ -11,15 +11,32 @@ namespace Akka.Reminders;
 public static class AkkaHostingExtensions
 {
     /// <summary>
-    /// Registers the <see cref="Serialization.ReminderSerializer"/> for all
-    /// <see cref="IReminderWireMessage"/> types using the Akka.Hosting serializer API.
+    /// Registers both reminder serializers using the Akka.Hosting serializer API.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The source-generated <see cref="Serialization.RemindersV2Serializer"/> (id 22552) owns the
+    /// write binding for all <see cref="IReminderWireMessage"/> types, so new messages are written
+    /// with MessagePack. The legacy hand-rolled <see cref="Serialization.ReminderSerializer"/>
+    /// (id 22550) is registered with an empty type binding so it stays resolvable for <b>reads</b>
+    /// of existing persisted payloads that embed serializer id 22550, while never contesting the
+    /// write binding.
+    /// </para>
+    /// </remarks>
     private static void RegisterReminderSerializer(AkkaConfigurationBuilder builder)
     {
+        // Legacy reader (id 22550): binds no types, so it never contends with the V2 writer but
+        // still registers id 22550 in the by-id map for deserializing persisted legacy payloads.
         builder.WithCustomSerializer(
             "reminder-serializer",
-            [typeof(IReminderWireMessage)],
+            Array.Empty<Type>(),
             system => new Serialization.ReminderSerializer(system));
+
+        // Source-generated V2 writer (id 22552): owns the write binding for all wire messages.
+        builder.WithCustomSerializer(
+            "reminders-v2",
+            [typeof(IReminderWireMessage)],
+            system => new Serialization.RemindersV2Serializer(system));
     }
 
     /// <summary>
