@@ -226,6 +226,22 @@ The `WithSqlServerStorage` extension method configures SQL Server as the reminde
     }))
 ```
 
+**Connection Factory (Azure AD access tokens):**
+
+When a connection needs settings a connection string can't carry, such as an Azure AD access token, pass a connection factory instead of a connection string:
+
+```csharp
+.WithReminders("reminder-host", reminders => reminders
+    .WithSqlServerStorage(
+        connectionFactory: async ct => new SqlConnection(connectionString)
+        {
+            AccessToken = await tokenProvider.GetTokenAsync(ct)
+        },
+        autoInitialize: true))
+```
+
+The factory must return a new, unopened connection. The storage opens and disposes it, and calls the factory once per operation (schema auto-initialization included), so each call can return a fresh token. The overload takes the same optional `schemaName`, `tableName` and `autoInitialize` parameters. You can also set `SqlServerReminderStorageSettings.ConnectionFactory`; set exactly one of `ConnectionString` or `ConnectionFactory`, or `Validate()` throws. No process-wide `SqlAuthenticationProvider` is needed.
+
 **Manual Schema Setup:**
 
 For production environments, you may prefer to manually create the database schema. Use the provided SQL script:
