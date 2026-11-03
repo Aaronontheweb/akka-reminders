@@ -1,4 +1,5 @@
 using System.Data;
+using System.Data.Common;
 using Akka.Actor;
 using Akka.Reminders.SqlServer.Configuration;
 using Akka.Reminders.SqlServer.Internal;
@@ -39,7 +40,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
 
         try
         {
-            await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+            await using var connection = await CreateConnectionAsync(cancellationToken);
             await connection.OpenAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
@@ -79,7 +80,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
     {
         await EnsureInitializedAsync(cancellationToken);
 
-        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var connection = await CreateConnectionAsync(cancellationToken);
         await connection.OpenAsync(cancellationToken);
         return await UpsertReminderOccurrencesAsync(connection, null, reminders, cancellationToken);
     }
@@ -90,7 +91,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
         if (mutationBatch.IsEmpty)
             return true;
 
-        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var connection = await CreateConnectionAsync(cancellationToken);
         await connection.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
@@ -182,7 +183,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
 
         var reminders = new List<ScheduledReminder>();
 
-        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var connection = await CreateConnectionAsync(cancellationToken);
         await connection.OpenAsync(cancellationToken);
 
         var unreadable = new List<CompletedReminder>();
@@ -245,7 +246,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
         if (unreadable.Count > 0)
             await MarkRemindersAsCompletedAsync(connection, null, unreadable, cancellationToken);
 
-        await using var conn2 = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var conn2 = await CreateConnectionAsync(cancellationToken);
         await conn2.OpenAsync(cancellationToken);
 
         long totalPending = 0;
@@ -299,7 +300,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
 
         try
         {
-            await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+            await using var connection = await CreateConnectionAsync(cancellationToken);
             await connection.OpenAsync(cancellationToken);
             return await MarkRemindersAsCompletedAsync(connection, null, completedReminders, cancellationToken);
         }
@@ -312,7 +313,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
     public async Task<int> ExpireRemindersAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
-        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var connection = await CreateConnectionAsync(cancellationToken);
         await connection.OpenAsync(cancellationToken);
 
         await using var command = connection.CreateCommand();
@@ -325,7 +326,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
     public async Task<ReminderOverview> GetRemindersOverviewAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
-        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var connection = await CreateConnectionAsync(cancellationToken);
         await connection.OpenAsync(cancellationToken);
 
         await using var command = connection.CreateCommand();
@@ -357,7 +358,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
         await EnsureInitializedAsync(cancellationToken);
         try
         {
-            await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+            await using var connection = await CreateConnectionAsync(cancellationToken);
             await connection.OpenAsync(cancellationToken);
 
             await using var command = connection.CreateCommand();
@@ -378,7 +379,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
         await EnsureInitializedAsync(cancellationToken);
         try
         {
-            await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+            await using var connection = await CreateConnectionAsync(cancellationToken);
             await connection.OpenAsync(cancellationToken);
 
             await using var command = connection.CreateCommand();
@@ -404,7 +405,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
         await EnsureInitializedAsync(cancellationToken);
         try
         {
-            await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+            await using var connection = await CreateConnectionAsync(cancellationToken);
             await connection.OpenAsync(cancellationToken);
 
             var cancelledKeys = new HashSet<ReminderKey>();
@@ -446,7 +447,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
         await EnsureInitializedAsync(cancellationToken);
         var reminders = new List<ScheduledReminder>();
 
-        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var connection = await CreateConnectionAsync(cancellationToken);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = _dialect.GetFetchRemindersSql(_settings.SchemaName, _settings.TableName);
@@ -481,7 +482,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
 
         try
         {
-            await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+            await using var connection = await CreateConnectionAsync(cancellationToken);
             await connection.OpenAsync(cancellationToken);
             return await MarkRemindersAsAwaitingAckAsync(connection, null, reminders, cancellationToken);
         }
@@ -496,7 +497,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
         await EnsureInitializedAsync(cancellationToken);
         var reminders = new List<ScheduledReminder>();
 
-        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var connection = await CreateConnectionAsync(cancellationToken);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = _dialect.GetTimedOutAckRemindersSql(_settings.SchemaName, _settings.TableName, maxCount.Value);
@@ -519,7 +520,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
         CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
-        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var connection = await CreateConnectionAsync(cancellationToken);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
@@ -545,7 +546,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
     public async Task<DateTimeOffset?> GetNextAwaitingAckDeadlineAsync(CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
-        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var connection = await CreateConnectionAsync(cancellationToken);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = $"SELECT MIN(AckDeadlineUtc) FROM [{_settings.SchemaName}].[{_settings.TableName}] WHERE CompletionStatus = 'AwaitingAck' AND IsCompleted = 0;";
@@ -571,7 +572,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
         if (acknowledgementList.Count == 0)
             return results;
 
-        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var connection = await CreateConnectionAsync(cancellationToken);
         await connection.OpenAsync(cancellationToken);
 
         for (var offset = 0; offset < acknowledgementList.Count; offset += MaxRemindersPerStatusUpdate)
@@ -590,7 +591,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
         CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
-        await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+        await using var connection = await CreateConnectionAsync(cancellationToken);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
@@ -741,6 +742,22 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
             ReminderAckStorageStatus.NotFound,
             "Reminder occurrence was not awaiting acknowledgement or was already stale.");
 
+    /// <summary>
+    /// Creates an unopened connection for one storage operation. Every operation, including
+    /// auto-initialization, gets its connection here: from <see cref="SqlServerReminderStorageSettings.ConnectionFactory"/>
+    /// when it is set, otherwise from <see cref="SqlServerReminderStorageSettings.ConnectionString"/>.
+    /// The caller opens and disposes the connection.
+    /// </summary>
+    private async ValueTask<DbConnection> CreateConnectionAsync(CancellationToken cancellationToken)
+    {
+        if (_settings.ConnectionFactory is not { } connectionFactory)
+            return _dialect.CreateConnection(_settings.ConnectionString);
+
+        return await connectionFactory(cancellationToken)
+            ?? throw new InvalidOperationException(
+                $"{nameof(SqlServerReminderStorageSettings)}.{nameof(SqlServerReminderStorageSettings.ConnectionFactory)} returned null.");
+    }
+
     private Task EnsureInitializedAsync(CancellationToken cancellationToken)
     {
         if (_initialized || !_settings.AutoInitialize)
@@ -753,7 +770,7 @@ public sealed class SqlServerReminderStorage : IConditionalReminderMutationStora
 
             Task.Run(async () =>
             {
-                await using var connection = _dialect.CreateConnection(_settings.ConnectionString);
+                await using var connection = await CreateConnectionAsync(cancellationToken);
                 await connection.OpenAsync(cancellationToken);
                 await using var command = connection.CreateCommand();
                 command.CommandText = _dialect.GetCreateTableSql(_settings.SchemaName, _settings.TableName);
