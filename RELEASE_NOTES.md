@@ -1,3 +1,13 @@
+#### 1.5.73.4 November 3rd 2026 ####
+
+**New Features**
+
+- SQL Server storage can now use a connection factory instead of a connection string. Pass a `Func<CancellationToken, ValueTask<DbConnection>>` to the new `WithSqlServerStorage(connectionFactory, ...)` overload, or set `SqlServerReminderStorageSettings.ConnectionFactory`, to supply connections yourself, for example with an Azure AD access token in `SqlConnection.AccessToken`. The factory is called once per storage operation, so tokens stay fresh, and the storage still opens and disposes each connection. Set exactly one of `ConnectionString` or `ConnectionFactory`. Existing connection-string overloads are unchanged ([#172](https://github.com/Aaronontheweb/akka-reminders/issues/172), [#176](https://github.com/Aaronontheweb/akka-reminders/pull/176)).
+
+**Dependency Updates**
+
+- Pinned `System.Security.Cryptography.Pkcs` to 9.0.21. `Microsoft.Data.SqlClient` 6.1.4 brought in 9.0.11, which has [GHSA-2fmv-rv2c-59x7](https://github.com/advisories/GHSA-2fmv-rv2c-59x7) (moderate) and [GHSA-846f-f764-76mx](https://github.com/advisories/GHSA-846f-f764-76mx) (high) ([#175](https://github.com/Aaronontheweb/akka-reminders/pull/175)).
+
 #### 1.5.73.3 October 11th 2026 ####
 
 **New Features**
