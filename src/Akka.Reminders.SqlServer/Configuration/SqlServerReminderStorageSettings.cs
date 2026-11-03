@@ -1,14 +1,31 @@
+using System.Data.Common;
+
 namespace Akka.Reminders.SqlServer.Configuration;
 
 /// <summary>
 /// Configuration settings for SQL Server reminder storage.
 /// </summary>
+/// <remarks>
+/// Set exactly one of <see cref="ConnectionString"/> or <see cref="ConnectionFactory"/>.
+/// </remarks>
 public sealed record SqlServerReminderStorageSettings
 {
     /// <summary>
-    /// The SQL Server connection string.
+    /// The SQL Server connection string. Required unless <see cref="ConnectionFactory"/> is set.
     /// </summary>
-    public required string ConnectionString { get; init; }
+    public string ConnectionString { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Creates the connection for each storage operation, as an alternative to <see cref="ConnectionString"/>.
+    /// Use it when the connection needs configuration a connection string can't carry, such as an
+    /// Azure AD access token in <c>SqlConnection.AccessToken</c>.
+    /// </summary>
+    /// <remarks>
+    /// The factory is called once per storage operation, including schema auto-initialization, so it can
+    /// return a fresh token each time. It must return a new, unopened connection; the storage opens and
+    /// disposes it. Must not be set together with <see cref="ConnectionString"/>.
+    /// </remarks>
+    public Func<CancellationToken, ValueTask<DbConnection>>? ConnectionFactory { get; init; }
 
     /// <summary>
     /// The schema name for the reminders table.
@@ -57,8 +74,17 @@ public sealed record SqlServerReminderStorageSettings
     /// </summary>
     public void Validate()
     {
-        if (string.IsNullOrWhiteSpace(ConnectionString))
-            throw new ArgumentException("ConnectionString cannot be null or empty.", nameof(ConnectionString));
+        var hasConnectionString = !string.IsNullOrWhiteSpace(ConnectionString);
+
+        if (!hasConnectionString && ConnectionFactory is null)
+            throw new ArgumentException(
+                "ConnectionString cannot be null or empty. Set either ConnectionString or ConnectionFactory.",
+                nameof(ConnectionString));
+
+        if (hasConnectionString && ConnectionFactory is not null)
+            throw new ArgumentException(
+                "ConnectionString and ConnectionFactory cannot both be set. Set exactly one of them.",
+                nameof(ConnectionFactory));
 
         if (string.IsNullOrWhiteSpace(SchemaName))
             throw new ArgumentException("SchemaName cannot be null or empty.", nameof(SchemaName));
