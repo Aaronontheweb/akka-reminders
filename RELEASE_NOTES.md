@@ -1,3 +1,11 @@
+#### 1.6.0-beta5 November 4th 2026 ####
+
+Built against Akka.NET 1.6.0-beta5.
+
+**Dependency Updates**
+
+- Moved to Akka.NET 1.6.0-beta5 (Akka.Cluster.Hosting 1.6.0-beta5). Relevant fixes in this release: `ShardingProducerController` no longer throws `InvalidActorNameException` when a message arrives for an entity whose delivery child is still terminating ([akka.net #8869](https://github.com/akkadotnet/akka.net/pull/8869)), and `Dispose()` on the `ActorSystem`'s shared default materializer no longer shuts it down for every user of the system ([akka.net #8895](https://github.com/akkadotnet/akka.net/pull/8895)) ([#181](https://github.com/Aaronontheweb/akka-reminders/pull/181)).
+
 #### 1.6.0-beta4 November 3rd 2026 ####
 
 Built against Akka.NET 1.6.0-beta4.
