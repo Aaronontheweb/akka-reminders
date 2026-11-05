@@ -4,7 +4,7 @@
     <!-- Lets the transitive pin below override the version pulled in by Microsoft.Data.SqlClient -->
     <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
     <!-- Akka.Hosting packages (shipped from github.com/akkadotnet/akka.net as of 1.6) -->
-    <AkkaHostingVersion>1.6.0-beta4</AkkaHostingVersion>
+    <AkkaHostingVersion>1.6.0-beta5</AkkaHostingVersion>
   </PropertyGroup>
   <!-- Akka.Hosting packages - brings in core Akka transitively -->
   <ItemGroup>
