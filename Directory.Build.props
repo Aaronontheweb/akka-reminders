@@ -7,18 +7,12 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <VersionPrefix>1.6.0-beta4</VersionPrefix>
-    <PackageReleaseNotes>Built against Akka.NET 1.6.0-beta4.
-
-**New Features**
-
-- SQL Server storage can now use a connection factory instead of a connection string. Pass a `Func&lt;CancellationToken, ValueTask&lt;DbConnection&gt;&gt;` to the new `WithSqlServerStorage(connectionFactory, ...)` overload, or set `SqlServerReminderStorageSettings.ConnectionFactory`, to supply connections yourself, for example with an Azure AD access token in `SqlConnection.AccessToken`. The factory is called once per storage operation, so tokens stay fresh, and the storage still opens and disposes each connection. Set exactly one of `ConnectionString` or `ConnectionFactory`. Existing connection-string overloads are unchanged ([#172](https://github.com/Aaronontheweb/akka-reminders/issues/172), [#173](https://github.com/Aaronontheweb/akka-reminders/pull/173)).
-- Added `ReminderSettings.DefaultMaxDeliveryWindow`, first released in 1.5.73.3. Reminders scheduled without their own `maxDeliveryWindow` get a deadline of `due + DefaultMaxDeliveryWindow`, so overdue reminders expire instead of replaying after a restart or outage. The default remains null (no deadline), and a per-call `maxDeliveryWindow` still wins ([#165](https://github.com/Aaronontheweb/akka-reminders/pull/165), [#166](https://github.com/Aaronontheweb/akka-reminders/pull/166)).
+    <VersionPrefix>1.6.0-beta5</VersionPrefix>
+    <PackageReleaseNotes>Built against Akka.NET 1.6.0-beta5.
 
 **Dependency Updates**
 
-- Moved to Akka.NET 1.6.0-beta4 (Akka.Cluster.Hosting 1.6.0-beta4). Akka.Serialization.V2 1.6.0-beta4 depends on MessagePack 3.1.12, which fixes [GHSA-qhrr-8q5h-9q3h](https://github.com/advisories/GHSA-qhrr-8q5h-9q3h) in 3.1.8 ([#174](https://github.com/Aaronontheweb/akka-reminders/pull/174)).
-- Pinned `System.Security.Cryptography.Pkcs` to 9.0.21. `Microsoft.Data.SqlClient` 6.1.4 brought in 9.0.11, which has [GHSA-2fmv-rv2c-59x7](https://github.com/advisories/GHSA-2fmv-rv2c-59x7) (moderate) and [GHSA-846f-f764-76mx](https://github.com/advisories/GHSA-846f-f764-76mx) (high) ([#174](https://github.com/Aaronontheweb/akka-reminders/pull/174)).</PackageReleaseNotes>
+- Moved to Akka.NET 1.6.0-beta5 (Akka.Cluster.Hosting 1.6.0-beta5). Relevant fixes in this release: `ShardingProducerController` no longer throws `InvalidActorNameException` when a message arrives for an entity whose delivery child is still terminating ([akka.net #8869](https://github.com/akkadotnet/akka.net/pull/8869)), and `Dispose()` on the `ActorSystem`'s shared default materializer no longer shuts it down for every user of the system ([akka.net #8895](https://github.com/akkadotnet/akka.net/pull/8895)) ([#181](https://github.com/Aaronontheweb/akka-reminders/pull/181)).</PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Visual Studio C# settings -->
